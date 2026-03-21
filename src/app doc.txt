@@ -1,0 +1,121 @@
+# TERMS (Rental Operations Management System) - Technical Documentation
+
+## 1. Overview
+TERMS is a comprehensive Single Page Application (SPA) designed for managing rental operations in the event industry (Sound, Light, Video, etc.). It facilitates end-to-end management of projects, inventory, logistics, crew scheduling, and financial tracking.
+
+## 2. Technology Stack
+
+### Frontend
+*   **Framework**: React (Vite)
+*   **Styling**: Tailwind CSS
+*   **Icons**: `lucide-react`
+*   **Visualization**: `recharts` (Bar charts for revenue)
+
+### Backend & Database
+*   **Platform**: Google Firebase
+*   **Database**: Cloud Firestore (NoSQL)
+*   **Authentication**: Firebase Auth (Anonymous & Custom Token)
+*   **Analytics**: Firebase Analytics
+
+### Utilities
+*   **PDF Generation**: `jspdf`, `jspdf-autotable` (Challans, Job Sheets, Reports)
+*   **Excel Export**: `xlsx`
+*   **Date Handling**: Native JavaScript `Date` object with custom helpers.
+
+## 3. Architecture
+The application follows a component-based architecture contained primarily within `App.jsx`. It utilizes React Hooks (`useState`, `useEffect`, `useMemo`) for state management and side effects.
+
+*   **State Management**: Local component state lifted to the main `App` component for global data (projects, inventory, clients) which is then passed down as props.
+*   **Data Persistence**: Real-time data synchronization using Firestore `onSnapshot` listeners.
+*   **Routing**: Custom tab-based navigation state (`activeTab`) instead of client-side routing libraries (e.g., react-router), keeping the app lightweight.
+
+## 4. Data Model (Firestore Schema)
+All data is stored under the path: `artifacts/{appId}/public/data/{collectionName}`.
+
+### Collections
+
+1.  **`projects`**
+    *   **Purpose**: Stores event/project details.
+    *   **Key Fields**: `project_name`, `client_id`, `start_date`, `end_date`, `setup_date`, `venue`, `status` (Quoted, Confirmed, etc.), `items` (Array of allocated inventory), `assigned_employees`, `logistics_costs`, `challans` (Array), `invoice_status`.
+
+2.  **`inventory`**
+    *   **Purpose**: Equipment database.
+    *   **Key Fields**: `name`, `category`, `total` (Stock Qty), `rate_per_day`, `is_composite` (Boolean), `composition` (Array for kits), `is_external`, `vendor_id`.
+
+3.  **`clients`**
+    *   **Purpose**: CRM for Clients and Vendors.
+    *   **Key Fields**: `name`, `type` (Client/Vendor), `gstin`, `billing_terms`, `contacts`.
+
+4.  **`employees`**
+    *   **Purpose**: User profiles and access control.
+    *   **Key Fields**: `name`, `email`, `role` (admin, manager, tech, auditor), `password` (stored string), `is_locked`.
+
+5.  **`expenses`**
+    *   **Purpose**: Operational expense tracking.
+    *   **Key Fields**: `amount`, `category`, `project_id`, `employee_id`, `status` (Pending/Approved).
+
+6.  **`payments` / `payouts`**
+    *   **Purpose**: Financial transaction records.
+    *   **Key Fields**: `amount`, `date`, `mode`, `reference`, `client_id` / `employee_id`.
+
+7.  **`audit_logs`**
+    *   **Purpose**: Security and activity tracking.
+    *   **Key Fields**: `action`, `collection`, `performed_by`, `timestamp`, `details`.
+
+## 5. Key Modules & Features
+
+### A. Dashboard
+*   **Calendar View**: Custom implementation of a Gantt-style calendar showing project timelines and overlaps.
+*   **Metrics**: Real-time counters for active events, pending quotes, and revenue charts using `recharts`.
+
+### B. Project Management
+*   **Inventory Allocation**: Logic to check item availability based on date overlaps with other confirmed projects (`getAvailableQty`).
+*   **Challan System**:
+    *   Generates sequential Challan Numbers (e.g., `2024-25/0001`) using Firestore Transactions to prevent duplicates.
+    *   Supports **Delivery** and **Return** challans.
+    *   Tracks quantities sent vs. returned to prevent over-delivery.
+*   **Invoicing**: Tracks invoice status and dates directly on the project card.
+
+### C. Inventory Management
+*   **Composite Items (Kits)**: Allows defining items that consist of other items (e.g., a Camera Kit containing a Body and Lens).
+*   **External Items**: Flags items that are cross-hired from vendors.
+
+### D. Finance & Reports
+*   **Ledgers**: Generates running balance ledgers for Clients and Employees.
+*   **P&L**: Calculates Project Profit & Loss (Revenue - (Outsourcing + Direct Expenses)).
+*   **PDF Exports**: Generates professional-grade PDFs for Quotes, Challans, Job Sheets, and Pick Lists.
+
+## 6. Security & Roles
+
+The application implements Role-Based Access Control (RBAC) at the UI level:
+
+| Role | Permissions |
+| :--- | :--- |
+| **Admin** | Full access to all modules, settings, backups, and user management. |
+| **Manager** | Can create/edit projects, clients, inventory. Restricted from system settings and deleting critical logs. |
+| **Tech** | Read-only view of technical details (Job Sheets, Pick Lists). Financials (Rates, Totals) are hidden. |
+| **Auditor** | Read-only access to financial data and reports. |
+
+## 7. Deployment & Setup
+
+### Prerequisites
+*   Node.js (v16+)
+*   npm or yarn
+
+### Installation
+1.  Clone the repository.
+2.  Install dependencies:
+    ```bash
+    npm install
+    ```
+3.  Configure Firebase:
+    *   Ensure `firebaseConfig` in `App.jsx` matches your Firebase project settings.
+4.  Run locally:
+    ```bash
+    npm run dev
+    ```
+
+### Build
+To create a production build:
+```bash
+npm run build

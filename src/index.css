@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Inter font via CDN — loaded in index.html */
+@layer base {
+  * {
+    @apply border-slate-200;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-800 font-sans;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  input, select, textarea {
+    @apply bg-white border border-slate-200 rounded-lg text-slate-800 text-sm transition-colors duration-150;
+  }
+
+  input:focus, select:focus, textarea:focus {
+    @apply border-indigo-400 ring-2 ring-indigo-100 outline-none;
+  }
+
+  input[type="checkbox"], input[type="radio"] {
+    @apply border-slate-300 rounded text-indigo-600 focus:ring-indigo-500;
+  }
+
+  label {
+    @apply text-slate-700 font-medium text-sm;
+  }
+
+  /* Smooth scrollbars */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-slate-200 rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-slate-300; }
+}
+
+/* Corporate theme tokens */
+:root {
+  --corp-blue-50: #f0f7ff;
+  --corp-blue-100: #e0efff;
+  --corp-border: #e2e8f0;
+  --app-bg: #f8fafc;
+  --text-color: #1e293b;
+  --sidebar-width: 260px;
+}
+
+/* Placeholder color */
+::placeholder { color: #94a3b8 !important; }
+
+@layer utilities {
+  .glass {
+    @apply bg-white/80 backdrop-blur-lg border border-white/20;
+  }
+}
