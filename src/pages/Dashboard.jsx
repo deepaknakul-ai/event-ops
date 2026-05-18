@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
 } from 'recharts';
-import { AlertTriangle, AlertCircle, ChevronRight, Truck, CalendarDays, TrendingUp, Clock, FileText, DollarSign, MapPin, Shield } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Briefcase, ChevronRight, Truck, CalendarDays, TrendingUp, Clock, FileText, DollarSign, MapPin, Shield } from 'lucide-react';
 import { doc, getDoc, addDoc, updateDoc, collection } from 'firebase/firestore';
 import { STATUS_COLORS, LOCATION_TYPES } from '../utils/constants';
 import { formatCurrency, getProjectGrandTotal, getProjectNetTotal, getProjectGST, getLogHours, getDistance, fmtDate, getFinancialYear, getFYFromDate } from '../utils/helpers';
@@ -600,6 +600,68 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
           </div>
         )}
       </div>
+
+      {/* ===== MY WORK — visible to tech role only ===== */}
+      {role === 'tech' && (
+        <div className="space-y-4">
+          <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide flex items-center gap-2">
+            <Briefcase size={15} className="text-indigo-500" /> My Assignments
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* My Active Projects */}
+            <div className="rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden">
+              <div className="px-4 py-3 bg-indigo-50 border-b flex items-center gap-2">
+                <CalendarDays size={15} className="text-indigo-600" />
+                <span className="font-bold text-indigo-800 text-sm">Active Assignments ({myActiveProjects.length})</span>
+              </div>
+              {myActiveProjects.length === 0 ? (
+                <div className="p-6 text-center text-slate-400 text-sm">No active projects assigned to you.</div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {myActiveProjects.map(p => (
+                    <li key={p.id} className="px-4 py-3 hover:bg-slate-50 cursor-pointer" onClick={() => onProjectClick && onProjectClick(p.id)}>
+                      <div className="font-semibold text-sm text-slate-800">{p.project_name}</div>
+                      <div className="flex flex-wrap gap-x-3 mt-0.5 text-xs text-slate-500">
+                        {p.venue && <span><MapPin size={10} className="inline mr-0.5" />{p.venue}</span>}
+                        <span>{fmtDate(p.start_date)} → {fmtDate(p.end_date)}</span>
+                        <span className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] font-semibold ${STATUS_COLORS[p.status] || 'bg-slate-100 text-slate-700'}`}>{p.status}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* My Pending Expenses */}
+            <div className="rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden">
+              <div className="px-4 py-3 bg-rose-50 border-b flex items-center gap-2">
+                <FileText size={15} className="text-rose-600" />
+                <span className="font-bold text-rose-800 text-sm">My Expense Claims</span>
+              </div>
+              {(() => {
+                const myExpenses = expenses.filter(e => e.employee_id === currentEmpId).slice(0, 5);
+                if (myExpenses.length === 0) return <div className="p-6 text-center text-slate-400 text-sm">No expense claims found.</div>;
+                return (
+                  <ul className="divide-y divide-slate-100">
+                    {myExpenses.map(e => (
+                      <li key={e.id} className="px-4 py-3 flex items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-medium text-slate-800">{e.category || e.description || 'Expense'}</div>
+                          <div className="text-xs text-slate-400">{fmtDate(e.date)}{e.project_id && e.project_id !== 'general' ? ` · ${projects.find(p => p.id === e.project_id)?.project_name || ''}` : ''}</div>
+                        </div>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="font-bold text-sm text-slate-800">{formatCurrency(e.amount)}</span>
+                          <span className={`text-[10px] font-semibold rounded px-1.5 py-0 border ${e.status === 'Approved' ? 'bg-green-100 text-green-700 border-green-200' : e.status === 'Rejected' || e.status === 'Disapproved' ? 'bg-red-100 text-red-700 border-red-200' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>{e.status || 'Pending'}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
 
       {can(role, 'finance', 'view') && (
         <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-200">

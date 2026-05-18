@@ -12,7 +12,7 @@ import autoTable from 'jspdf-autotable';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import {
   formatCurrency, formatCurrencyPDF, fmtDate,
-  getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord
+  getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord, getProjectGrandTotal
 } from '../utils/helpers';
 import { generateBookInvoiceNumber } from '../utils/accounting';
 import { assertFYNotLocked } from '../utils/fyLock';
@@ -79,6 +79,7 @@ const TaxInvoices = ({
   const [search, setSearch]             = useState('');
   const [filterClient, setFilterClient] = useState('');
   const [filterFY, setFilterFY]         = useState('All');
+  const [activeTab, setActiveTab]       = useState('invoices');
   const [modalOpen, setModalOpen]       = useState(false);
   const [editingId, setEditingId]       = useState(null);
   const [saving, setSaving]             = useState(false);
@@ -191,6 +192,23 @@ const TaxInvoices = ({
   }, [taxInvoices]);
 
   const totalAmount = filtered.reduce((s, i) => s + (i.final_amount || 0), 0);
+
+  // ── Unbilled Projects ──────────────────────────────────────────────────────
+  const unbilledProjects = useMemo(() => {
+    return projects
+      .filter(p => (p.status === 'Completed' || p.status === 'Closed') &&
+                   p.invoice_status !== 'Invoiced' &&
+                   !p.tax_invoice_id)
+      .sort((a, b) => (a.end_date || '').localeCompare(b.end_date || ''));
+  }, [projects]);
+
+  const openCreateForProject = (project) => {
+    setEditingId(null);
+    setProjectSearch('');
+    setClientSearch('');
+    setForm({ ...initialForm, client_id: project.client_id, project_ids: [project.id] });
+    setModalOpen(true);
+  };
 
   // ── helpers ────────────────────────────────────────────────────────────────
   const getOrgSettings = async () => {
@@ -715,8 +733,93 @@ const TaxInvoices = ({
         )}
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap gap-2">
+      {activeTab === 'unbilled' ? (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+          {unbilledProjects.length === 0 ? (
+            <div className="text-center text-slate-400 py-12">
+              <CheckCircle size={36} className="mx-auto mb-2 text-green-400" />
+              <p className="font-semibold">All completed projects have been invoiced.</p>
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100 text-xs font-semibold text-slate-500 uppercase">
+                  <th className="px-4 py-3 text-left">Project</th>
+                  <th className="px-4 py-3 text-left">Client</th>
+                  <th className="px-4 py-3 text-left">Status</th>
+                  <th className="px-4 py-3 text-left">End Date</th>
+                  <th className="px-4 py-3 text-left">Overdue By</th>
+                  <th className="px-4 py-3 text-right">Value</th>
+                  <th className="px-4 py-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {unbilledProjects.map(p => {
+                  const client = clients.find(c => c.id === p.client_id);
+                  const daysSince = p.end_date ? Math.floor((Date.now() - new Date(p.end_date)) / 86400000) : null;
+                  return (
+                    <tr key={p.id} className="hover:bg-amber-50 transition-colors">
+                      <td className="px-4 py-3 font-medium text-slate-800">{p.project_name || p.name || p.id}</td>
+                      <td className="px-4 py-3 text-slate-600">{client?.name || '—'}</td>
+                      <td className="px-4 py-3">
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                          STATUS_COLORS[p.status] || 'bg-slate-100 text-slate-600'
+                        }`}>{p.status}</span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">{p.end_date ? fmtDate(p.end_date) : '—'}</td>
+                      <td className="px-4 py-3">
+                        {daysSince !== null && (
+                          <span className={`text-xs font-bold ${
+                            daysSince > 30 ? 'text-red-600' : daysSince > 14 ? 'text-amber-600' : 'text-slate-500'
+                          }`}>
+                            {daysSince} day{daysSince !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold text-slate-800">
+                        {formatCurrency(getProjectGrandTotal(p))}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => openCreateForProject(p)}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition ml-auto"
+                        >
+                          <Plus size={12} /> Create Invoice
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ) : (
+        <>
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-slate-200">
+        <button
+          onClick={() => setActiveTab('invoices')}
+          className={`px-4 py-2 text-sm font-semibold border-b-2 transition ${
+            activeTab === 'invoices' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Issued Invoices
+        </button>
+        {can(role, 'tax_invoices', 'create') && (
+          <button
+            onClick={() => setActiveTab('unbilled')}
+            className={`px-4 py-2 text-sm font-semibold border-b-2 transition flex items-center gap-2 ${
+              activeTab === 'unbilled' ? 'border-amber-500 text-amber-600' : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            Pending Invoices
+            {unbilledProjects.length > 0 && (
+              <span className="bg-amber-500 text-white text-xs rounded-full px-1.5 py-0.5 leading-none">{unbilledProjects.length}</span>
+            )}
+          </button>
+        )}
+      </div>
         <div className="relative flex-1 min-w-48">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
@@ -1069,7 +1172,10 @@ const TaxInvoices = ({
         </div>
       </Modal>
 
-      {/* Delete confirm */}
+        </> {/* end invoices tab */}
+      )} {/* end activeTab ternary */}
+
+      {/* Delete confirm — outside tab conditional so it works from either tab */}
       <ConfirmDeleteModal
         isOpen={deleteConfirm.isOpen}
         title="Delete Tax Invoice"

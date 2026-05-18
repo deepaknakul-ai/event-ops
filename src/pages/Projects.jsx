@@ -31,6 +31,7 @@ import { can } from '../utils/permissions';
 // Closed → Quoted, leaving stale invoice fields. Map below blocks invalid moves
 // and signals which transitions need invoice cleanup.
 const PROJECT_STATE_TRANSITIONS = {
+  Draft: ['Quoted', 'Cancelled'],
   Quoted: ['Confirmed', 'Cancelled'],
   Confirmed: ['Ongoing', 'Quoted', 'Cancelled'],
   Ongoing: ['Completed', 'Confirmed', 'Cancelled'],
@@ -154,6 +155,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     startDate: '', endDate: '', clientId: '', status: '', setupDate: '', invoiceStatus: ''
   });
   const [isDefaultFilter, setIsDefaultFilter] = useState(true);
+  const [myProjectsOnly, setMyProjectsOnly] = useState(role === 'tech');
   const [quickFilter, setQuickFilter] = useState('');
   // Bulk / Group Invoice state
   const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
@@ -409,7 +411,8 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             const pStart = new Date(p.start_date);
             const setupCondition = pSetup && pSetup >= last21 && pSetup <= today;
             const startCondition = pStart >= today && pStart <= next21;
-            return setupCondition || startCondition;
+            const inTeam = !myProjectsOnly || (p.assigned_employees || []).includes(currentEmpId);
+            return (setupCondition || startCondition) && inTeam;
         });
     }
     return projects.filter(p => {
@@ -448,9 +451,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
           }
       }
 
-      return matchesStart && matchesEnd && matchesSetup && matchesClient && matchesStatus && matchesInvoice && matchesQuick;
+      const matchesTeam = !myProjectsOnly || (p.assigned_employees || []).includes(currentEmpId);
+
+      return matchesStart && matchesEnd && matchesSetup && matchesClient && matchesStatus && matchesInvoice && matchesQuick && matchesTeam;
     });
-  }, [projects, filters, isDefaultFilter, quickFilter]);
+  }, [projects, filters, isDefaultFilter, quickFilter, myProjectsOnly, currentEmpId]);
 
   // --- Sorting Logic ---
   const sortedProjects = useMemo(() => {
@@ -570,7 +575,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setEditingId(null);
     setNewProj({ 
       project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '', 
-      venue: '', status: 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '', 
+      venue: '', status: role === 'user' ? 'Draft' : 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '', 
       items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18,
       party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''
     });
@@ -614,7 +619,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleSaveProject = async () => {
-    if (editingId ? !can(role, 'projects', 'edit') : !can(role, 'projects', 'create')) return addToast('Access denied: insufficient permissions.', 'error');
+    const isDraftCreate = !editingId && role === 'user' && can(role, 'projects', 'create_draft');
+    if (editingId ? !can(role, 'projects', 'edit') : (!can(role, 'projects', 'create') && !isDraftCreate)) return addToast('Access denied: insufficient permissions.', 'error');
+    if (isDraftCreate && newProj.status !== 'Draft') return addToast('Coordinators can only create Draft enquiries.', 'error');
     if(!newProj.client_id || !newProj.project_name) return addToast("Missing Client or Project Name", 'error');
     
     const selectedClient = clients.find(c => c.id === newProj.client_id);
@@ -4564,17 +4571,26 @@ const generateQuotationPDF = async () => {
     <div className="space-y-4">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h2 className="text-2xl font-bold text-slate-800">Projects</h2>
-          {(role === 'manager' || role === 'admin') && (
-            <div className="flex gap-2 w-full md:w-auto">
-                <button onClick={exportFilteredProjects} className="flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50 whitespace-nowrap w-full md:w-auto"><Download size={18} /> Export</button>
-                <button onClick={() => { setBulkInvoiceOpen(true); setBulkInvoiceSelected(new Set()); }} className="flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap w-full md:w-auto">
-                    <Receipt size={18} /> Group Invoice
-                </button>
+          <div className="flex gap-2 w-full md:w-auto">
+              {(role === 'manager' || role === 'admin') && (
+                <>
+                  <button onClick={exportFilteredProjects} className="flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50 whitespace-nowrap w-full md:w-auto"><Download size={18} /> Export</button>
+                  <button onClick={() => { setBulkInvoiceOpen(true); setBulkInvoiceSelected(new Set()); }} className="flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap w-full md:w-auto">
+                      <Receipt size={18} /> Group Invoice
+                  </button>
+                </>
+              )}
+              {can(role, 'projects', 'create') && (
                 <button onClick={openCreate} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap w-full md:w-auto">
                     <Plus size={18} /> Create New Quote
                 </button>
-            </div>
-          )}
+              )}
+              {!can(role, 'projects', 'create') && can(role, 'projects', 'create_draft') && (
+                <button onClick={openCreate} className="flex items-center justify-center gap-2 rounded-lg border border-slate-400 bg-slate-100 px-4 py-2 text-slate-700 hover:bg-slate-200 whitespace-nowrap w-full md:w-auto">
+                    <Plus size={18} /> New Enquiry (Draft)
+                </button>
+              )}
+          </div>
       </div>
 
       {/* --- Filter Bar with Invoice Status --- */}
@@ -4593,6 +4609,7 @@ const generateQuotationPDF = async () => {
             <label className="text-[10px] font-bold text-slate-700 uppercase">Status</label>
             <select className="w-full text-xs rounded border p-1 bg-slate-50 text-black" value={filters.status} onChange={e => handleFilterChange('status', e.target.value)}>
                 <option value="">All Status</option>
+                <option value="Draft">Draft</option>
                 <option value="Quoted">Quoted</option>
                 <option value="Confirmed">Confirmed</option>
                 <option value="Ongoing">Ongoing</option>
@@ -4630,7 +4647,18 @@ const generateQuotationPDF = async () => {
                 </button>
             </div>
          </div>
-         <div className="flex items-end">
+         <div className="flex items-end gap-1">
+            {role === 'tech' && (
+              <button
+                onClick={() => setMyProjectsOnly(v => !v)}
+                className={`w-full text-xs rounded border p-1.5 font-bold ${
+                  myProjectsOnly ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+                title={myProjectsOnly ? 'Showing your assigned projects. Click to show all.' : 'Showing all projects. Click to show only yours.'}
+              >
+                {myProjectsOnly ? 'My Projects' : 'All Projects'}
+              </button>
+            )}
             <button onClick={resetFilters} className={`w-full text-xs rounded border p-1.5 font-bold ${isDefaultFilter ? 'bg-indigo-100 text-indigo-700 border-indigo-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
                 {isDefaultFilter ? 'Default View' : 'Reset Filters'}
             </button>

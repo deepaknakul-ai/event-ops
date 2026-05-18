@@ -15,7 +15,7 @@ export const ROLE_LABELS = {
   accountant: 'Accountant',
   manager:    'Project Manager',
   tech:       'Field Tech',
-  user:       'General User',
+  user:       'Coordinator',
 };
 
 // ── All selectable roles (for employee form dropdown) ─────────────────────────
@@ -24,7 +24,7 @@ export const ROLE_OPTIONS = [
   { value: 'accountant', label: 'Accountant' },
   { value: 'manager',    label: 'Project Manager' },
   { value: 'tech',       label: 'Field Tech' },
-  { value: 'user',       label: 'General User' },
+  { value: 'user',       label: 'Coordinator' },
 ];
 
 // ── Role avatar color ─────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ export const ROLE_COLOR = {
 
 export const PERMISSIONS = {
   clients: {
-    view:   ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view:   ['admin', 'accountant', 'manager', 'user'],
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
@@ -58,6 +58,7 @@ export const PERMISSIONS = {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
     create:       ['admin', 'manager'],
+    create_draft: ['admin', 'manager', 'user'],
     edit:         ['admin', 'manager'],
     delete:       ['admin'],
     close:        ['admin'],
@@ -74,7 +75,7 @@ export const PERMISSIONS = {
   },
   finance: {
     view:   ['admin', 'accountant', 'manager'],
-    create: ['admin', 'accountant'],
+    create: ['admin', 'accountant', 'manager'],
     edit:   ['admin', 'accountant'],
     delete: ['admin', 'accountant'],
   },
@@ -89,10 +90,10 @@ export const PERMISSIONS = {
     manage_roles: ['admin'],              // only admin can change a user's role
   },
   outsourcing: {
-    view:        ['admin', 'accountant', 'manager', 'tech'],
+    view:        ['admin', 'accountant', 'manager'],
     view_amounts:['admin', 'accountant', 'manager'],
     create:      ['admin', 'manager'],
-    edit:        ['admin', 'manager'],
+    edit:         ['admin', 'manager'],
     delete:      ['admin'],
   },
   challans: {
@@ -189,7 +190,7 @@ export const PERMISSIONS = {
 // ── Human-readable resource definitions (used by RBACManager matrix) ─────────
 export const RESOURCE_DEFS = {
   clients:           { label: 'Clients & Vendors',   actions: ['view', 'create', 'edit', 'delete'] },
-  projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
+  projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
   reports:           { label: 'Reports',             actions: ['view'] },

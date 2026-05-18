@@ -12,6 +12,7 @@ export const GST_STATE_CODES = {
 };
 
 export const STATUS_COLORS = {
+  'Draft': 'bg-slate-100 text-slate-600 border-slate-300',
   'Quoted': 'bg-orange-100 text-orange-800 border-orange-200',
   'Confirmed': 'bg-green-100 text-green-800 border-green-200',
   'Cancelled': 'bg-gray-100 text-gray-800 border-gray-200',

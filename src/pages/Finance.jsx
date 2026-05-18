@@ -107,9 +107,17 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   };
 
   // --- Client Payment Logic ---
+  const handleApprovePayment = async (item) => {
+    if (!can(role, 'finance', 'edit')) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'payments', item.id), { status: 'Approved', approved_by: user.uid, approved_at: new Date().toISOString() });
+    logAction('payments', 'approve', item.id, item, `Approved on-site receipt from ${item.client_name}`);
+  };
+
   const handleClientPayment = async () => {
-    if (!can(role, 'finance', 'create')) return alert('Access denied: only Admin and Accountant can record payments.');
+    if (!can(role, 'finance', 'create')) return alert('Access denied: only Admin, Accountant and Manager can record payments.');
     if (!form.entity_id || !form.amount) return alert("Select Client and Amount");
+    if (role === 'manager' && !['Cash', 'UPI / Online'].includes(form.mode))
+      return alert('Managers can only record Cash or UPI / Online payments on-site.');
     if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
     const client = clients.find(c => c.id === form.entity_id);
     const companies = getEntityCompanies(client);
@@ -118,7 +126,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     const data = {
       client_id: client.id,
       client_name: client.name,
-      project_id: form.project_id || 'general', // General or Specific Project
+      project_id: form.project_id || 'general',
       party_company_id: selectedCompany?.id || '',
       party_company_name: selectedCompany?.name || '',
       party_company_gstin: selectedCompany?.gstin || '',
@@ -128,6 +136,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
       mode: form.mode,
       reference: form.reference,
       remarks: form.remarks,
+      status: role === 'manager' ? 'Pending Review' : 'Approved',
+      recorded_by_role: role,
       updated_at: new Date().toISOString()
     };
 
@@ -330,8 +340,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
         <h2 className="text-2xl font-bold text-slate-800">Finance & Payments</h2>
         <div className="flex bg-white rounded-lg border p-1">
           <button onClick={() => handleTabChange('client_in')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'client_in' ? 'bg-green-100 text-green-700' : 'text-slate-600 hover:bg-slate-50'}`}>Receive Payment (In)</button>
-          <button onClick={() => handleTabChange('emp_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'emp_out' ? 'bg-red-100 text-red-700' : 'text-slate-600 hover:bg-slate-50'}`}>Employee Payout</button>
-          <button onClick={() => handleTabChange('vendor_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'vendor_out' ? 'bg-orange-100 text-orange-700' : 'text-slate-600 hover:bg-slate-50'}`}>Pay Vendor (Out)</button>
+          {role !== 'manager' && <button onClick={() => handleTabChange('emp_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'emp_out' ? 'bg-red-100 text-red-700' : 'text-slate-600 hover:bg-slate-50'}`}>Employee Payout</button>}
+          {role !== 'manager' && <button onClick={() => handleTabChange('vendor_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'vendor_out' ? 'bg-orange-100 text-orange-700' : 'text-slate-600 hover:bg-slate-50'}`}>Pay Vendor (Out)</button>}
         </div>
       </div>
 
@@ -449,8 +459,13 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
               <div>
                 <label className="text-xs font-bold text-slate-700 uppercase">Payment Mode</label>
                 <select className="w-full rounded border p-2 text-black" value={form.mode} onChange={e => setForm({...form, mode: e.target.value})}>
-                  <option>Bank Transfer</option><option>Cash</option><option>Cheque</option><option>UPI / Online</option>
+                  {role === 'manager' ? (
+                    <><option>Cash</option><option>UPI / Online</option></>
+                  ) : (
+                    <><option>Bank Transfer</option><option>Cash</option><option>Cheque</option><option>UPI / Online</option></>
+                  )}
                 </select>
+                {role === 'manager' && <p className="text-[10px] text-amber-600 mt-1">On-site receipts limited to Cash / UPI. Bank Transfer & Cheque must be recorded by Accountant.</p>}
               </div>
 
               <div>
@@ -596,13 +611,19 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                        <td className="p-3 text-slate-500 text-xs">{item.reference || '-'}</td>
                        <td className={`p-3 text-right font-bold ${activeTab === 'client_in' ? 'text-green-600' : activeTab === 'vendor_out' ? 'text-orange-600' : 'text-red-600'}`}>
                          {formatCurrency(item.amount)}
+                         {item.status === 'Pending Review' && (
+                           <span className="ml-2 text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5">Pending Review</span>
+                         )}
                        </td>
                        <td className="p-3 text-center flex justify-center gap-2">
                            {rowLocked ? (
                              <Lock size={14} className="text-red-400" title="FY Locked" />
                            ) : (
                              <>
-                               {can(role,'finance','edit') && <button onClick={() => handleEdit(item)} className="text-blue-600 hover:bg-blue-50 p-1 rounded"><Edit size={14}/></button>}
+                               {item.status === 'Pending Review' && can(role,'finance','edit') && (
+                                 <button onClick={() => handleApprovePayment(item)} className="text-xs bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700 font-semibold">Approve</button>
+                               )}
+                               {can(role,'finance','edit') && item.status !== 'Pending Review' && <button onClick={() => handleEdit(item)} className="text-blue-600 hover:bg-blue-50 p-1 rounded"><Edit size={14}/></button>}
                                {can(role,'finance','delete') && <button onClick={() => handleDelete(item)} className="text-red-600 hover:bg-red-50 p-1 rounded"><Trash2 size={14}/></button>}
                              </>
                            )}
