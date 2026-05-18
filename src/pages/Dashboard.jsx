@@ -72,7 +72,8 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
     const dayKey = (d) => (d ? String(d).slice(0, 10) : '');
     return projects.filter(p => {
       if (!['Confirmed', 'Ongoing'].includes(p.status)) return false;
-      if (!(p.assigned_employees || []).includes(currentEmpId)) return false;
+      // Coordinators (user role) can check in at any active project site
+      if (role !== 'user' && !(p.assigned_employees || []).includes(currentEmpId)) return false;
       // Window spans from setup_date (if any) or start_date through end_date.
       // Allow a 1-day grace on either side so staff can check in on travel/teardown days.
       const startKey = dayKey(p.setup_date || p.start_date);
@@ -84,7 +85,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
       };
       return addDays(startKey, -1) <= today && today <= addDays(endKey, 1);
     });
-  }, [projects, currentEmpId]);
+  }, [projects, currentEmpId, role]);
 
   const getGPS = () => new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('Geolocation not supported'));
@@ -109,10 +110,13 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
     if (checkInLocation === 'Site' && !checkInProject) return addToast?.('Please select a project for site attendance.', 'error');
     setGpsLoading(true); setGpsError('');
     try {
-      const gps = await getGPS();
+      let gps = null;
+      try { gps = await getGPS(); } catch (gpsErr) {
+        addToast?.('GPS unavailable — check-in recorded without location.', 'warning');
+      }
       const now = new Date().toISOString();
-      let geofenceVerified = true, geoPenaltyMinutes = 0;
-      if (checkInLocation === 'HQ' && hqSettings.lat && hqSettings.lng) {
+      let geofenceVerified = gps !== null, geoPenaltyMinutes = 0;
+      if (gps && checkInLocation === 'HQ' && hqSettings.lat && hqSettings.lng) {
         const dist = getDistance(gps.lat, gps.lng, hqSettings.lat, hqSettings.lng);
         if (dist > (hqSettings.geoRadiusMeters || 400)) {
           if (hqSettings.strictMode) { setGpsLoading(false); return addToast?.(`You are ${Math.round(dist)}m from HQ. Check-in blocked.`, 'error'); }
@@ -145,7 +149,10 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
     if (!activeShift) return;
     setGpsLoading(true); setGpsError('');
     try {
-      const gps = await getGPS();
+      let gps = null;
+      try { gps = await getGPS(); } catch (gpsErr) {
+        addToast?.('GPS unavailable — check-out recorded without location.', 'warning');
+      }
       const now = new Date().toISOString();
       const hrs = getLogHours({ ...activeShift, checkOut: now });
       const maxHrs = hqSettings.maxShiftHours || 0;

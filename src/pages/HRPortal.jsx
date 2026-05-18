@@ -4,7 +4,7 @@ import { addDoc, updateDoc, doc, collection } from 'firebase/firestore';
 import { getLogHours, getDistance, calculateLeaveBalance } from '../utils/helpers';
 import { LEAVE_TYPES, LEAVE_ENTITLEMENTS, LOCATION_TYPES } from '../utils/constants';
 
-const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests = [], penalties = [], hqSettings = {}, projects = [], currentEmpId, db, appId, logAction, addToast }) => {
+const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests = [], penalties = [], hqSettings = {}, projects = [], role = '', currentEmpId, db, appId, logAction, addToast }) => {
   const [tab, setTab] = useState(0);
   const [checkInLocation, setCheckInLocation] = useState('HQ');
   const [checkInProject, setCheckInProject] = useState('');
@@ -29,7 +29,8 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
     };
     return projects.filter(p => {
       if (!['Confirmed', 'Ongoing'].includes(p.status)) return false;
-      if (!(p.assigned_employees || []).includes(currentEmpId)) return false;
+      // Coordinators (user role) can select any active project for site check-in
+      if (role !== 'user' && !(p.assigned_employees || []).includes(currentEmpId)) return false;
       // Window spans from setup_date (if any) or start_date through end_date,
       // with a 1-day grace on either side for travel/teardown days.
       const startKey = dayKey(p.setup_date || p.start_date);
@@ -37,7 +38,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
       if (!startKey || !endKey) return true;
       return addDays(startKey, -1) <= today && today <= addDays(endKey, 1);
     });
-  }, [projects, currentEmpId]);
+  }, [projects, currentEmpId, role]);
 
   // My time logs
   const myLogs = useMemo(() => timeLogs.filter(l => l.employeeId === currentEmpId).sort((a, b) => new Date(b.checkIn || 0) - new Date(a.checkIn || 0)), [timeLogs, currentEmpId]);
@@ -81,14 +82,17 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
     setGpsLoading(true);
     setGpsError('');
     try {
-      const gps = await getGPS();
+      let gps = null;
+      try { gps = await getGPS(); } catch (gpsErr) {
+        addToast('GPS unavailable — check-in recorded without location.', 'warning');
+      }
       const now = new Date().toISOString();
 
-      let geofenceVerified = true;
+      let geofenceVerified = gps !== null;
       let geoPenaltyMinutes = 0;
 
       // HQ geofence check
-      if (checkInLocation === 'HQ' && hqSettings.lat && hqSettings.lng) {
+      if (gps && checkInLocation === 'HQ' && hqSettings.lat && hqSettings.lng) {
         const dist = getDistance(gps.lat, gps.lng, hqSettings.lat, hqSettings.lng);
         if (dist > (hqSettings.geoRadiusMeters || 400)) {
           if (hqSettings.strictMode) {
@@ -150,7 +154,10 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
     setGpsLoading(true);
     setGpsError('');
     try {
-      const gps = await getGPS();
+      let gps = null;
+      try { gps = await getGPS(); } catch (gpsErr) {
+        addToast('GPS unavailable — check-out recorded without location.', 'warning');
+      }
       const now = new Date().toISOString();
       const ref = doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', activeShift.id);
       await updateDoc(ref, { checkOut: now, gpsCheckOut: gps });

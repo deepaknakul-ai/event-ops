@@ -820,6 +820,8 @@ const TaxInvoices = ({
           </button>
         )}
       </div>
+      {/* Filter bar */}
+      <div className="flex flex-wrap gap-3 items-center">
         <div className="relative flex-1 min-w-48">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
@@ -1172,8 +1174,8 @@ const TaxInvoices = ({
         </div>
       </Modal>
 
-        </> {/* end invoices tab */}
-      )} {/* end activeTab ternary */}
+      </> /* end invoices tab */
+      )} /* end activeTab ternary */
 
       {/* Delete confirm — outside tab conditional so it works from either tab */}
       <ConfirmDeleteModal
