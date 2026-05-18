@@ -52,31 +52,41 @@ const PublicLedger = () => {
         const clientDoc = clientSnap.docs[0];
         const clientData = { id: clientDoc.id, ...clientDoc.data() };
 
-        const [projectsSnap, paymentsSnap, vendorPaymentsSnap, orgSnap, purchaseInvoicesSnap] = await Promise.all([
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'projects')),
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'payments')),
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments')),
-          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization')),
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'))
-        ]);
-
-        if (!isMounted) return;
+        // Validate token state BEFORE fetching any other data.
         if (clientData.ledger_link_enabled === false) {
-          setClient(null);
-          setError('This ledger link has been disabled.');
-          setLoading(false);
+          if (isMounted) {
+            setClient(null);
+            setError('This ledger link has been disabled.');
+            setLoading(false);
+          }
           return;
         }
 
         if (clientData.ledger_link_expires_at) {
           const expiresAt = new Date(clientData.ledger_link_expires_at);
           if (Number.isNaN(expiresAt.getTime()) || expiresAt < new Date()) {
-            setClient(null);
-            setError('This ledger link has expired.');
-            setLoading(false);
+            if (isMounted) {
+              setClient(null);
+              setError('This ledger link has expired.');
+              setLoading(false);
+            }
             return;
           }
         }
+
+        // Fetch only data belonging to this specific client — never full collections.
+        // This prevents other clients' data from appearing in the network payload.
+        const cid = clientData.id;
+        const col = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
+        const [projectsSnap, paymentsSnap, vendorPaymentsSnap, orgSnap, purchaseInvoicesSnap] = await Promise.all([
+          getDocs(query(col('projects'),          where('client_id',  '==', cid))),
+          getDocs(query(col('payments'),          where('client_id',  '==', cid))),
+          getDocs(query(col('vendor_payments'),   where('vendor_id',  '==', cid))),
+          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization')),
+          getDocs(query(col('purchase_invoices'), where('vendor_id',  '==', cid)))
+        ]);
+
+        if (!isMounted) return;
 
         setClient(clientData);
         setProjects(projectsSnap.docs.map(d => ({ id: d.id, ...d.data() })));

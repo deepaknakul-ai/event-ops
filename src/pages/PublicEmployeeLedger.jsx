@@ -67,24 +67,20 @@ const PublicEmployeeLedger = () => {
           }
         }
 
-        // Fetch payouts, advances, and org settings
+        // Fetch payouts, advances, and org settings — filtered to this employee only.
+        const eid = empData.id;
+        const col = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
         const [payoutsSnap, advancesSnap, orgSnap] = await Promise.all([
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'payouts')),
-          getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'advances')),
+          getDocs(query(col('payouts'),   where('employee_id', '==', eid))),
+          getDocs(query(col('advances'),  where('employee_id', '==', eid))),
           getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
         ]);
 
         if (!isMounted) return;
 
         setEmployee(empData);
-        setPayouts(payoutsSnap.docs
-          .map(d => ({ id: d.id, ...d.data() }))
-          .filter(p => p.employee_id === empData.id)
-        );
-        setAdvances(advancesSnap.docs
-          .map(d => ({ id: d.id, ...d.data() }))
-          .filter(a => String(a.employee_id) === String(empData.id))
-        );
+        setPayouts(payoutsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setAdvances(advancesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
         setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
       } catch (err) {
         console.error('Employee statement load failed:', err);
