@@ -1,0 +1,304 @@
+﻿# 🔧 CRITICAL FIX: Projects Not Showing in Sales Books
+
+## ❌ **Problem**
+
+Projects were NOT appearing in the Invoiced or Non-Invoiced Sales Books in the Accounting module, even though the logic was implemented.
+
+## 🔍 **Root Cause**
+
+**App.jsx was NOT passing the `projects` prop to the Accounting component!**
+
+### **Evidence**
+
+**File**: `src/App.jsx` (Line 3555)
+
+**BEFORE (BROKEN)**:
+```javascript
+<Route path="/accounting" element={
+  <ProtectedRoute role={effectiveRole} resource="finance">
+    <Accounting 
+      clients={clients} 
+      taxInvoices={taxInvoicesList} 
+      purchaseInvoices={purchaseInvoicesList} 
+      payments={payments} 
+      vendorPayments={vendorPayments} 
+      payouts={payouts} 
+      expenses={expenses} 
+      advances={advances} 
+      chartOfAccounts={chartOfAccounts} 
+      manualJournalEntries={journalEntries} 
+      openingBalances={openingBalances} 
+      fiscalYearClosings={fiscalYearClosings} 
+      db={db} 
+      appId={appId} 
+      role={effectiveRole} 
+      user={user} 
+      logAction={logAction} 
+      addToast={addToast} 
+      // ❌ MISSING: projects={projects}
+    />
+  </ProtectedRoute>
+} />
+```
+
+**Comparison with Other Routes**:
+- ✅ Line 3554 (`/finance`) → Has `projects={projects}`
+- ❌ Line 3555 (`/accounting`) → **MISSING** `projects={projects}`
+- ✅ Line 3556 (`/reports`) → Has `projects={projects}`
+
+---
+
+## ✅ **Fix Applied**
+
+**AFTER (FIXED)**:
+```javascript
+<Route path="/accounting" element={
+  <ProtectedRoute role={effectiveRole} resource="finance">
+    <Accounting 
+      clients={clients} 
+      projects={projects}  // ← ADDED THIS!
+      taxInvoices={taxInvoicesList} 
+      purchaseInvoices={purchaseInvoicesList} 
+      payments={payments} 
+      vendorPayments={vendorPayments} 
+      payouts={payouts} 
+      expenses={expenses} 
+      advances={advances} 
+      chartOfAccounts={chartOfAccounts} 
+      manualJournalEntries={journalEntries} 
+      openingBalances={openingBalances} 
+      fiscalYearClosings={fiscalYearClosings} 
+      db={db} 
+      appId={appId} 
+      role={effectiveRole} 
+      user={user} 
+      logAction={logAction} 
+      addToast={addToast} 
+    />
+  </ProtectedRoute>
+} />
+```
+
+---
+
+## 🎯 **What Changed**
+
+### **Single Line Change**
+
+**File**: `src/App.jsx`  
+**Line**: 3555  
+**Change**: Added `projects={projects}` after `clients={clients}`
+
+```diff
+<Route path="/accounting" element={<ProtectedRoute role={effectiveRole} resource="finance">
+  <Accounting 
+    clients={clients} 
++   projects={projects}
+    taxInvoices={taxInvoicesList} 
+    ...
+  />
+</ProtectedRoute>} />
+```
+
+---
+
+## 🧪 **How to Test the Fix**
+
+### **Step 1: Restart Development Server**
+
+```bash
+# Stop current dev server (Ctrl+C)
+npm run dev
+```
+
+### **Step 2: Open Accounting Module**
+
+1. Navigate to **Accounting** in the sidebar
+2. Click **Non-Invoiced Sales** tab
+
+### **Step 3: Verify Projects Appear**
+
+**Expected Result**:
+```
+NON-INVOICED SALES BOOK
+┌──────────┬─────────────────────────┬──────────────┬────────────────┬──────────┐
+│ Date     │ Project Name            │ Client       │ Status         │ Total    │
+├──────────┼─────────────────────────┼──────────────┼────────────────┼──────────┤
+│ 01/15/24 │ Wedding Event - Taj     │ ABC Events   │ Pending Invoice│ 1,00,000 │
+│ 01/18/24 │ Corporate Conf - Leela  │ XYZ Corp     │ Pending Invoice│   50,000 │
+└──────────┴─────────────────────────┴──────────────┴────────────────┴──────────┘
+```
+
+**If you see your completed projects** → ✅ **FIX SUCCESSFUL!**
+
+**If you see "No non-invoiced sales"** → Check:
+1. Do you have projects with status "Completed" or "Closed"?
+2. Do those projects have `end_date` or `completion_date` field?
+3. Do those projects already have tax invoices?
+
+---
+
+## 📊 **Expected Behavior After Fix**
+
+### **1. Non-Invoiced Sales Book**
+
+Shows all completed projects **without** tax invoices:
+- ✅ Project name displayed (not invoice number)
+- ✅ Revenue calculated from items + logistics
+- ✅ Status: "Pending Invoice"
+- ✅ Automatically appears when project status = "Completed"
+
+### **2. Invoiced Sales Book**
+
+Shows all tax invoices:
+- ✅ Invoice number displayed
+- ✅ Invoice date, client, amounts
+- ✅ Payment mode (Cash/Credit)
+
+### **3. Automatic Movement**
+
+When you create a tax invoice for a project:
+- ✅ Project **removed** from Non-Invoiced Sales
+- ✅ Invoice **added** to Invoiced Sales
+- ✅ No manual journal entry needed
+
+---
+
+## 🔄 **Complete Data Flow (Now Working)**
+
+```
+1. PROJECT COMPLETION
+   ↓
+   User marks project status = "Completed"
+   ↓
+   
+2. AUTOMATIC DETECTION
+   ↓
+   App.jsx passes projects={projects} to <Accounting />
+   ↓
+   Accounting.jsx passes projects to buildAccountingSnapshot()
+   ↓
+   
+3. NON-INVOICED SALES BOOK BUILT
+   ↓
+   accounting.js filters:
+     - status === 'Completed' OR 'Closed'
+     - No tax invoice with matching project_id
+     - Has end_date or completion_date
+   ↓
+   
+4. PROJECT APPEARS IN UI
+   ↓
+   Accounting → Non-Invoiced Sales tab
+   Shows: Project name, client, revenue, "Pending Invoice"
+   ↓
+   
+5. USER CREATES INVOICE
+   ↓
+   Tax Invoice created with project_id
+   ↓
+   
+6. AUTOMATIC MOVEMENT
+   ↓
+   Project excluded from Non-Invoiced Sales (filter logic)
+   Invoice appears in Invoiced Sales
+```
+
+---
+
+## ✅ **Files Modified**
+
+1. **`src/App.jsx`**
+   - Line 3555: Added `projects={projects}` prop
+
+**Total Changes**: 1 file, 1 line
+
+---
+
+## 🎉 **Success Criteria**
+
+After restarting the dev server, verify:
+
+- [ ] Non-Invoiced Sales tab shows completed projects without invoices
+- [ ] Invoiced Sales tab shows tax invoices
+- [ ] Creating invoice for a project moves it from Non-Invoiced to Invoiced
+- [ ] P&L shows both "Sales Revenue" and "Non-Invoiced Sales Revenue"
+- [ ] Trial Balance is balanced
+- [ ] No console errors
+
+---
+
+## 📝 **Additional Notes**
+
+### **Why This Happened**
+
+When implementing the dual sales book system:
+1. ✅ Added logic to `buildAccountingSnapshot()` in `accounting.js`
+2. ✅ Updated `Accounting.jsx` component to accept `projects` prop
+3. ❌ **FORGOT** to pass `projects` from `App.jsx` to `<Accounting />`
+
+This is a common mistake when adding new props to deeply nested components.
+
+### **How to Avoid in Future**
+
+When adding a new prop to a component:
+1. Update component signature (function parameters)
+2. Update component usage in parent (pass the prop)
+3. Verify prop is actually received (console.log or React DevTools)
+
+---
+
+## 🚀 **Next Steps**
+
+1. **Restart Dev Server**: `npm run dev`
+2. **Test Non-Invoiced Sales**: Go to Accounting → Non-Invoiced Sales
+3. **Verify Projects Appear**: Check completed projects are listed
+4. **Test Invoice Creation**: Create invoice, verify movement
+5. **Check Reports**: Verify P&L shows both revenue types
+
+---
+
+**Status**: ✅ **FIXED**  
+**Testing Required**: Yes (verify with your actual data)  
+**Deployment Ready**: After testing confirms it works
+
+---
+
+## 📞 **Troubleshooting**
+
+### **Still Not Showing?**
+
+**Check 1: Projects Data Structure**
+```javascript
+// In browser console:
+console.log('Projects:', projects);
+
+// Each project should have:
+{
+  id: 'PROJ_001',
+  status: 'Completed',  // or 'Closed'
+  end_date: '2024-01-15',  // OR completion_date
+  client_id: 'CLIENT_123',
+  items: [...],
+  // ... other fields
+}
+```
+
+**Check 2: FY Filter**
+```
+- Make sure FY filter is set to "All FY" or the correct FY
+- Projects must be within selected FY range
+```
+
+**Check 3: Tax Invoices**
+```javascript
+// Check if project already has invoice:
+console.log('Tax Invoices:', taxInvoices);
+// Look for invoices with project_id matching your project
+```
+
+---
+
+**Document Version**: 1.0  
+**Date**: 2024  
+**Fix Verified**: Pending user testing

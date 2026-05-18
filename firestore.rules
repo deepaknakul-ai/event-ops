@@ -1,0 +1,162 @@
+rules_version = '2';
+
+// Rental-Ops Firestore rules (Phase 5).
+// Deploy with:  firebase deploy --only firestore:rules
+//
+// Scope:
+//   - All app data lives under /artifacts/{appId}/public/data/{collection}/{doc}
+//   - Role-based access is enforced by looking up the employee doc for the
+//     authenticated user and reading the "role" field.
+//   - Roles recognised: admin, manager, tech.  Finance-sensitive collections
+//     require admin OR manager.  Everything else requires an authenticated
+//     user with a role record.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helpers --------------------------------------------------------------
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    function userEmpId() {
+      return request.auth.uid;
+    }
+
+    // C-4: Role lookup goes through /users/{uid} mirror written on login.
+    // Falls back to legacy /employees/{uid} for backwards compat during the
+    // migration window.
+    function userRole(appId) {
+      return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(userEmpId()))
+        ? get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(userEmpId())).data.role
+        : get(/databases/$(database)/documents/artifacts/$(appId)/public/data/employees/$(userEmpId())).data.role;
+    }
+
+    function hasRole(appId, role) {
+      return isAuthed() && userRole(appId) == role;
+    }
+
+    function hasAnyRole(appId, roles) {
+      return isAuthed() && (userRole(appId) in roles);
+    }
+
+    function isFinanceWriter(appId) {
+      return hasAnyRole(appId, ['admin', 'manager']);
+    }
+
+    function isAdmin(appId) {
+      return hasRole(appId, 'admin');
+    }
+
+    // Default deny for anything outside /artifacts -----------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // App registry doc consumed by Cloud Functions cron. Any authed user can
+    // append their appId; nobody can read (the function uses admin SDK).
+    match /meta/active_apps {
+      allow read: if false;
+      allow create, update: if isAuthed();
+      allow delete: if false;
+    }
+
+    // App-scoped data ----------------------------------------------------------
+    match /artifacts/{appId}/public/data/{collection}/{docId} {
+
+      // Finance-sensitive write surfaces: Phase 4 additions + existing finance
+      // collections.  Reads stay open to any authenticated user so dashboards
+      // work for all roles.
+      allow read: if isAuthed();
+
+      // Restricted write: only admin/manager can create/update/delete.
+      // Extra guard on journal_drafts — approval fields (approval_status /
+      // approved_by / approved_at / rejection_reason) may be set or modified
+      // ONLY by admin. Managers can still create drafts (must start as
+      // approval_status='pending' with no approver stamps) and edit other
+      // fields on existing drafts, but cannot self-approve.
+      allow create, update: if (
+        collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
+                       'journal_entries', 'journal_drafts', 'journal_templates',
+                       'chart_of_accounts',
+                       'opening_balances', 'fiscal_year_closings',
+                       'payments', 'payouts', 'vendor_payments',
+                       'tax_invoices', 'purchase_invoices']
+      ) ? (
+          isFinanceWriter(appId) && (
+            collection != 'journal_drafts'
+            || isAdmin(appId)
+            // CREATE path (no prior doc): managers must leave approval fields
+            // unset or set only to the pending defaults. No approver stamps.
+            || (resource == null
+                && (!('approval_status' in request.resource.data) ||
+                    request.resource.data.approval_status == 'pending' ||
+                    request.resource.data.approval_status == null)
+                && (!('approved_by' in request.resource.data) ||
+                    request.resource.data.approved_by == null)
+                && (!('approved_at' in request.resource.data) ||
+                    request.resource.data.approved_at == null)
+                && (!('rejection_reason' in request.resource.data) ||
+                    request.resource.data.rejection_reason == null))
+            // UPDATE path: approval fields must not be in the diff.
+            || (resource != null
+                && !request.resource.data.diff(resource.data).affectedKeys()
+                    .hasAny(['approval_status', 'approved_by',
+                             'approved_at', 'rejection_reason']))
+          )
+        ) : isAuthed();
+
+      // Destructive deletes are admin-only on finance collections; other
+      // collections stay open to admin/manager to delete their own records.
+      allow delete: if (
+        collection in ['journal_entries', 'reconcile_matches',
+                       'recurring_rules', 'fiscal_year_closings',
+                       'opening_balances', 'chart_of_accounts']
+      ) ? isAdmin(appId)
+        : (collection in ['reconcile_sessions', 'journal_drafts', 'journal_templates']) ? isFinanceWriter(appId)
+        : isFinanceWriter(appId);
+    }
+
+    // Audit logs are append-only for everyone authenticated; nobody can edit or
+    // delete (including admin) to preserve the trail.
+    match /artifacts/{appId}/public/data/audit_logs/{docId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update, delete: if false;
+    }
+
+    // H-3: inventory_movements is an append-only mirror of challan saves.
+    // Any authenticated writer (admin/manager via app flow) can append; nobody
+    // can edit or delete entries — the trail must remain truthful.
+    match /artifacts/{appId}/public/data/inventory_movements/{docId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed();
+      allow update, delete: if false;
+    }
+
+    // Settings docs ------------------------------------------------------------
+    match /artifacts/{appId}/public/data/settings/{docId} {
+      allow read: if isAuthed();
+      allow write: if isAdmin(appId);
+    }
+
+    // Employees collection: anyone authed can read, only admin can write (for
+    // role management).  A user may update their own non-role fields.
+    match /artifacts/{appId}/public/data/employees/{empId} {
+      allow read: if isAuthed();
+      allow create, delete: if isAdmin(appId);
+      allow update: if isAdmin(appId) ||
+                    (isAuthed() && empId == userEmpId() &&
+                     !('role' in request.resource.data.diff(resource.data).affectedKeys()));
+    }
+
+    // C-4: Auth mirror.  Each authenticated Firebase Auth user owns a doc at
+    // /users/{uid} that records their role + employee_id, used by userRole().
+    // The user can read/write their own mirror; admins can manage all.
+    match /artifacts/{appId}/public/data/users/{uid} {
+      allow read: if isAuthed() && (uid == userEmpId() || isAdmin(appId));
+      allow create, update: if isAuthed() && uid == userEmpId();
+      allow delete: if isAdmin(appId);
+    }
+  }
+}

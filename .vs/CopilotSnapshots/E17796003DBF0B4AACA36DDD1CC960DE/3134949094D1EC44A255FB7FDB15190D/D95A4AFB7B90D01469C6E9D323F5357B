@@ -1,0 +1,650 @@
+﻿import React, { useState, useMemo } from 'react';
+import { X, Sparkles, BookOpen, AlertCircle, CheckCircle, Lightbulb, Copy, TrendingUp, Calculator } from 'lucide-react';
+import { formatCurrency } from '../utils/helpers';
+
+// Common accounting transaction templates
+const TRANSACTION_TEMPLATES = [
+  {
+    id: 'cash_sale',
+    category: 'Sales',
+    name: 'Cash Sales',
+    description: 'Record immediate cash sales',
+    debit: 'Cash',
+    credit: 'Sales Revenue',
+    tags: ['revenue', 'cash', 'income'],
+    example: 'Recording ₹10,000 cash sales for the day',
+  },
+  {
+    id: 'credit_sale',
+    category: 'Sales',
+    name: 'Credit Sales',
+    description: 'Record sales on credit',
+    debit: 'Accounts Receivable',
+    credit: 'Sales Revenue',
+    tags: ['revenue', 'receivables', 'income'],
+    example: 'Recording ₹50,000 invoice to customer',
+  },
+  {
+    id: 'cash_purchase',
+    category: 'Purchase',
+    name: 'Cash Purchase',
+    description: 'Record immediate cash purchases',
+    debit: 'Purchase Expense',
+    credit: 'Cash',
+    tags: ['expense', 'cash', 'purchase'],
+    example: 'Buying equipment for ₹25,000 cash',
+  },
+  {
+    id: 'credit_purchase',
+    category: 'Purchase',
+    name: 'Credit Purchase',
+    description: 'Record purchases on credit',
+    debit: 'Purchase Expense',
+    credit: 'Accounts Payable',
+    tags: ['expense', 'payables', 'purchase'],
+    example: 'Purchasing inventory worth ₹100,000 on credit',
+  },
+  {
+    id: 'receive_payment',
+    category: 'Receipts',
+    name: 'Receive Payment',
+    description: 'Record customer payment received',
+    debit: 'Cash',
+    credit: 'Accounts Receivable',
+    tags: ['cash', 'receivables', 'receipt'],
+    example: 'Customer paid ₹30,000 against invoice',
+  },
+  {
+    id: 'make_payment',
+    category: 'Payments',
+    name: 'Make Payment',
+    description: 'Record payment to vendor',
+    debit: 'Accounts Payable',
+    credit: 'Cash',
+    tags: ['cash', 'payables', 'payment'],
+    example: 'Paid ₹40,000 to vendor',
+  },
+  {
+    id: 'salary_payment',
+    category: 'Expenses',
+    name: 'Salary Payment',
+    description: 'Record employee salary disbursement',
+    debit: 'Salary Expense',
+    credit: 'Cash',
+    tags: ['expense', 'cash', 'salary', 'payroll'],
+    example: 'Paid ₹75,000 monthly salaries',
+  },
+  {
+    id: 'rent_payment',
+    category: 'Expenses',
+    name: 'Rent Payment',
+    description: 'Record rent expense',
+    debit: 'Rent Expense',
+    credit: 'Cash',
+    tags: ['expense', 'cash', 'rent', 'overhead'],
+    example: 'Paid ₹20,000 monthly rent',
+  },
+  {
+    id: 'utility_payment',
+    category: 'Expenses',
+    name: 'Utility Payment',
+    description: 'Record utility bills payment',
+    debit: 'Utilities Expense',
+    credit: 'Cash',
+    tags: ['expense', 'cash', 'utilities', 'overhead'],
+    example: 'Paid ₹5,000 electricity bill',
+  },
+  {
+    id: 'bank_deposit',
+    category: 'Banking',
+    name: 'Bank Deposit',
+    description: 'Transfer cash to bank',
+    debit: 'Bank',
+    credit: 'Cash',
+    tags: ['cash', 'bank', 'transfer'],
+    example: 'Deposited ₹100,000 cash to bank',
+  },
+  {
+    id: 'bank_withdrawal',
+    category: 'Banking',
+    name: 'Bank Withdrawal',
+    description: 'Withdraw cash from bank',
+    debit: 'Cash',
+    credit: 'Bank',
+    tags: ['cash', 'bank', 'transfer'],
+    example: 'Withdrew ₹50,000 from bank',
+  },
+  {
+    id: 'advance_to_employee',
+    category: 'Advances',
+    name: 'Advance to Employee',
+    description: 'Record employee advance',
+    debit: 'Employee Advances',
+    credit: 'Cash',
+    tags: ['cash', 'advance', 'employee'],
+    example: 'Gave ₹15,000 advance to employee',
+  },
+  {
+    id: 'advance_from_customer',
+    category: 'Advances',
+    name: 'Advance from Customer',
+    description: 'Record customer advance received',
+    debit: 'Cash',
+    credit: 'Advance from Customers',
+    tags: ['cash', 'advance', 'liability'],
+    example: 'Received ₹25,000 advance from customer',
+  },
+  {
+    id: 'depreciation',
+    category: 'Adjustments',
+    name: 'Depreciation Entry',
+    description: 'Record asset depreciation',
+    debit: 'Depreciation Expense',
+    credit: 'Accumulated Depreciation',
+    tags: ['expense', 'depreciation', 'adjustment'],
+    example: 'Monthly depreciation of ₹3,000',
+  },
+  {
+    id: 'bad_debt',
+    category: 'Adjustments',
+    name: 'Bad Debt Write-off',
+    description: 'Write off uncollectable receivables',
+    debit: 'Bad Debt Expense',
+    credit: 'Accounts Receivable',
+    tags: ['expense', 'receivables', 'adjustment'],
+    example: 'Writing off ₹10,000 uncollectable debt',
+  },
+];
+
+// Smart validation rules
+const validateEntry = (debit, credit, amount, narration) => {
+  const issues = [];
+  const warnings = [];
+  const suggestions = [];
+
+  // Basic validations
+  if (!debit || !credit) {
+    issues.push({ type: 'error', message: 'Both debit and credit accounts must be selected' });
+  }
+
+  if (debit === credit) {
+    issues.push({ type: 'error', message: 'Debit and credit accounts cannot be the same' });
+  }
+
+  if (!amount || parseFloat(amount) <= 0) {
+    issues.push({ type: 'error', message: 'Amount must be greater than zero' });
+  }
+
+  // Amount validations
+  const amt = parseFloat(amount || 0);
+  if (amt > 10000000) {
+    warnings.push({ type: 'warning', message: 'Large amount detected (>1 Crore). Please verify.' });
+  }
+
+  if (amt % 1 !== 0 && amt < 10) {
+    warnings.push({ type: 'warning', message: 'Small decimal amount detected. Verify precision.' });
+  }
+
+  // Narration checks
+  if (!narration || narration.trim().length < 5) {
+    warnings.push({ type: 'warning', message: 'Add detailed narration for better record keeping' });
+  }
+
+  // Smart suggestions based on account combinations
+  const debitLower = (debit || '').toLowerCase();
+  const creditLower = (credit || '').toLowerCase();
+
+  if (debitLower.includes('expense') && creditLower.includes('revenue')) {
+    issues.push({ type: 'error', message: 'Invalid: Expense cannot be debited with Revenue credited' });
+  }
+
+  if (debitLower.includes('revenue') && creditLower.includes('expense')) {
+    issues.push({ type: 'error', message: 'Invalid: Revenue cannot be debited with Expense credited' });
+  }
+
+  if ((debitLower.includes('cash') || debitLower.includes('bank')) && 
+      (creditLower.includes('revenue') || creditLower.includes('sales'))) {
+    suggestions.push({ type: 'tip', message: 'Cash sale detected. Consider GST implications.' });
+  }
+
+  if (debitLower.includes('receivable') && creditLower.includes('revenue')) {
+    suggestions.push({ type: 'tip', message: 'Credit sale. Ensure invoice is raised.' });
+  }
+
+  if (debitLower.includes('payable') && creditLower.includes('cash')) {
+    suggestions.push({ type: 'tip', message: 'Vendor payment. Update purchase invoice status.' });
+  }
+
+  return { issues, warnings, suggestions };
+};
+
+const VirtualAccountant = ({
+  isOpen, 
+  onClose, 
+  onApplyTemplate,
+  currentEntry = {},
+}) => {
+  const [activeTab, setActiveTab] = useState('templates');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
+  const validationMode = true;
+
+  const filteredTemplates = useMemo(() => {
+    if (!searchTerm) return TRANSACTION_TEMPLATES;
+    const search = searchTerm.toLowerCase();
+    return TRANSACTION_TEMPLATES.filter(t => 
+      t.name.toLowerCase().includes(search) ||
+      t.description.toLowerCase().includes(search) ||
+      t.category.toLowerCase().includes(search) ||
+      t.tags.some(tag => tag.includes(search))
+    );
+  }, [searchTerm]);
+
+  const templatesByCategory = useMemo(() => {
+    const grouped = {};
+    filteredTemplates.forEach(template => {
+      if (!grouped[template.category]) grouped[template.category] = [];
+      grouped[template.category].push(template);
+    });
+    return grouped;
+  }, [filteredTemplates]);
+
+  const validation = useMemo(() => {
+    if (!validationMode || !currentEntry) return { issues: [], warnings: [], suggestions: [] };
+    return validateEntry(
+      currentEntry.debitAccount,
+      currentEntry.creditAccount,
+      currentEntry.amount,
+      currentEntry.narration
+    );
+  }, [currentEntry, validationMode]);
+
+  const handleApplyTemplate = (template) => {
+    onApplyTemplate?.({
+      debitAccount: template.debit,
+      creditAccount: template.credit,
+      narration: template.example,
+    });
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-slate-200 bg-gradient-to-r from-indigo-600 to-indigo-700 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/20">
+              <Sparkles className="text-white" size={20} />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-white">Virtual Accountant</h2>
+              <p className="text-xs text-indigo-100">AI-powered accounting assistant</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-full p-2 text-white/80 hover:bg-white/20 transition"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-1 border-b border-slate-200 bg-slate-50 px-6">
+          <button
+            onClick={() => setActiveTab('templates')}
+            className={`px-4 py-3 text-sm font-semibold transition ${
+              activeTab === 'templates'
+                ? 'border-b-2 border-indigo-600 text-indigo-700'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <BookOpen size={16} />
+              Templates
+            </div>
+          </button>
+          <button
+            onClick={() => setActiveTab('validate')}
+            className={`px-4 py-3 text-sm font-semibold transition ${
+              activeTab === 'validate'
+                ? 'border-b-2 border-indigo-600 text-indigo-700'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Calculator size={16} />
+              Validate Entry
+              {validation.issues.length > 0 && (
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs text-white">
+                  {validation.issues.length}
+                </span>
+              )}
+            </div>
+          </button>
+          <button
+            onClick={() => setActiveTab('tips')}
+            className={`px-4 py-3 text-sm font-semibold transition ${
+              activeTab === 'tips'
+                ? 'border-b-2 border-indigo-600 text-indigo-700'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Lightbulb size={16} />
+              Tips & Best Practices
+            </div>
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {activeTab === 'templates' && (
+            <div className="space-y-4">
+              {/* Search */}
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="Search templates by name, category, or type..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 pl-10 text-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                />
+                <Sparkles className="absolute left-3 top-3.5 text-slate-400" size={16} />
+              </div>
+
+              {/* Templates by Category */}
+              <div className="space-y-6">
+                {Object.entries(templatesByCategory).map(([category, templates]) => (
+                  <div key={category}>
+                    <h3 className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-600">
+                      <TrendingUp size={14} />
+                      {category}
+                    </h3>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {templates.map((template) => (
+                        <div
+                          key={template.id}
+                          className={`group cursor-pointer rounded-xl border-2 p-4 transition ${
+                            selectedTemplate?.id === template.id
+                              ? 'border-indigo-500 bg-indigo-50'
+                              : 'border-slate-200 bg-white hover:border-indigo-300 hover:shadow-md'
+                          }`}
+                          onClick={() => setSelectedTemplate(template)}
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <h4 className="font-bold text-slate-800">{template.name}</h4>
+                              <p className="mt-1 text-xs text-slate-600">{template.description}</p>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleApplyTemplate(template);
+                              }}
+                              className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white opacity-0 transition hover:bg-indigo-700 group-hover:opacity-100"
+                            >
+                              Apply
+                            </button>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-xs">
+                            <div>
+                              <span className="font-semibold text-green-700">Debit:</span>{' '}
+                              <span className="text-slate-700">{template.debit}</span>
+                            </div>
+                            <div>
+                              <span className="font-semibold text-red-700">Credit:</span>{' '}
+                              <span className="text-slate-700">{template.credit}</span>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {template.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {filteredTemplates.length === 0 && (
+                <div className="py-12 text-center text-slate-500">
+                  <Sparkles size={48} className="mx-auto mb-3 text-slate-300" />
+                  <p>No templates found matching "{searchTerm}"</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'validate' && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <h3 className="mb-3 text-sm font-bold text-slate-700">Current Entry</h3>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <span className="text-xs font-semibold text-slate-500">Debit Account:</span>
+                    <p className="text-sm font-medium text-slate-800">
+                      {currentEntry?.debitAccount || <span className="text-slate-400">Not selected</span>}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-slate-500">Credit Account:</span>
+                    <p className="text-sm font-medium text-slate-800">
+                      {currentEntry?.creditAccount || <span className="text-slate-400">Not selected</span>}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-slate-500">Amount:</span>
+                    <p className="text-sm font-medium text-slate-800">
+                      {currentEntry?.amount ? formatCurrency(parseFloat(currentEntry.amount)) : <span className="text-slate-400">Not entered</span>}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-slate-500">Narration:</span>
+                    <p className="text-sm font-medium text-slate-800">
+                      {currentEntry?.narration || <span className="text-slate-400">Not provided</span>}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Issues */}
+              {validation.issues.length > 0 && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+                  <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-red-800">
+                    <AlertCircle size={16} />
+                    Errors ({validation.issues.length})
+                  </h4>
+                  <ul className="space-y-2">
+                    {validation.issues.map((issue, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm text-red-700">
+                        <span className="mt-0.5">•</span>
+                        <span>{issue.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Warnings */}
+              {validation.warnings.length > 0 && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-amber-800">
+                    <AlertCircle size={16} />
+                    Warnings ({validation.warnings.length})
+                  </h4>
+                  <ul className="space-y-2">
+                    {validation.warnings.map((warning, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm text-amber-700">
+                        <span className="mt-0.5">•</span>
+                        <span>{warning.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Suggestions */}
+              {validation.suggestions.length > 0 && (
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                  <h4 className="mb-3 flex items-center gap-2 text-sm font-bold text-blue-800">
+                    <Lightbulb size={16} />
+                    Suggestions ({validation.suggestions.length})
+                  </h4>
+                  <ul className="space-y-2">
+                    {validation.suggestions.map((suggestion, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm text-blue-700">
+                        <span className="mt-0.5">💡</span>
+                        <span>{suggestion.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* All Clear */}
+              {validation.issues.length === 0 && validation.warnings.length === 0 && (
+                <div className="rounded-xl border border-green-200 bg-green-50 p-8 text-center">
+                  <CheckCircle size={48} className="mx-auto mb-3 text-green-600" />
+                  <h4 className="text-lg font-bold text-green-800">Entry looks good!</h4>
+                  <p className="mt-1 text-sm text-green-700">
+                    {validation.suggestions.length > 0
+                      ? 'Entry is valid. Check suggestions above for additional tips.'
+                      : 'No issues detected. You can proceed to post this entry.'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'tips' && (
+            <div className="space-y-6">
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                <h3 className="mb-2 flex items-center gap-2 font-bold text-indigo-900">
+                  <Lightbulb size={18} />
+                  Double-Entry Bookkeeping Fundamentals
+                </h3>
+                <ul className="space-y-2 text-sm text-indigo-800">
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✓</span>
+                    <span>Every transaction must have equal debits and credits</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✓</span>
+                    <span>Assets and Expenses increase with Debit, decrease with Credit</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✓</span>
+                    <span>Liabilities, Equity, and Revenue increase with Credit, decrease with Debit</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+                <h3 className="mb-2 flex items-center gap-2 font-bold text-green-900">
+                  <CheckCircle size={18} />
+                  Best Practices
+                </h3>
+                <ul className="space-y-2 text-sm text-green-800">
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">1.</span>
+                    <span><strong>Always add detailed narration:</strong> Explain what, why, and reference numbers</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">2.</span>
+                    <span><strong>Use consistent account names:</strong> Maintain standardized chart of accounts</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">3.</span>
+                    <span><strong>Record transactions promptly:</strong> Don't delay journal entries</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">4.</span>
+                    <span><strong>Verify amounts before posting:</strong> Double-check calculations</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">5.</span>
+                    <span><strong>Keep supporting documents:</strong> Attach invoices, receipts, etc.</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <h3 className="mb-2 flex items-center gap-2 font-bold text-amber-900">
+                  <AlertCircle size={18} />
+                  Common Mistakes to Avoid
+                </h3>
+                <ul className="space-y-2 text-sm text-amber-800">
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✗</span>
+                    <span>Posting entries without proper documentation</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✗</span>
+                    <span>Using the same account for debit and credit</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✗</span>
+                    <span>Incorrect date entry (backdating without proper adjustment)</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✗</span>
+                    <span>Mixing personal and business transactions</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5">✗</span>
+                    <span>Not reconciling regularly with bank statements</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-purple-200 bg-purple-50 p-4">
+                <h3 className="mb-2 flex items-center gap-2 font-bold text-purple-900">
+                  <TrendingUp size={18} />
+                  Accounting Equation
+                </h3>
+                <div className="text-center">
+                  <div className="inline-block rounded-lg bg-white px-6 py-4 shadow-sm">
+                    <p className="text-lg font-bold text-purple-900">
+                      Assets = Liabilities + Equity
+                    </p>
+                  </div>
+                  <p className="mt-3 text-sm text-purple-800">
+                    This fundamental equation must always balance in your books
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-slate-500">
+              💡 Tip: Use templates to speed up common transactions
+            </p>
+            <button
+              onClick={onClose}
+              className="rounded-lg bg-slate-600 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 transition"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default VirtualAccountant;

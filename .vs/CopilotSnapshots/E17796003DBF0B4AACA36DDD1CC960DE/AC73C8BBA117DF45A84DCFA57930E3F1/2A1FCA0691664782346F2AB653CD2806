@@ -1,0 +1,744 @@
+﻿import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { X, Sparkles, Send, Check, Edit3, RotateCcw } from 'lucide-react';
+import { formatCurrency } from '../utils/helpers';
+
+// ═══════════════════════════════════════════════════════════════════
+// SMART NLP ENGINE - Token-based intent classification
+// Understands flexible word order, abbreviations, and natural speech
+// ═══════════════════════════════════════════════════════════════════
+
+// --- Amount extraction: finds numbers anywhere in the text ---
+function extractAmount(text) {
+  // Remove currency symbols/words for cleaner matching
+  const cleaned = text
+    .replace(/\b(rs\.?|rupees?|inr|amount)\b/gi, '')
+    .replace(/[₹$]/g, '');
+
+  // Match Indian-style numbers: 1,50,000 or 150000 or 1.5L or 50k etc.
+  const patterns = [
+    /(\d[\d,]*(?:\.\d+)?)\s*(?:lakh|lac|l)\b/i,      // 1.5 lakh / 2L
+    /(\d[\d,]*(?:\.\d+)?)\s*(?:crore|cr)\b/i,         // 1 crore / 2cr
+    /(\d[\d,]*(?:\.\d+)?)\s*k\b/i,                    // 50k
+    /(\d[\d,]*\.\d+)/,                                  // 1,50,000.50
+    /(\d[\d,]+)/,                                       // 150000 or 1,50,000
+  ];
+
+  for (const pat of patterns) {
+    const m = cleaned.match(pat);
+    if (m) {
+      let num = parseFloat(m[1].replace(/,/g, ''));
+      const suffix = cleaned.slice(m.index + m[0].length).trim().toLowerCase();
+      const matchedSuffix = m[0].toLowerCase();
+      if (matchedSuffix.includes('lakh') || matchedSuffix.includes('lac') || matchedSuffix.endsWith('l')) num *= 100000;
+      else if (matchedSuffix.includes('crore') || matchedSuffix.includes('cr')) num *= 10000000;
+      else if (matchedSuffix.endsWith('k')) num *= 1000;
+      if (num > 0) return num;
+    }
+  }
+  return 0;
+}
+
+// --- Fuzzy party resolution: matches user text to known parties ---
+function resolveParty(raw, ctx) {
+  if (!raw) return '';
+  const cleaned = raw.trim().replace(/[.!?,;:]+$/, '');
+  if (!ctx?.partyNames?.length) return cleaned;
+
+  const lower = cleaned.toLowerCase();
+
+  // 1. Exact match
+  const exact = ctx.partyNames.find(p => p.toLowerCase() === lower);
+  if (exact) return exact;
+
+  // 2. Starts-with match (user typed partial)
+  const startsWith = ctx.partyNames.find(p => p.toLowerCase().startsWith(lower));
+  if (startsWith) return startsWith;
+
+  // 3. Contains match
+  const contains = ctx.partyNames.find(p =>
+    p.toLowerCase().includes(lower) || lower.includes(p.toLowerCase())
+  );
+  if (contains) return contains;
+
+  // 4. Token overlap: "acme" matches "Acme Corp Pvt Ltd"
+  const inputTokens = lower.split(/\s+/);
+  let bestMatch = null;
+  let bestScore = 0;
+  for (const name of ctx.partyNames) {
+    const nameTokens = name.toLowerCase().split(/\s+/);
+    let score = 0;
+    for (const it of inputTokens) {
+      if (it.length < 2) continue;
+      for (const nt of nameTokens) {
+        if (nt === it) score += 3;
+        else if (nt.startsWith(it) || it.startsWith(nt)) score += 2;
+        else if (nt.includes(it) || it.includes(nt)) score += 1;
+      }
+    }
+    if (score > bestScore) { bestScore = score; bestMatch = name; }
+  }
+  if (bestScore >= 2) return bestMatch;
+
+  return cleaned;
+}
+
+// --- Extract party name from text after removing known tokens ---
+function extractParty(text, ctx) {
+  // First try to find a known party name in the text via fuzzy match
+  if (ctx?.partyNames?.length) {
+    const lower = text.toLowerCase();
+    // Direct substring match against known names (longest first)
+    const sorted = [...ctx.partyNames].sort((a, b) => b.length - a.length);
+    for (const name of sorted) {
+      if (lower.includes(name.toLowerCase())) return name;
+    }
+    // Token overlap search
+    const words = lower.split(/\s+/);
+    for (const name of sorted) {
+      const nameTokens = name.toLowerCase().split(/\s+/);
+      const matchCount = nameTokens.filter(nt =>
+        words.some(w => w === nt || (w.length >= 3 && (w.startsWith(nt) || nt.startsWith(w))))
+      ).length;
+      if (matchCount > 0 && matchCount >= nameTokens.length * 0.5) return name;
+    }
+  }
+
+  // Fallback: extract text after directional prepositions
+  const dirMatch = text.match(/(?:from|to|for|by|of|with|client|vendor|party|company)\s+(.+)/i);
+  if (dirMatch) {
+    const candidate = dirMatch[1]
+      .replace(/\b(rs\.?|rupees?|inr|amount|of|the|a|an)\b/gi, '')
+      .replace(/[\d,₹$]+[kKlLcC]?\b/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      .replace(/[.!?,;:]+$/, '');
+    if (candidate.length >= 2) return resolveParty(candidate, ctx);
+  }
+
+  // Last resort: take the longest non-numeric, non-keyword segment
+  const stripped = text
+    .replace(/\b(received|got|collected|recd|paid|pay|sent|gave|transferred|invoice|invoiced|billed|bill|salary|wages|expense|spent|advance|purchased|bought|deposit|deposited|withdraw|withdrew|tds|credit\s*note|debit\s*note|cn|dn|rent|from|to|for|by|of|rs\.?|rupees?|inr|amount|via|bank|neft|rtgs|upi|imps|cash|cheque|check|online|the|a|an|is|was|has|have|been|with|on|in|into|towards|against)\b/gi, '')
+    .replace(/[\d,₹$]+[kKlLcC]?\b/g, '')
+    .replace(/[.!?,;:()[\]{}]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (stripped.length >= 2) return resolveParty(stripped, ctx);
+
+  return '';
+}
+
+// --- Intent classification from keywords (order-independent) ---
+const INTENT_SIGNALS = {
+  receipt: {
+    keywords: ['received', 'receive', 'got', 'collected', 'collection', 'recd', 'incoming', 'came in', 'money came', 'payment from', 'amount from', 'client paid', 'customer paid', 'they paid'],
+    weight: 10,
+  },
+  payment: {
+    keywords: ['paid', 'pay', 'sent', 'transferred', 'transfer', 'gave', 'given', 'outgoing', 'payment to', 'amount to', 'settled', 'cleared'],
+    weight: 10,
+  },
+  invoice: {
+    keywords: ['invoice', 'invoiced', 'billed', 'bill', 'raised invoice', 'raise invoice', 'billing', 'raise bill'],
+    weight: 15,
+  },
+  salary: {
+    keywords: ['salary', 'salaries', 'wages', 'wage', 'payroll', 'staff payment', 'employee payment', 'stipend'],
+    weight: 15,
+  },
+  expense: {
+    keywords: ['expense', 'spent', 'spending', 'expensed', 'cost', 'charged', 'office expense', 'misc expense'],
+    weight: 12,
+  },
+  advance: {
+    keywords: ['advance', 'adv', 'advance to', 'loan to employee', 'staff advance', 'employee advance'],
+    weight: 15,
+  },
+  purchase: {
+    keywords: ['purchased', 'bought', 'purchase', 'buying', 'procurement', 'ordered', 'vendor bill', 'supplier'],
+    weight: 12,
+  },
+  bank_deposit: {
+    keywords: ['deposit', 'deposited', 'cash to bank', 'bank deposit', 'put in bank', 'banked'],
+    weight: 15,
+  },
+  bank_withdrawal: {
+    keywords: ['withdraw', 'withdrew', 'withdrawal', 'cash from bank', 'bank withdrawal', 'atm'],
+    weight: 15,
+  },
+  tds: {
+    keywords: ['tds', 'tax deducted', 'tax deduction', 'withholding tax', 'tds deducted', 'tds receivable'],
+    weight: 20,
+  },
+  credit_note: {
+    keywords: ['credit note', 'credit memo', 'cn ', 'sales return', 'refund to client', 'discount given'],
+    weight: 20,
+  },
+  debit_note: {
+    keywords: ['debit note', 'debit memo', 'dn ', 'purchase return', 'returned to vendor'],
+    weight: 20,
+  },
+  rent: {
+    keywords: ['rent', 'rental', 'lease payment', 'office rent', 'shop rent'],
+    weight: 15,
+  },
+};
+
+function classifyIntent(text) {
+  const lower = text.toLowerCase();
+  const scores = {};
+
+  for (const [intent, config] of Object.entries(INTENT_SIGNALS)) {
+    scores[intent] = 0;
+    for (const kw of config.keywords) {
+      if (lower.includes(kw)) {
+        scores[intent] += config.weight;
+        // Bonus for early position (user usually leads with intent)
+        const pos = lower.indexOf(kw);
+        if (pos < 20) scores[intent] += 5;
+      }
+    }
+  }
+
+  // Contextual disambiguation
+  const hasFrom = /\bfrom\b/i.test(text);
+  const hasTo = /\bto\b/i.test(text);
+
+  // "paid X from Y" is still a payment, not a receipt
+  // "got X to bank" could be deposit
+  if (scores.receipt > 0 && scores.payment > 0) {
+    if (hasFrom && !hasTo) scores.receipt += 5;
+    if (hasTo && !hasFrom) scores.payment += 5;
+  }
+
+  // If both expense and payment scored, prefer based on context
+  if (scores.expense > 0 && scores.payment > 0) {
+    // If there's a known party/vendor, lean toward payment
+    if (hasTo) scores.payment += 3;
+  }
+
+  // Bank signals modify receipt/payment into deposit/withdrawal
+  const bankSignal = /\b(bank|neft|rtgs|upi|imps|online|net banking|cheque|check)\b/i.test(text);
+
+  // Find the winning intent
+  let best = null;
+  let bestScore = 0;
+  for (const [intent, score] of Object.entries(scores)) {
+    if (score > bestScore) { bestScore = score; best = intent; }
+  }
+
+  return { intent: best, score: bestScore, bankSignal };
+}
+
+// --- Detect payment mode from context ---
+function detectPaymentMode(text) {
+  const lower = text.toLowerCase();
+  if (/\b(bank|neft|rtgs|imps|online|net banking|upi|gpay|phonepe|paytm)\b/.test(lower)) return 'Bank';
+  if (/\b(cheque|check|chq)\b/.test(lower)) return 'Bank';
+  if (/\b(cash|by hand|hand cash)\b/.test(lower)) return 'Cash';
+  return 'Cash'; // default
+}
+
+// --- Guess expense account from description keywords ---
+function guessExpenseAccount(desc) {
+  const d = desc.toLowerCase();
+  if (d.includes('rent') || d.includes('lease')) return 'Rent Expense';
+  if (d.includes('travel') || d.includes('cab') || d.includes('fuel') || d.includes('petrol') || d.includes('diesel') || d.includes('uber') || d.includes('ola') || d.includes('flight') || d.includes('train') || d.includes('bus')) return 'Travel Expense';
+  if (d.includes('food') || d.includes('meal') || d.includes('lunch') || d.includes('dinner') || d.includes('breakfast') || d.includes('tea') || d.includes('coffee') || d.includes('snack') || d.includes('catering')) return 'Food Expense';
+  if (d.includes('salary') || d.includes('wages') || d.includes('payroll')) return 'Salary Expense';
+  if (d.includes('electric') || d.includes('utility') || d.includes('water') || d.includes('internet') || d.includes('wifi') || d.includes('broadband') || d.includes('phone') || d.includes('mobile') || d.includes('recharge')) return 'Utilities Expense';
+  if (d.includes('office') || d.includes('stationery') || d.includes('supplies') || d.includes('printer') || d.includes('paper') || d.includes('pen')) return 'Office Supplies Expense';
+  if (d.includes('repair') || d.includes('maintenance') || d.includes('service') || d.includes('amc') || d.includes('fix')) return 'Repairs & Maintenance';
+  if (d.includes('insurance') || d.includes('premium')) return 'Insurance Expense';
+  if (d.includes('legal') || d.includes('lawyer') || d.includes('advocate') || d.includes('court')) return 'Legal Expense';
+  if (d.includes('marketing') || d.includes('adverti') || d.includes('promo') || d.includes('campaign') || d.includes('ads')) return 'Marketing Expense';
+  if (d.includes('commission') || d.includes('brokerage')) return 'Commission Expense';
+  if (d.includes('courier') || d.includes('shipping') || d.includes('freight') || d.includes('transport') || d.includes('logistics')) return 'Freight & Logistics';
+  return 'Expense:General';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MAIN PARSER: Combines intent + amount + party extraction
+// ═══════════════════════════════════════════════════════════════════
+function parseUserMessage(text, ctx) {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length < 3) return null;
+
+  // Step 1: Extract amount
+  const amount = extractAmount(trimmed);
+  if (amount <= 0) return null; // Must have a number to create an entry
+
+  // Step 2: Classify intent
+  const { intent, score, bankSignal } = classifyIntent(trimmed);
+  if (!intent || score <= 0) return null;
+
+  // Step 3: Extract party name
+  const party = extractParty(trimmed, ctx);
+  const mode = detectPaymentMode(trimmed);
+  const debitTo = mode === 'Bank' ? 'Bank' : 'Cash';
+
+  // Step 4: Build entry based on intent
+  switch (intent) {
+    case 'receipt': {
+      const p = party || 'Unknown Client';
+      return {
+        type: 'receipt',
+        entries: [{ debitAccount: bankSignal ? 'Bank' : debitTo, creditAccount: `Party: ${p}`, amount }],
+        narration: `Payment received from ${p}${bankSignal ? ' (bank)' : ''}`,
+        meta: { party: p, amount },
+      };
+    }
+    case 'payment': {
+      const p = party || 'Unknown Vendor';
+      return {
+        type: 'payment',
+        entries: [{ debitAccount: `Party: ${p}`, creditAccount: bankSignal ? 'Bank' : debitTo, amount }],
+        narration: `Payment made to ${p}${bankSignal ? ' (bank)' : ''}`,
+        meta: { party: p, amount },
+      };
+    }
+    case 'invoice': {
+      const p = party || 'Unknown Client';
+      const gst = Math.round(amount * 18 / 118 * 100) / 100;
+      const taxable = amount - gst;
+      return {
+        type: 'invoice',
+        entries: [
+          { debitAccount: `Party: ${p}`, creditAccount: 'Sales Revenue', amount: taxable },
+          { debitAccount: `Party: ${p}`, creditAccount: 'Output GST Payable', amount: gst },
+        ],
+        narration: `Invoice raised to ${p} (incl. 18% GST)`,
+        meta: { party: p, amount, taxable, gst },
+      };
+    }
+    case 'salary': {
+      const name = party || 'Staff';
+      return {
+        type: 'salary',
+        entries: [{ debitAccount: 'Salary Expense', creditAccount: bankSignal ? 'Bank' : 'Cash', amount }],
+        narration: `Salary paid to ${name}`,
+        meta: { name, amount },
+      };
+    }
+    case 'expense': {
+      const desc = party || trimmed;
+      return {
+        type: 'expense',
+        entries: [{ debitAccount: guessExpenseAccount(trimmed), creditAccount: bankSignal ? 'Bank' : 'Cash', amount }],
+        narration: `Expense: ${desc}`,
+        meta: { desc, amount },
+      };
+    }
+    case 'advance': {
+      const name = party || 'Employee';
+      return {
+        type: 'advance',
+        entries: [{ debitAccount: 'Employee Advances', creditAccount: bankSignal ? 'Bank' : 'Cash', amount }],
+        narration: `Advance given to ${name}`,
+        meta: { name, amount },
+      };
+    }
+    case 'purchase': {
+      const p = party || 'Unknown Vendor';
+      const gst = Math.round(amount * 18 / 118 * 100) / 100;
+      const taxable = amount - gst;
+      return {
+        type: 'purchase',
+        entries: [
+          { debitAccount: 'Purchase Expense', creditAccount: `Party: ${p}`, amount: taxable },
+          { debitAccount: 'Input GST Credit', creditAccount: `Party: ${p}`, amount: gst },
+        ],
+        narration: `Purchase from ${p} (incl. 18% GST)`,
+        meta: { party: p, amount, taxable, gst },
+      };
+    }
+    case 'bank_deposit': {
+      return {
+        type: 'bank_deposit',
+        entries: [{ debitAccount: 'Bank', creditAccount: 'Cash', amount }],
+        narration: 'Cash deposited to bank',
+        meta: { amount },
+      };
+    }
+    case 'bank_withdrawal': {
+      return {
+        type: 'bank_withdrawal',
+        entries: [{ debitAccount: 'Cash', creditAccount: 'Bank', amount }],
+        narration: 'Cash withdrawn from bank',
+        meta: { amount },
+      };
+    }
+    case 'tds': {
+      const p = party || 'Unknown Party';
+      return {
+        type: 'tds',
+        entries: [{ debitAccount: 'TDS Receivable', creditAccount: `Party: ${p}`, amount }],
+        narration: `TDS deducted by ${p}`,
+        meta: { party: p, amount },
+      };
+    }
+    case 'credit_note': {
+      const p = party || 'Unknown Client';
+      return {
+        type: 'credit_note',
+        entries: [{ debitAccount: 'Sales Revenue', creditAccount: `Party: ${p}`, amount }],
+        narration: `Credit Note issued to ${p}`,
+        meta: { party: p, amount },
+      };
+    }
+    case 'debit_note': {
+      const p = party || 'Unknown Vendor';
+      return {
+        type: 'debit_note',
+        entries: [{ debitAccount: `Party: ${p}`, creditAccount: 'Purchase Expense', amount }],
+        narration: `Debit Note issued to ${p}`,
+        meta: { party: p, amount },
+      };
+    }
+    case 'rent': {
+      return {
+        type: 'expense',
+        entries: [{ debitAccount: 'Rent Expense', creditAccount: bankSignal ? 'Bank' : 'Cash', amount }],
+        narration: `Rent payment${party ? ` to ${party}` : ''}`,
+        meta: { amount },
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+const QUICK_ACTIONS = [
+  { label: 'Received payment', text: 'received from ' },
+  { label: 'Paid vendor', text: 'paid to ' },
+  { label: 'Raised invoice', text: 'invoice ' },
+  { label: 'Made purchase', text: 'bought from ' },
+  { label: 'Paid salary', text: 'salary ' },
+  { label: 'Bank deposit', text: 'deposit to bank ' },
+  { label: 'Expense', text: 'spent on ' },
+];
+
+const HELP_EXAMPLES = [
+  'Acme Corp paid us 50000',
+  'got 1.5 lakh from client ABC',
+  'transferred 20k to Vendor XYZ via NEFT',
+  'invoice 1,50,000 for Client ABC',
+  'salary 30000 to Rahul',
+  'spent 5000 on office supplies',
+  'bought equipment for 80000 from SuppliCo',
+  'deposited 1 lakh in bank',
+  'withdrew 50k from bank',
+  'tds 10000 deducted by Acme',
+  'rent 25000',
+  'credit note 5000 for Client ABC',
+  'advance 15000 to Raj',
+];
+
+const TYPE_LABELS = {
+  receipt: 'Payment Receipt',
+  payment: 'Payment Made',
+  invoice: 'Sales Invoice',
+  purchase: 'Purchase',
+  salary: 'Salary',
+  expense: 'Expense',
+  bank_deposit: 'Bank Deposit',
+  bank_withdrawal: 'Bank Withdrawal',
+  tds: 'TDS Entry',
+  credit_note: 'Credit Note',
+  debit_note: 'Debit Note',
+  advance: 'Advance',
+};
+
+// Entry Preview Card
+const EntryPreview = ({ msg, onPost, onCancel, onEdit, editingEntry, setEditingEntry, allAccounts }) => {
+  const { parsed, status } = msg;
+  const totalAmount = parsed.entries.reduce((s, e) => s + e.amount, 0);
+
+  const statusColor = {
+    pending: 'border-indigo-200 bg-white',
+    posting: 'border-amber-200 bg-amber-50',
+    posted: 'border-green-200 bg-green-50',
+    cancelled: 'border-slate-200 bg-slate-50 opacity-60',
+    error: 'border-red-200 bg-red-50',
+  }[status] || 'border-slate-200 bg-white';
+
+  return (
+    <div className={`max-w-[95%] rounded-2xl rounded-bl-md border-2 ${statusColor} px-4 py-3 shadow-sm space-y-2`}>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold uppercase tracking-wide text-indigo-600">
+          {TYPE_LABELS[parsed.type] || 'Journal Entry'}
+        </p>
+        {status === 'posted' && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700">POSTED</span>}
+        {status === 'cancelled' && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-500">CANCELLED</span>}
+        {status === 'posting' && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-700 animate-pulse">POSTING...</span>}
+      </div>
+
+      <p className="text-sm text-slate-700">{parsed.narration}</p>
+
+      <div className="rounded-lg bg-slate-50 border border-slate-200 divide-y divide-slate-200 text-xs">
+        <div className="grid grid-cols-12 gap-1 px-3 py-1.5 font-bold uppercase text-[10px] text-slate-400">
+          <div className="col-span-5">Account</div>
+          <div className="col-span-3 text-right text-green-600">Debit</div>
+          <div className="col-span-3 text-right text-red-600">Credit</div>
+          <div className="col-span-1"></div>
+        </div>
+        {parsed.entries.map((entry, i) => (
+          <React.Fragment key={i}>
+            <div className="grid grid-cols-12 gap-1 px-3 py-1.5 items-center">
+              <div className="col-span-5">
+                {editingEntry?.messageId === msg.id && editingEntry?.entryIndex === i && editingEntry?.field === 'debitAccount' ? (
+                  <select autoFocus value={entry.debitAccount} onChange={e => onEdit(i, 'debitAccount', e.target.value)} onBlur={() => setEditingEntry(null)} className="w-full rounded border border-indigo-300 bg-white px-1 py-0.5 text-xs">
+                    {allAccounts.map(a => <option key={a} value={a}>{a}</option>)}
+                    {!allAccounts.includes(entry.debitAccount) && <option value={entry.debitAccount}>{entry.debitAccount}</option>}
+                  </select>
+                ) : (
+                  <span className={`font-semibold text-slate-800 ${status === 'pending' ? 'cursor-pointer hover:text-indigo-600' : ''}`} onClick={() => status === 'pending' && setEditingEntry({ messageId: msg.id, entryIndex: i, field: 'debitAccount' })}>
+                    {entry.debitAccount}
+                  </span>
+                )}
+              </div>
+              <div className="col-span-3 text-right">
+                {editingEntry?.messageId === msg.id && editingEntry?.entryIndex === i && editingEntry?.field === 'amount' ? (
+                  <input autoFocus type="number" value={entry.amount} onChange={e => onEdit(i, 'amount', e.target.value)} onBlur={() => setEditingEntry(null)} onKeyDown={e => e.key === 'Enter' && setEditingEntry(null)} className="w-full rounded border border-indigo-300 bg-white px-1 py-0.5 text-xs text-right" />
+                ) : (
+                  <span className={`font-mono font-semibold text-green-700 ${status === 'pending' ? 'cursor-pointer hover:text-green-900' : ''}`} onClick={() => status === 'pending' && setEditingEntry({ messageId: msg.id, entryIndex: i, field: 'amount' })}>
+                    {formatCurrency(entry.amount)}
+                  </span>
+                )}
+              </div>
+              <div className="col-span-3 text-right text-slate-300">-</div>
+              <div className="col-span-1"></div>
+            </div>
+            <div className="grid grid-cols-12 gap-1 px-3 py-1.5 items-center bg-white/50">
+              <div className="col-span-5 pl-4">
+                {editingEntry?.messageId === msg.id && editingEntry?.entryIndex === i && editingEntry?.field === 'creditAccount' ? (
+                  <select autoFocus value={entry.creditAccount} onChange={e => onEdit(i, 'creditAccount', e.target.value)} onBlur={() => setEditingEntry(null)} className="w-full rounded border border-indigo-300 bg-white px-1 py-0.5 text-xs">
+                    {allAccounts.map(a => <option key={a} value={a}>{a}</option>)}
+                    {!allAccounts.includes(entry.creditAccount) && <option value={entry.creditAccount}>{entry.creditAccount}</option>}
+                  </select>
+                ) : (
+                  <span className={`text-slate-600 ${status === 'pending' ? 'cursor-pointer hover:text-indigo-600' : ''}`} onClick={() => status === 'pending' && setEditingEntry({ messageId: msg.id, entryIndex: i, field: 'creditAccount' })}>
+                    To: {entry.creditAccount}
+                  </span>
+                )}
+              </div>
+              <div className="col-span-3 text-right text-slate-300">-</div>
+              <div className="col-span-3 text-right font-mono font-semibold text-red-600">{formatCurrency(entry.amount)}</div>
+              <div className="col-span-1 text-center">
+                {status === 'pending' && <button onClick={() => setEditingEntry({ messageId: msg.id, entryIndex: i, field: 'debitAccount' })} className="text-slate-300 hover:text-indigo-500"><Edit3 size={10} /></button>}
+              </div>
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+
+      <div className="flex justify-between items-center text-xs">
+        <span className="text-slate-400">Click any account or amount to edit</span>
+        <span className="font-bold text-slate-600">Total: {formatCurrency(totalAmount)}</span>
+      </div>
+
+      {status === 'pending' && (
+        <div className="flex items-center gap-2 pt-1">
+          <button onClick={onPost} className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-green-600 px-3 py-2 text-xs font-bold text-white hover:bg-green-700 transition shadow-sm">
+            <Check size={14} /> Post Entry
+          </button>
+          <button onClick={onCancel} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition">
+            <X size={12} /> Cancel
+          </button>
+        </div>
+      )}
+      {status === 'error' && (
+        <button onClick={onPost} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition">
+          <RotateCcw size={12} /> Retry
+        </button>
+      )}
+    </div>
+  );
+};
+
+// Main Chat Component
+const VirtualAccountant = ({
+  isOpen,
+  onClose,
+  allAccounts = [],
+  onApplyTemplate,
+  currentEntry = {},
+  onPostEntry,
+  partyNames = [],
+}) => {
+  const [messages, setMessages] = useState([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      type: 'text',
+      content: 'Hey! I am your accounting assistant. Tell me what happened in any way you like and I will create the journal entry.\n\nExamples:\n- "Acme Corp paid us 50000"\n- "transferred 20k to vendor XYZ via NEFT"\n- "spent 5000 on office supplies"\n- "got 1.5 lakh from client"\n\nI understand flexible phrasing, amounts like 50k/1.5L, and bank/UPI/cash modes!',
+      timestamp: new Date(),
+    },
+  ]);
+  const [input, setInput] = useState('');
+  const [editingEntry, setEditingEntry] = useState(null);
+  const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const ctx = useMemo(() => ({ partyNames, allAccounts }), [partyNames, allAccounts]);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
+  useEffect(() => { if (isOpen) setTimeout(() => inputRef.current?.focus(), 200); }, [isOpen]);
+
+  const addMessage = (msg) => {
+    setMessages(prev => [...prev, { ...msg, id: `msg-${Date.now()}-${Math.random()}`, timestamp: new Date() }]);
+  };
+
+  const handleSend = () => {
+    const text = input.trim();
+    if (!text) return;
+    addMessage({ role: 'user', type: 'text', content: text });
+    setInput('');
+
+    if (/^(help|what can you do|commands|how|examples?)\b/i.test(text)) {
+      addMessage({ role: 'assistant', type: 'help', content: 'Here are things you can say:' });
+      return;
+    }
+
+    const parsed = parseUserMessage(text, ctx);
+    if (!parsed) {
+      addMessage({ role: 'assistant', type: 'text', content: 'Hmm, I need at least an amount and a transaction type to create an entry. Try something like:\n- "got 50000 from Acme"\n- "paid 20k to vendor XYZ"\n- "spent 5000 on travel"\n- "salary 30000 Rahul"\n\nI understand amounts like 50k, 1.5 lakh, 2 crore. Type help for more.' });
+      return;
+    }
+
+    addMessage({ role: 'assistant', type: 'entry_preview', content: parsed.narration, parsed, status: 'pending' });
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  };
+
+  const handlePostEntry = async (messageId) => {
+    if (!onPostEntry) return;
+    const msg = messages.find(m => m.id === messageId);
+    if (!msg || msg.status !== 'pending') return;
+
+    setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'posting' } : m));
+    try {
+      await onPostEntry(msg.parsed);
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'posted' } : m));
+      addMessage({ role: 'assistant', type: 'text', content: 'Done! Entry posted successfully. What is next?' });
+    } catch (err) {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'error' } : m));
+      addMessage({ role: 'assistant', type: 'text', content: `Failed: ${err.message}. Try again or edit the entry.` });
+    }
+  };
+
+  const handleCancelEntry = (messageId) => {
+    setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'cancelled' } : m));
+    addMessage({ role: 'assistant', type: 'text', content: 'Cancelled. What else?' });
+  };
+
+  const handleEditEntry = (messageId, entryIndex, field, value) => {
+    setMessages(prev => prev.map(m => {
+      if (m.id !== messageId || m.type !== 'entry_preview') return m;
+      const newParsed = { ...m.parsed, entries: [...m.parsed.entries] };
+      newParsed.entries[entryIndex] = { ...newParsed.entries[entryIndex], [field]: field === 'amount' ? parseFloat(value) || 0 : value };
+      return { ...m, parsed: newParsed };
+    }));
+    setEditingEntry(null);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="w-full max-w-2xl sm:rounded-2xl rounded-t-2xl bg-white shadow-2xl flex flex-col" style={{ maxHeight: '85vh' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-slate-200 bg-gradient-to-r from-indigo-600 to-indigo-700 px-5 py-3 sm:rounded-t-2xl rounded-t-2xl shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white/20">
+              <Sparkles className="text-white" size={18} />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-white">Accounting Chat</h2>
+              <p className="text-[11px] text-indigo-200">Type in plain English, I will make the entry</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="rounded-full p-1.5 text-white/70 hover:bg-white/20 transition">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 bg-slate-50" style={{ minHeight: '280px' }}>
+          {messages.map((msg) => (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              {msg.role === 'user' ? (
+                <div className="max-w-[80%] rounded-2xl rounded-br-md bg-indigo-600 px-4 py-2.5 text-sm text-white shadow-sm">
+                  {msg.content}
+                </div>
+              ) : msg.type === 'entry_preview' ? (
+                <EntryPreview
+                  msg={msg}
+                  onPost={() => handlePostEntry(msg.id)}
+                  onCancel={() => handleCancelEntry(msg.id)}
+                  onEdit={(ei, field, val) => handleEditEntry(msg.id, ei, field, val)}
+                  editingEntry={editingEntry}
+                  setEditingEntry={setEditingEntry}
+                  allAccounts={allAccounts}
+                />
+              ) : msg.type === 'help' ? (
+                <div className="max-w-[90%] rounded-2xl rounded-bl-md bg-white border border-slate-200 px-4 py-3 shadow-sm">
+                  <p className="text-sm text-slate-700 font-semibold mb-2">{msg.content}</p>
+                  <div className="space-y-1">
+                    {HELP_EXAMPLES.map((ex, i) => (
+                      <button key={i} onClick={() => { setInput(ex); inputRef.current?.focus(); }} className="block w-full text-left rounded-lg bg-slate-50 hover:bg-indigo-50 px-3 py-1.5 text-xs text-slate-600 hover:text-indigo-700 transition font-mono">
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-white border border-slate-200 px-4 py-2.5 text-sm text-slate-700 shadow-sm whitespace-pre-wrap">
+                  {msg.content}
+                </div>
+              )}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Quick action chips */}
+        <div className="border-t border-slate-100 bg-white px-4 pt-2 pb-1 shrink-0">
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {QUICK_ACTIONS.map((qa) => (
+              <button key={qa.label} onClick={() => { setInput(qa.text); inputRef.current?.focus(); }} className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-medium text-slate-600 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 transition">
+                {qa.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Input */}
+        <div className="border-t border-slate-200 bg-white px-4 py-3 sm:rounded-b-2xl shrink-0">
+          <div className="flex items-center gap-2">
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder='Try: "received 50000 from Acme Corp"'
+              className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+            />
+            <button onClick={handleSend} disabled={!input.trim()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+              <Send size={16} />
+            </button>
+          </div>
+          <p className="mt-1.5 text-[10px] text-slate-400 text-center">Type <strong>help</strong> for all supported commands. Click any account/amount in preview to edit.</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default VirtualAccountant;

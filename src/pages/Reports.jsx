@@ -6,13 +6,89 @@ import {
 import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import * as XLSX from 'xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost } from '../utils/helpers';
+import * as XLSX from '@e965/xlsx';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown } from '../utils/helpers';
+import { buildAccountingSnapshot } from '../utils/accounting';
 import { can } from '../utils/permissions';
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Reports = ({ projects, clients, employees, expenses, inventory, payments, payouts = [], advances = [], vendorPayments = [], role }) => {
+// C-3: Build a multi-FY merged snapshot for Reports. We invoke
+// buildAccountingSnapshot per FY in the date range and merge the journal +
+// ledger so summary reports (ageing, balance summary, P&L totals) draw from
+// the same double-entry source of truth as the Accounting module.
+const buildMergedSnapshot = ({ fyList, ...inputs }) => {
+  const fys = (fyList && fyList.length > 0) ? fyList : ['ALL'];
+  const merged = { journal: [], partyMap: {}, profitAndLoss: { revenue: 0, costOfGoodsSold: 0, grossProfit: 0, operatingExpenses: 0, netProfit: 0 } };
+  fys.forEach((fy) => {
+    const snap = buildAccountingSnapshot({ ...inputs, fyFilter: fy === 'ALL' ? null : fy });
+    merged.journal.push(...(snap.journal || []));
+    (snap.ledger || []).forEach((row) => {
+      if (!row.account.startsWith('Party:')) return;
+      // M-5: group by stable accountId (immune to rename) when available.
+      const key = row.accountId || row.account;
+      const cur = merged.partyMap[key] || { account: row.account, accountId: row.accountId || null, debit: 0, credit: 0, entries: [] };
+      cur.debit += row.debit;
+      cur.credit += row.credit;
+      cur.entries.push(...(row.entries || []));
+      merged.partyMap[key] = cur;
+    });
+    if (snap.profitAndLoss) {
+      merged.profitAndLoss.revenue += snap.profitAndLoss.revenue || 0;
+      merged.profitAndLoss.costOfGoodsSold += snap.profitAndLoss.costOfGoodsSold || 0;
+      merged.profitAndLoss.grossProfit += snap.profitAndLoss.grossProfit || 0;
+      merged.profitAndLoss.operatingExpenses += snap.profitAndLoss.operatingExpenses || 0;
+      merged.profitAndLoss.netProfit += snap.profitAndLoss.netProfit || 0;
+    }
+  });
+  // Finalize party balances
+  Object.values(merged.partyMap).forEach((p) => {
+    p.balance = Math.round((p.debit - p.credit) * 100) / 100;
+    p.balanceType = p.balance >= 0 ? 'Dr' : 'Cr';
+  });
+  return merged;
+};
+
+const fysInRange = (startDate, endDate) => {
+  // Returns the list of FYs spanned by [startDate, endDate]. If either is
+  // missing we return an empty array (caller treats as "all FYs").
+  if (!startDate && !endDate) return [];
+  const start = startDate ? new Date(startDate) : new Date('2000-04-01');
+  const end = endDate ? new Date(endDate) : new Date();
+  const result = [];
+  const fyOf = (d) => {
+    const m = d.getMonth();
+    const y = d.getFullYear();
+    return m < 3 ? `${y - 1}-${String(y).slice(-2)}` : `${y}-${String(y + 1).slice(-2)}`;
+  };
+  let cur = new Date(start.getFullYear(), start.getMonth(), 1);
+  while (cur <= end) {
+    const fy = fyOf(cur);
+    if (!result.includes(fy)) result.push(fy);
+    cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+  }
+  return result;
+};
+
+const Reports = ({
+  projects,
+  clients,
+  employees,
+  expenses,
+  inventory,
+  payments,
+  payouts = [],
+  advances = [],
+  vendorPayments = [],
+  purchaseInvoices = [],
+  taxInvoices = [],
+  chartOfAccounts = [],
+  openingBalances = [],
+  fiscalYearClosings = [],
+  journalEntries = [],
+  partyAccounts = [],   // M-5: stable party name registry
+  role,
+}) => {
   const [reportType, setReportType] = useState('ledger');
   const [filterId, setFilterId] = useState(''); // Client ID
   const [selectedProjId, setSelectedProjId] = useState(''); // Project ID
@@ -22,6 +98,43 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
 
   // --- Helper: Get Project Specific Data ---
   const selectedProject = projects.find(p => p.id === selectedProjId);
+
+  // C-3: Single source of truth for receivable/payable balances and P&L
+  // totals — derived from the Accounting double-entry snapshot. We rebuild
+  // when any contributing collection changes; the snapshot internally
+  // honours the project→PO→PI→TI precedence rules.
+  const accountingSnapshot = useMemo(() => {
+    const fys = fysInRange(startDate, endDate);
+    return buildMergedSnapshot({
+      fyList: fys,
+      clients,
+      projects,
+      taxInvoices,
+      purchaseInvoices,
+      payments,
+      vendorPayments,
+      payouts,
+      expenses,
+      advances,
+      chartOfAccounts,
+      openingBalances,
+      fiscalYearClosings,
+      partyAccounts,  // M-5
+      manualJournalEntries: journalEntries,
+    });
+  }, [startDate, endDate, clients, projects, taxInvoices, purchaseInvoices, payments, vendorPayments, payouts, expenses, advances, chartOfAccounts, openingBalances, fiscalYearClosings, journalEntries, partyAccounts]);
+
+  // M-5: lookup by stable accountId first; fall back to name-based key for legacy rows.
+  const getPartyBalanceFromSnapshot = (entityName, entityId) => {
+    if (entityId) {
+      const idKey = `party_${entityId}`;
+      const byId = accountingSnapshot.partyMap[idKey];
+      if (byId) return byId.balance;
+    }
+    const key = `Party: ${entityName || 'Unknown Party'}`;
+    const row = accountingSnapshot.partyMap[key];
+    return row ? row.balance : 0;
+  };
 
   // --- Data Preparation Logic ---
   const reportData = useMemo(() => {
@@ -35,16 +148,27 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
 
       const clientInvoices = projects
         .filter(p => p.client_id === filterId && ['Completed', 'Closed'].includes(p.status))
-        .map(p => ({
-          date: p.end_date,
-          desc: `Invoice: ${p.project_name}`,
-          debit: getProjectGrandTotal(p),
-          credit: 0,
-          type: 'invoice',
-          invoice_status: p.invoice_status || 'Not Invoiced',
-          invoice_no: p.invoice_no || '—',
-          invoice_date: p.invoice_date || '—'
-        }));
+        .map(p => {
+          const isInvoiced = p.invoice_status === 'Invoiced';
+          // Rule: Completed-not-invoiced projects appear in the client ledger
+          // as UNBILLED entries (giving the full picture of what the client
+          // owes). Once invoiced, the entry flips to INVOICED with the
+          // invoice number + date as the reference.
+          const invoiceNo = p.invoice_no || '—';
+          const desc = isInvoiced
+            ? `Invoice ${invoiceNo}: ${p.project_name}`
+            : `Unbilled: ${p.project_name} (completed — awaiting invoice)`;
+          return {
+            date: isInvoiced ? (p.invoice_date || p.end_date) : p.end_date,
+            desc,
+            debit: getProjectGrandTotal(p),
+            credit: 0,
+            type: isInvoiced ? 'invoice' : 'unbilled',
+            invoice_status: isInvoiced ? 'Invoiced' : 'Unbilled',
+            invoice_no: isInvoiced ? invoiceNo : '—',
+            invoice_date: isInvoiced ? (p.invoice_date || '—') : '—'
+          };
+        });
 
       const clientPayments = payments
         .filter(p => p.client_id === filterId)
@@ -58,39 +182,62 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
         }));
 
       const vendorBills = [];
+      const vendorPaymentRows = [];
       if (includeVendorLedger) {
+        /*
+         * PRECEDENCE: PI (include_in_ledger=true) > PO > Allocation
+         * A PI with linked_po_id supersedes that PO entry in the ledger.
+         */
+        const vendorPIs = purchaseInvoices.filter(
+          pi => pi.vendor_id === filterId && pi.include_in_ledger && pi.status !== 'Rejected'
+        );
+        const supersededPOKeys = new Set(
+          vendorPIs.filter(pi => pi.linked_po_id).map(pi => pi.linked_po_id)
+        );
+
+        // POs — skip superseded ones
         projects.forEach(p => {
           if (p.purchase_orders) {
             p.purchase_orders.forEach(po => {
               if (po.vendor_id === filterId && po.status !== 'Cancelled') {
+                // H-5: match supersession by stable po.id OR legacy composite key
+                const poKey = `${p.id}::${po.po_no}`;
+                if (supersededPOKeys.has(po.id || '') || supersededPOKeys.has(poKey)) return;
                 const eff = getEffectivePOCost(po);
-                const inv = po.vendor_invoice;
                 vendorBills.push({
                   date: po.date,
-                  desc: `Vendor Bill: ${po.po_no} (${p.project_name})${eff.source === 'invoice' ? ' [Invoice]' : ' [PO]'}`,
-                  debit: 0,
-                  credit: eff.total,
-                  type: 'vendor_bill',
-                  invoice_status: inv?.status || '',
-                  invoice_no: inv?.invoice_no || '',
-                  invoice_date: inv?.invoice_date || ''
+                  desc: `PO: ${po.po_no} (${p.project_name})`,
+                  debit: 0, credit: eff.total, type: 'vendor_bill',
+                  invoice_status: '', invoice_no: '', invoice_date: ''
                 });
               }
             });
           }
         });
-      }
 
-      const vendorPaymentRows = includeVendorLedger
-        ? vendorPayments.filter(p => p.vendor_id === filterId).map(p => ({
+        // Purchase Invoices (supersede linked PO or standalone)
+        vendorPIs.forEach(pi => {
+          const piTotal = (parseFloat(pi.amount) || 0) + (parseFloat(pi.gst_amount) || 0);
+          const linkedLabel = pi.linked_po_no ? ` (replaces PO ${pi.linked_po_no})` : '';
+          vendorBills.push({
+            date: pi.invoice_date,
+            desc: `PI: ${pi.pi_no}${linkedLabel} — ${pi.description || pi.vendor_name}`,
+            debit: 0, credit: piTotal, type: 'purchase_invoice',
+            invoice_status: pi.status || '',
+            invoice_no: pi.invoice_ref || pi.pi_no,
+            invoice_date: pi.invoice_date || ''
+          });
+        });
+
+        vendorPayments.filter(p => p.vendor_id === filterId).forEach(p =>
+          vendorPaymentRows.push({
             date: p.date,
             desc: `Vendor Payment: ${p.mode} - ${p.reference}`,
-            debit: parseFloat(p.amount || 0),
-            credit: 0,
-            type: 'vendor_payment',
+            debit: parseFloat(p.amount || 0), credit: 0, type: 'vendor_payment',
             invoice_status: '', invoice_no: '', invoice_date: ''
-          }))
-        : [];
+          })
+        );
+      }
 
       const combined = [...clientInvoices, ...clientPayments, ...vendorBills, ...vendorPaymentRows]
         .sort((a,b) => new Date(a.date) - new Date(b.date));
@@ -154,37 +301,69 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
         });
     }
 
-    // --- 8. Vendor Ledger Report (NEW) ---
+    // --- 8. Vendor Ledger Report ---
     if (reportType === 'vendor_ledger') {
       if (!filterId) return [];
 
-      // Get POs (Bills)
+      /*
+       * PRECEDENCE: PI (include_in_ledger=true) > PO > Allocation
+       */
+      const vendorPIs = purchaseInvoices.filter(
+        pi => pi.vendor_id === filterId && pi.include_in_ledger && pi.status !== 'Rejected'
+      );
+      const supersededPOKeys = new Set(
+        vendorPIs.filter(pi => pi.linked_po_id).map(pi => pi.linked_po_id)
+      );
+
+      // POs — skip superseded
       const vendorBills = [];
       projects.forEach(p => {
-          if(p.purchase_orders) {
-              p.purchase_orders.forEach(po => {
-                  if(po.vendor_id === filterId && po.status !== 'Cancelled') {
-                      const eff = getEffectivePOCost(po);
-                      vendorBills.push({
-                          date: po.date,
-                          desc: `${eff.source === 'invoice' ? 'Invoice' : 'PO'}: ${po.po_no} (${p.project_name})`,
-                          credit: eff.total, // We owe this
-                          debit: 0,
-                          type: 'bill'
-                      });
-                  }
+        if (p.purchase_orders) {
+          p.purchase_orders.forEach(po => {
+            if (po.vendor_id === filterId && po.status !== 'Cancelled') {
+              // H-5: match supersession by stable po.id OR legacy composite key
+              const poKey = `${p.id}::${po.po_no}`;
+              if (supersededPOKeys.has(po.id || '') || supersededPOKeys.has(poKey)) return;
+              const eff = getEffectivePOCost(po);
+              vendorBills.push({
+                date: po.date,
+                desc: `PO: ${po.po_no} (${p.project_name})`,
+                credit: eff.total, debit: 0, type: 'bill'
               });
-          }
+            }
+          });
+        }
       });
 
-      // Get Payments
+      // Purchase Invoices
+      vendorPIs.forEach(pi => {
+        const piTotal = (parseFloat(pi.amount) || 0) + (parseFloat(pi.gst_amount) || 0);
+        const linkedLabel = pi.linked_po_no ? ` (replaces PO ${pi.linked_po_no})` : '';
+        vendorBills.push({
+          date: pi.invoice_date,
+          desc: `PI: ${pi.pi_no}${linkedLabel} — ${pi.description || pi.vendor_name}`,
+          credit: piTotal, debit: 0, type: 'purchase_invoice'
+        });
+      });
+
+      // Payments
       const vPayments = vendorPayments.filter(p => p.vendor_id === filterId).map(p => ({
-          date: p.date, desc: `Payment: ${p.mode} - ${p.reference}`, credit: 0, debit: parseFloat(p.amount), type: 'payment'
+        date: p.date, desc: `Payment: ${p.mode} - ${p.reference}`,
+        credit: 0, debit: parseFloat(p.amount || 0), type: 'payment'
       }));
 
-      const combined = [...vendorBills, ...vPayments].sort((a,b) => new Date(a.date) - new Date(b.date));
+      const combined = [...vendorBills, ...vPayments].sort((a, b) => new Date(a.date) - new Date(b.date));
       let balance = 0;
-      return combined.map(row => { balance += (row.credit - row.debit); return { Date: row.date, Description: row.desc, 'Bill (Cr)': row.credit, 'Paid (Dr)': row.debit, Balance: balance }; });
+      return combined.map(row => {
+        balance += (row.credit - row.debit);
+        return {
+          Date: row.date,
+          Description: row.desc,
+          'Bill (Cr)': row.credit,
+          'Paid (Dr)': row.debit,
+          Balance: balance
+        };
+      });
     }
 
     // --- 6. Employee Ledger (NEW) ---
@@ -313,10 +492,14 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
       return [...summaryRows, ...combinedRows, totalRow, ...unapprovedRows];
     }
 
-    // --- 7. Client/Vendor Balance Report (UPDATED) ---
+    // --- 7. Client/Vendor Balance Report ---
+    // C-3: Net balance is now read directly from the snapshot's party
+    // ledger so it reconciles with the Accounting → Ledger view. The
+    // bill/invoice/paid totals are kept for context but the authoritative
+    // 'Net Balance' column is the snapshot balance.
     if (reportType === 'client_balance') {
       return clients.map(c => {
-          // Client Logic (Receivables)
+          // Client Logic (Receivables) — used for context columns only
           let clientInvoiced = 0;
           let clientReceived = 0;
 
@@ -328,7 +511,7 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
              clientReceived = clientPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
           }
 
-          // Vendor Logic (Payables)
+          // Vendor Logic (Payables) — used for context columns only
           let vendorBilled = 0;
           let vendorPaid = 0;
 
@@ -345,9 +528,8 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
              vendorPaid = vendorPayments.filter(p => p.vendor_id === c.id).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
           }
 
-          const receivable = clientInvoiced - clientReceived;
-          const payable = vendorBilled - vendorPaid;
-          const netBalance = receivable - payable;
+          // Authoritative net balance from snapshot ledger.
+          const snapshotBalance = getPartyBalanceFromSnapshot(c.name, c.id);  // M-5: id-first lookup
 
           return {
               Name: c.name,
@@ -356,7 +538,7 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
               'Client Rec': clientReceived,
               'Vendor Bill': vendorBilled,
               'Vendor Paid': vendorPaid,
-              'Net Balance': netBalance // Positive = We collect, Negative = We pay
+              'Net Balance': snapshotBalance, // From accounting snapshot
           };
       }).sort((a, b) => b['Net Balance'] - a['Net Balance']);
     }
@@ -622,44 +804,58 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
     }
 
     // --- 14. Aging Report — Outstanding Receivables ---
+    // C-3: Aging is now derived from the accounting snapshot's party ledger
+    // (which respects PI→PO→Allocation precedence and excludes
+    // cancelled/rejected docs). We bucket by the date of each unmatched
+    // debit entry on the party account (FIFO match against credits).
     if (reportType === 'aging_report') {
       const now = new Date();
+      const bucketize = (daysOld) => {
+        if (daysOld <= 30) return '0-30';
+        if (daysOld <= 60) return '31-60';
+        if (daysOld <= 90) return '61-90';
+        return '90+';
+      };
+
       return clients
         .filter(c => c.type === 'Client' || c.type === 'Both')
         .map(c => {
-          const clientProjects = projects.filter(p => p.client_id === c.id && ['Completed', 'Closed'].includes(p.status));
-          const totalInvoiced = clientProjects.reduce((sum, p) => sum + getProjectGrandTotal(p), 0);
-          const totalReceived = payments
-            .filter(pay => pay.client_id === c.id)
-            .reduce((sum, pay) => sum + parseFloat(pay.amount || 0), 0);
-          const totalOutstanding = totalInvoiced - totalReceived;
-          if (totalOutstanding <= 0.01) return null;
+          const partyKey = `Party: ${c.name}`;
+          const partyRow = accountingSnapshot.partyMap[partyKey];
+          if (!partyRow || partyRow.balance <= 0.01) return null;
 
-          let bucket30 = 0, bucket60 = 0, bucket90 = 0, bucket90plus = 0;
-          let remaining = totalOutstanding;
+          // FIFO match credits (payments) against debits (invoices/projects)
+          const debits = (partyRow.entries || [])
+            .filter(e => e.side === 'Dr')
+            .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+          const credits = (partyRow.entries || [])
+            .filter(e => e.side === 'Cr')
+            .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
-          // Attribute outstanding to projects by date (oldest first gets the remainder)
-          [...clientProjects]
-            .sort((a, b) => new Date(a.end_date) - new Date(b.end_date))
-            .forEach(p => {
-              if (remaining <= 0) return;
-              const daysOld = Math.floor((now - new Date(p.end_date)) / (1000 * 60 * 60 * 24));
-              const pTotal = getProjectGrandTotal(p);
-              const allocated = Math.min(pTotal, remaining);
-              remaining -= allocated;
-              if (daysOld <= 30) bucket30 += allocated;
-              else if (daysOld <= 60) bucket60 += allocated;
-              else if (daysOld <= 90) bucket90 += allocated;
-              else bucket90plus += allocated;
-            });
+          // Note: party debits credit their account in our convention. Need
+          // to inspect both directions: a Dr entry on the party means we
+          // billed them; a Cr entry means they paid. Because the entries[]
+          // array on the ledger row contains both sides regardless of which
+          // side this row represents, we filter by direction.
+          let creditPool = credits.reduce((s, e) => s + (e.amount || 0), 0);
+          const buckets = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
+          debits.forEach(d => {
+            const amt = d.amount || 0;
+            const consumed = Math.min(creditPool, amt);
+            creditPool -= consumed;
+            const remaining = amt - consumed;
+            if (remaining <= 0) return;
+            const daysOld = Math.floor((now - new Date(d.date)) / (1000 * 60 * 60 * 24));
+            buckets[bucketize(daysOld)] += remaining;
+          });
 
           return {
             Client: c.name,
-            'Total Outstanding': totalOutstanding,
-            '0-30 Days': bucket30,
-            '31-60 Days': bucket60,
-            '61-90 Days': bucket90,
-            '90+ Days': bucket90plus,
+            'Total Outstanding': partyRow.balance,
+            '0-30 Days': buckets['0-30'],
+            '31-60 Days': buckets['31-60'],
+            '61-90 Days': buckets['61-90'],
+            '90+ Days': buckets['90+'],
             _phone: c.contacts?.[0]?.phone || '',
           };
         })
@@ -667,8 +863,216 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
         .sort((a, b) => b['Total Outstanding'] - a['Total Outstanding']);
     }
 
+    // --- 15. GSTR-1 Invoice Register ---
+    if (reportType === 'gstr1') {
+      const s = startDate ? new Date(startDate) : null;
+      const e = endDate ? new Date(endDate) : null;
+      if (e) e.setHours(23, 59, 59, 999);
+
+      const invoicedProjects = projects.filter(p =>
+        (p.invoice_status === 'Invoiced' || p.status === 'Closed') &&
+        p.invoice_no
+      );
+
+      return invoicedProjects
+        .filter(p => {
+          if (!s && !e) return true;
+          const d = new Date(p.invoice_date || p.end_date);
+          if (s && d < s) return false;
+          if (e && d > e) return false;
+          return true;
+        })
+        .sort((a, b) => new Date(a.invoice_date || a.end_date) - new Date(b.invoice_date || b.end_date))
+        .map(p => {
+          const client = clients.find(c => c.id === p.client_id);
+          const gstBD = getProjectGSTBreakdown(p, filterId || '', client?.gstin || '');
+          const isIGST = gstBD.supplyType === 'IGST';
+          const fy = (() => { const d = new Date(p.invoice_date || p.end_date); const m = d.getMonth(); const yr = d.getFullYear(); return m < 3 ? `${yr-1}-${String(yr).slice(-2)}` : `${yr}-${String(yr+1).slice(-2)}`; })();
+          return {
+            'FY': fy,
+            'Invoice No': p.invoice_no || '—',
+            'Invoice Date': p.invoice_date || p.end_date || '—',
+            'Client': client?.name || '—',
+            'Client GSTIN': client?.gstin || 'B2C',
+            'Supply Type': isIGST ? 'IGST' : 'CGST+SGST',
+            'Taxable Value': gstBD.totals.taxable,
+            'IGST': isIGST ? gstBD.totals.igstAmt : 0,
+            'CGST': isIGST ? 0 : gstBD.totals.cgstAmt,
+            'SGST': isIGST ? 0 : gstBD.totals.sgstAmt,
+            'Total': gstBD.totals.total,
+            'Project Status': p.status,
+          };
+        });
+    }
+
+    // --- 16. ITC Register (Input Tax Credit from POs & Purchase Invoices) ---
+    if (reportType === 'itc_register') {
+      const s = startDate ? new Date(startDate) : null;
+      const e = endDate ? new Date(endDate) : null;
+      if (e) e.setHours(23, 59, 59, 999);
+
+      const rows = [];
+
+      // From Purchase Invoices (highest accuracy - actual tax invoices received)
+      purchaseInvoices.forEach(pi => {
+        if (pi.status === 'Rejected') return;
+        const vendor = clients.find(c => c.id === pi.vendor_id);
+        const d = new Date(pi.invoice_date || pi.created_at);
+        if (s && d < s) return;
+        if (e && d > e) return;
+        const gstAmt = parseFloat(pi.gst_amount || 0);
+        rows.push({
+          Date: pi.invoice_date || '—',
+          Source: 'Purchase Invoice',
+          'Doc No': pi.pi_no || '—',
+          'Vendor Inv Ref': pi.invoice_ref || '—',
+          Vendor: vendor?.name || pi.vendor_name || '—',
+          'Vendor GSTIN': vendor?.gstin || '—',
+          Description: pi.description || pi.pi_no || '—',
+          'Taxable Amount': parseFloat(pi.amount || 0),
+          'GST (Input)': gstAmt,
+          'Total': parseFloat(pi.amount || 0) + gstAmt,
+          Status: pi.status || 'Active',
+          'Eligible ITC': pi.include_in_ledger ? 'Yes' : 'No',
+        });
+      });
+
+      // From Project POs (where vendor invoice is Accepted/Verified — ITC eligible)
+      projects.forEach(p => {
+        (p.purchase_orders || []).forEach(po => {
+          if (po.status === 'Cancelled') return;
+          const inv = po.vendor_invoice;
+          // Only include POs with accepted/verified vendor invoices (actual ITC)
+          // or all POs if no PI already covers this (via linked_po_id check)
+          const piCoversThisPO = purchaseInvoices.some(pi =>
+            pi.status !== 'Rejected' && (
+              (po.id && pi.linked_po_id === po.id) ||
+              pi.linked_po_id === `${p.id}::${po.po_no}`
+            )
+          );
+          if (piCoversThisPO) return; // Already counted via PI
+          const vendor = clients.find(c => c.id === po.vendor_id);
+          const d = new Date(po.date || p.start_date);
+          if (s && d < s) return;
+          if (e && d > e) return;
+          const eff = getEffectivePOCost(po);
+          const hasActualInvoice = inv && (inv.status === 'Accepted' || inv.status === 'Verified');
+          rows.push({
+            Date: po.date || p.start_date || '—',
+            Source: hasActualInvoice ? 'PO (Invoice Verified)' : 'PO (Committed)',
+            'Doc No': po.po_no || '—',
+            'Vendor Inv Ref': inv?.invoice_ref || '—',
+            Vendor: vendor?.name || po.vendor_name || '—',
+            'Vendor GSTIN': vendor?.gstin || '—',
+            Description: `PO for: ${p.project_name}`,
+            'Taxable Amount': eff.base,
+            'GST (Input)': eff.gst,
+            'Total': eff.total,
+            Status: po.status || 'Draft',
+            'Eligible ITC': hasActualInvoice ? 'Yes' : 'Pending',
+          });
+        });
+      });
+
+      rows.sort((a, b) => new Date(a.Date) - new Date(b.Date));
+
+      if (rows.length === 0) return rows;
+
+      const totalTaxable = rows.reduce((s, r) => s + r['Taxable Amount'], 0);
+      const totalGST = rows.reduce((s, r) => s + r['GST (Input)'], 0);
+      const eligibleITC = rows.filter(r => r['Eligible ITC'] === 'Yes').reduce((s, r) => s + r['GST (Input)'], 0);
+
+      rows.push({
+        Date: '—', Source: 'TOTAL', 'Doc No': '', 'Vendor Inv Ref': '', Vendor: '', 'Vendor GSTIN': '',
+        Description: `${rows.length} entries`,
+        'Taxable Amount': totalTaxable,
+        'GST (Input)': totalGST,
+        Total: totalTaxable + totalGST,
+        Status: '',
+        'Eligible ITC': `Confirmed: ₹${eligibleITC.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
+        _isTotal: true,
+      });
+
+      return rows;
+    }
+
+    // --- 17. GST Rate-wise Breakup ---
+    if (reportType === 'gst_ratewise') {
+      const s = startDate ? new Date(startDate) : null;
+      const e = endDate ? new Date(endDate) : null;
+      if (e) e.setHours(23, 59, 59, 999);
+
+      // Build rate buckets for output GST
+      const outputBuckets = {}; // key = gstRate
+      const inputBuckets = {};
+
+      projects
+        .filter(p => ['Completed', 'Closed'].includes(p.status))
+        .forEach(p => {
+          const d = new Date(p.invoice_date || p.end_date);
+          if (s && d < s) return;
+          if (e && d > e) return;
+          const gstBD = getProjectGSTBreakdown(p, '', '');
+          gstBD.items.forEach(item => {
+            const rate = item.gstRate;
+            if (!outputBuckets[rate]) outputBuckets[rate] = { taxable: 0, gst: 0, count: 0 };
+            outputBuckets[rate].taxable += item.taxable;
+            outputBuckets[rate].gst += (item.igstAmt || item.cgstAmt + item.sgstAmt);
+            outputBuckets[rate].count += 1;
+          });
+        });
+
+      // Input from POs + Purchase Invoices
+      purchaseInvoices.filter(pi => pi.status !== 'Rejected').forEach(pi => {
+        const d = new Date(pi.invoice_date || pi.created_at);
+        if (s && d < s) return;
+        if (e && d > e) return;
+        const base = parseFloat(pi.amount || 0);
+        const gst = parseFloat(pi.gst_amount || 0);
+        const rate = base > 0 ? Math.round((gst / base) * 100) : 0;
+        if (!inputBuckets[rate]) inputBuckets[rate] = { taxable: 0, gst: 0 };
+        inputBuckets[rate].taxable += base;
+        inputBuckets[rate].gst += gst;
+      });
+      projects.forEach(p => {
+        (p.purchase_orders || []).forEach(po => {
+          if (po.status === 'Cancelled') return;
+          const piCovers = purchaseInvoices.some(pi =>
+            pi.status !== 'Rejected' && (
+              (po.id && pi.linked_po_id === po.id) ||
+              pi.linked_po_id === `${p.id}::${po.po_no}`
+            )
+          );
+          if (piCovers) return;
+          const d = new Date(po.date || p.start_date);
+          if (s && d < s) return;
+          if (e && d > e) return;
+          const eff = getEffectivePOCost(po);
+          const rate = eff.base > 0 ? Math.round((eff.gst / eff.base) * 100) : 0;
+          if (!inputBuckets[rate]) inputBuckets[rate] = { taxable: 0, gst: 0 };
+          inputBuckets[rate].taxable += eff.base;
+          inputBuckets[rate].gst += eff.gst;
+        });
+      });
+
+      const allRates = [...new Set([...Object.keys(outputBuckets).map(Number), ...Object.keys(inputBuckets).map(Number)])].sort((a, b) => a - b);
+
+      return allRates.map(rate => {
+        const out = outputBuckets[rate] || { taxable: 0, gst: 0 };
+        const inp = inputBuckets[rate] || { taxable: 0, gst: 0 };
+        return {
+          'GST Rate': `${rate}%`,
+          'Output Taxable': out.taxable,
+          'Output GST': out.gst,
+          'Input Taxable': inp.taxable,
+          'Input GST (ITC)': inp.gst,
+          'Net GST Payable': out.gst - inp.gst,
+        };
+      });
+    }
+
     return [];
-  }, [reportType, filterId, selectedProjId, startDate, endDate, projects, clients, payments, expenses, employees]);
+  }, [reportType, filterId, selectedProjId, startDate, endDate, projects, clients, payments, expenses, employees, vendorPayments, purchaseInvoices, accountingSnapshot]);
 
   // --- Export Functions ---
   const exportPDF = () => {
@@ -794,6 +1198,9 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
                <option value="project_pnl">Project Profit & Loss</option>
                <option disabled>--- Financial Analytics ---</option>
                <option value="gst_report">GST Report (Monthly Output vs Input)</option>
+               <option value="gstr1">GSTR-1 Invoice Register</option>
+               <option value="gst_ratewise">GST Rate-wise Breakup</option>
+               <option value="itc_register">ITC Register (Input Tax Credit)</option>
                <option value="pnl_timeline">P&amp;L Timeline (Profit per Project)</option>
                <option value="aging_report">Aging Report (Outstanding Receivables)</option>
             </select>
@@ -856,7 +1263,7 @@ const Reports = ({ projects, clients, employees, expenses, inventory, payments, 
             </div>
           )}
 
-          {['projects_summary', 'employee_ledger', 'rejected_expenses', 'clarification_expenses', 'invoice_status', 'gst_report', 'pnl_timeline'].includes(reportType) && (
+          {['projects_summary', 'employee_ledger', 'rejected_expenses', 'clarification_expenses', 'invoice_status', 'gst_report', 'gstr1', 'gst_ratewise', 'itc_register', 'pnl_timeline'].includes(reportType) && (
             <>
               <div><label className="block text-sm font-medium text-slate-700 mb-1">From</label><input type="date" className="rounded border p-2 text-black" value={startDate} onChange={e => setStartDate(e.target.value)} /></div>
               <div><label className="block text-sm font-medium text-slate-700 mb-1">To</label><input type="date" className="rounded border p-2 text-black" value={endDate} onChange={e => setEndDate(e.target.value)} /></div>

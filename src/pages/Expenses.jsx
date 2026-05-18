@@ -9,6 +9,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage
 import { storage } from '../firebase';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { formatCurrency } from '../utils/helpers';
+import { assertFYNotLocked } from '../utils/fyLock';
 import { STATUS_COLORS, EXPENSE_CATS } from '../utils/constants';
 import { can } from '../utils/permissions';
 
@@ -25,7 +26,8 @@ const ProofBadge = ({ proof_url }) => {
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], payouts = [], currentEmpId, employees = [], logAction }) => {
+const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], payouts = [], currentEmpId, employees = [], logAction, expenseCats: expenseCatsProp, lockedFYs = [] }) => {
+  const expenseCats = expenseCatsProp || EXPENSE_CATS;
   const [viewMode, setViewMode] = useState('submit');
   const [batchList, setBatchList] = useState([]);
   const [expenseForm, setExpenseForm] = useState({ date: new Date().toISOString().split('T')[0], category: 'Travel', amount: '', remarks: '', is_general: false, project_id: '' });
@@ -114,9 +116,19 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   // Use currentEmpId if available (for mapped employees), otherwise fallback to user.uid
   const effectiveUserId = currentEmpId || user.uid;
 
+  const isProjectEligibleForExpense = (p) => {
+    const eligibleStatuses = ['Confirmed', 'Ongoing', 'Completed'];
+    if (!eligibleStatuses.includes(p.status)) return false;
+    if (p.status === 'Completed' && p.end_date) {
+      const daysSinceEnd = (new Date() - new Date(p.end_date)) / (1000 * 60 * 60 * 24);
+      if (daysSinceEnd > 15) return false;
+    }
+    return true;
+  };
+
   const availableProjects = useMemo(() => role === 'tech'
-    ? projects.filter(p => (p.assigned_employees || []).includes(effectiveUserId) || ['Confirmed','Ongoing'].includes(p.status))
-    : projects.filter(p => ['Confirmed','Ongoing'].includes(p.status)), [role, projects, effectiveUserId]);
+    ? projects.filter(p => (p.assigned_employees || []).includes(effectiveUserId) || isProjectEligibleForExpense(p))
+    : projects.filter(p => isProjectEligibleForExpense(p)), [role, projects, effectiveUserId]);
 
   const filteredProjects = useMemo(() => availableProjects.filter(p => p.project_name.toLowerCase().includes(projectSearch.toLowerCase())), [availableProjects, projectSearch]);
 
@@ -136,6 +148,10 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const handleSubmitBatch = async () => {
     if (!can(role, 'expenses', 'create')) return alert('Access denied: insufficient permissions.');
     if (batchList.length === 0) return;
+    // C-2 fix: every batched item's date must be in an unlocked FY.
+    for (const it of batchList) {
+      if (!assertFYNotLocked(it.date, lockedFYs)) return;
+    }
 
     const successfulSubmissions = [];
     const duplicateSubmissions = [];
@@ -191,6 +207,10 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
 
   const handleApprove = async (id) => {
     if (!can(role, 'expenses', 'approve')) return alert('Access denied: only Admin, Accountant, or Manager can approve expenses.');
+    // C-2 / H-7 fix: Approval makes the expense post to P&L — block when its
+    // FY is already locked.
+    const exp = expenses.find(e => e.id === id);
+    if (exp && !assertFYNotLocked(exp.date, lockedFYs)) return;
     if (!confirm("Approve this expense?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' });
     logAction('expenses', 'approve', id, {}, 'Expense Approved');
@@ -292,6 +312,9 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     if (!editForm.amount || (!editForm.is_general && !editForm.project_id)) {
       return alert('Fill required fields');
     }
+    if (!assertFYNotLocked(editForm.date, lockedFYs)) return;
+    const orig = expenses.find(e => e.id === editingExpenseId);
+    if (orig?.date && orig.date !== editForm.date && !assertFYNotLocked(orig.date, lockedFYs)) return;
     const editAmt = parseFloat(editForm.amount);
     if (expenseProofSettings.threshold > 0 && editAmt > expenseProofSettings.threshold && !editProofFile) {
       return alert(`Proof is required for expenses above ${formatCurrency(expenseProofSettings.threshold)}. Please attach an invoice/bill/receipt.`);
@@ -317,6 +340,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const handleDeleteExpense = async (exp) => {
     if (!can(role, 'expenses', 'delete')) return alert('Access denied: insufficient permissions.');
     if (!isEditableExpense(exp)) return;
+    if (!assertFYNotLocked(exp?.date, lockedFYs)) return;
     setDeleteConfirm({
       isOpen: true,
       title: 'Delete Expense',
@@ -655,7 +679,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                   </select>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} /></div><div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>{EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}</select></div></div>
+              <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} /></div><div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>{expenseCats.map(c => <option key={c}>{c}</option>)}</select></div></div>
               <div><label className="text-xs font-bold text-slate-700">Amount</label><input type="number" className="w-full rounded border border-slate-300 p-2 text-black" placeholder="0.00" value={expenseForm.amount} onChange={e => setExpenseForm({...expenseForm, amount: e.target.value})} /></div>
               <div><label className="text-xs font-bold text-slate-700">Remarks</label><textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={2} value={expenseForm.remarks} onChange={e => setExpenseForm({...expenseForm, remarks: e.target.value})} placeholder="Description..." /></div>
               <div>
@@ -1172,7 +1196,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                 <label className="block text-xs font-medium text-slate-500 mb-1">Category</label>
                 <select className="w-full rounded border border-slate-300 p-1.5 text-sm text-black" value={trackerFilters.category} onChange={e => setTrackerFilters(f => ({...f, category: e.target.value}))}>
                   <option value="">All Categories</option>
-                  {EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}
+                  {expenseCats.map(c => <option key={c}>{c}</option>)}
                 </select>
               </div>
               <div>
@@ -1433,7 +1457,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
           )}
           <div className="grid grid-cols-2 gap-3">
             <div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={editForm.date} onChange={e => setEditForm({ ...editForm, date: e.target.value })} /></div>
-            <div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={editForm.category} onChange={e => setEditForm({ ...editForm, category: e.target.value })}>{EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}</select></div>
+            <div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={editForm.category} onChange={e => setEditForm({ ...editForm, category: e.target.value })}>{expenseCats.map(c => <option key={c}>{c}</option>)}</select></div>
           </div>
           <div><label className="text-xs font-bold text-slate-700">Amount</label><input type="number" className="w-full rounded border border-slate-300 p-2 text-black" placeholder="0.00" value={editForm.amount} onChange={e => setEditForm({ ...editForm, amount: e.target.value })} /></div>
           <div><label className="text-xs font-bold text-slate-700">Remarks</label><textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={2} value={editForm.remarks} onChange={e => setEditForm({ ...editForm, remarks: e.target.value })} placeholder="Description..." /></div>

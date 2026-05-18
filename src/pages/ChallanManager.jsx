@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Search, Printer, Edit, Trash2, Truck } from 'lucide-react';
-import { updateDoc, doc, arrayRemove, arrayUnion, addDoc, collection, getDoc } from 'firebase/firestore';
+import { updateDoc, doc, arrayRemove, arrayUnion, addDoc, collection, getDoc, runTransaction } from 'firebase/firestore';
 import { formatCurrency, formatCurrencyPDF } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -85,12 +85,48 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
         try {
             const project = projects.find(p => p.id === challan.projectId);
             if (!project) return;
-            const originalChallan = project.challans.find(c => c.id === challan.id);
 
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', challan.projectId), {
-                challans: arrayRemove(originalChallan)
+            // H-14: read-modify-write under transaction so concurrent edits
+            // can't undo the deletion silently.
+            const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', challan.projectId);
+            await runTransaction(db, async (transaction) => {
+                const projectDoc = await transaction.get(projectRef);
+                if (!projectDoc.exists()) throw new Error('Project not found');
+                const existing = Array.isArray(projectDoc.data().challans) ? projectDoc.data().challans : [];
+                const next = existing.filter(c => c.id !== challan.id);
+                transaction.update(projectRef, { challans: next });
             });
             logAction('projects', 'delete_challan', challan.projectId, { challan_no: challan.challan_no }, project.project_name);
+
+            // H-3: reversal inventory_movements rows.
+            try {
+                const reverseDir = challan.type === 'delivery' ? 'in' : 'out';
+                const ts = new Date().toISOString();
+                await Promise.all(
+                    (challan.items || [])
+                        .filter(i => i.item_id)
+                        .map(i => addDoc(
+                            collection(db, 'artifacts', appId, 'public', 'data', 'inventory_movements'),
+                            {
+                                item_id: i.item_id,
+                                item_name: i.item_name || '',
+                                qty: parseInt(i.qty) || 0,
+                                direction: reverseDir,
+                                challan_id: challan.id,
+                                challan_no: challan.challan_no,
+                                challan_type: challan.type,
+                                project_id: challan.projectId,
+                                project_name: project.project_name,
+                                client_id: project.client_id || null,
+                                date: challan.date,
+                                reversal: true,
+                                recorded_at: ts,
+                            }
+                        ))
+                );
+            } catch (mvErr) {
+                console.warn('inventory_movements reversal write failed (non-fatal):', mvErr.message);
+            }
         } catch(e) {
             console.error(e);
             alert("Failed to delete challan");
@@ -149,22 +185,59 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
     if (itemsToShip.length === 0) return alert("Please select at least one item.");
 
     try {
-        const originalChallan = targetProject.challans.find(c => c.id === editingChallan.id);
-
-        const updatedChallan = {
-            ...originalChallan,
-            items: itemsToShip,
-            transport: challanForm,
-            date: new Date(challanForm.date).toISOString(),
-            updated_at: new Date().toISOString()
-        };
-
         const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', targetProject.id);
 
-        await updateDoc(projectRef, { challans: arrayRemove(originalChallan) });
-        await updateDoc(projectRef, { challans: arrayUnion(updatedChallan) });
+        // H-14: single-transaction read-modify-write over the challans array.
+        const updatedChallan = await runTransaction(db, async (transaction) => {
+            const projectDoc = await transaction.get(projectRef);
+            if (!projectDoc.exists()) throw new Error('Project not found');
+            const existing = Array.isArray(projectDoc.data().challans) ? projectDoc.data().challans : [];
+            const original = existing.find(c => c.id === editingChallan.id);
+            if (!original) throw new Error('Challan no longer exists. Reload and try again.');
+            const record = {
+                ...original,
+                items: itemsToShip,
+                transport: challanForm,
+                date: new Date(challanForm.date).toISOString(),
+                updated_at: new Date().toISOString(),
+            };
+            const next = existing.map(c => c.id === editingChallan.id ? record : c);
+            transaction.update(projectRef, { challans: next });
+            return record;
+        });
 
         logAction('projects', 'update_challan', targetProject.id, { challan_no: updatedChallan.challan_no }, targetProject.project_name);
+
+        // H-3: edit-event inventory_movements row (final qty replaces prior).
+        try {
+            const direction = updatedChallan.type === 'delivery' ? 'out' : 'in';
+            const ts = new Date().toISOString();
+            await Promise.all(
+                itemsToShip
+                    .filter(i => i.item_id)
+                    .map(i => addDoc(
+                        collection(db, 'artifacts', appId, 'public', 'data', 'inventory_movements'),
+                        {
+                            item_id: i.item_id,
+                            item_name: i.item_name || '',
+                            qty: parseInt(i.qty) || 0,
+                            direction,
+                            challan_id: updatedChallan.id,
+                            challan_no: updatedChallan.challan_no,
+                            challan_type: updatedChallan.type,
+                            project_id: targetProject.id,
+                            project_name: targetProject.project_name,
+                            client_id: targetProject.client_id || null,
+                            date: updatedChallan.date,
+                            edit: true,
+                            recorded_at: ts,
+                        }
+                    ))
+            );
+        } catch (mvErr) {
+            console.warn('inventory_movements edit write failed (non-fatal):', mvErr.message);
+        }
+
         setIsEditOpen(false);
         setEditingChallan(null);
     } catch (e) {

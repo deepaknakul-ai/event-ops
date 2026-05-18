@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box, Plus, Search, Edit, Trash2, Layers, Users, DollarSign,
-  Truck, Settings, Hammer, CalendarDays, Printer, Tag, ChevronDown, X
+  Truck, Settings, Hammer, CalendarDays, Printer, Tag, ChevronDown, X,
+  Archive, ArchiveRestore
 } from 'lucide-react';
 import { collection, addDoc, updateDoc, doc, deleteDoc } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
@@ -12,11 +13,13 @@ import { can } from '../utils/permissions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
-const Inventory = ({ inventory, clients, projects = [], role, db, appId, logAction }) => { // version 3.3.0 vendors database addition: added clients prop
+const Inventory = ({ inventory, clients, projects = [], role, db, appId, logAction, categories: categoriesProp }) => { // version 3.3.0 vendors database addition: added clients prop
+  const categories = categoriesProp || CATEGORIES;
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('All');
+  const [filterArchived, setFilterArchived] = useState('active');
   const [activeTab, setActiveTab] = useState('general');
   const [compForm, setCompForm] = useState({ item_id: '', qty: 1 });
   const [supplierForm, setSupplierForm] = useState({ vendor_id: '', brand: '', spec: '', rate: 0 });
@@ -32,6 +35,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
   const initialForm = {
     // General
+    item_type: 'Equipment',
     asset_id: '', name: '', brand: '', category: '', sub_category: '',
     serial_number: '', status: 'Available', location: '', total: 0,
     is_composite: false, composition: [],
@@ -52,7 +56,9 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     // Maintenance
     last_service_date: '', next_test_due: '', service_notes: '',
     // Misc
-    gst_rate: 18, is_external: false, hsn_code: '', remarks: '', specifications: ''
+    gst_rate: 18, is_external: false, hsn_code: '', remarks: '', specifications: '',
+    // M-3: low-stock reorder threshold (alerts when available qty drops below this).
+    reorder_level: 0
   };
 
   const [formData, setFormData] = useState(initialForm);
@@ -86,6 +92,16 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
       serial_numbers: item.serial_numbers || (item.serial_number ? [item.serial_number] : []),
       serial_details
     });
+  };
+
+  const handleArchive = async (id, archive) => {
+    if (!can(role, 'inventory', 'edit')) return alert('Access denied: insufficient permissions.');
+    const item = inventory.find(i => i.id === id);
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory', id), {
+      is_archived: archive,
+      archived_at: archive ? new Date().toISOString() : null
+    });
+    logAction('inventory', archive ? 'archive' : 'unarchive', id, {}, item?.name);
   };
 
   const handleDelete = async (id) => {
@@ -127,6 +143,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
       power_watts: parseFloat(formData.power_watts) || 0,
       current_amps: parseFloat(formData.current_amps) || 0,
       gst_rate: parseFloat(formData.gst_rate) || 18,
+      reorder_level: parseInt(formData.reorder_level) || 0,
       is_composite: formData.is_composite || false,
       composition: formData.composition || [],
       vendor_id: formData.vendor_id || '', // version 3.3.0 vendors database addition
@@ -269,15 +286,22 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     setFormData(prev => ({ ...prev, attributes: { ...prev.attributes, [key]: value } }));
   };
 
-  const filteredInventory = inventory.filter(item =>
-    (item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-     (item.brand && item.brand.toLowerCase().includes(searchTerm.toLowerCase())) ||
-     (item.asset_id && item.asset_id.toLowerCase().includes(searchTerm.toLowerCase())) ||
-     (item.serial_number && item.serial_number.toLowerCase().includes(searchTerm.toLowerCase())) ||
-     (item.serial_numbers && item.serial_numbers.some(sn => sn.toLowerCase().includes(searchTerm.toLowerCase())))
-    ) &&
-    (filterCategory === 'All' || item.category === filterCategory)
-  );
+  const filteredInventory = inventory.filter(item => {
+    const matchSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (item.brand && item.brand.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (item.asset_id && item.asset_id.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (item.serial_number && item.serial_number.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (item.serial_numbers && item.serial_numbers.some(sn => sn.toLowerCase().includes(searchTerm.toLowerCase())));
+    const matchCategory = filterCategory === 'All' || filterCategory === 'Service'
+      ? (filterCategory === 'Service' ? item.item_type === 'Service' : true)
+      : item.category === filterCategory;
+    const matchArchived = filterArchived === 'all'
+      ? true
+      : filterArchived === 'archived'
+        ? !!item.is_archived
+        : !item.is_archived;
+    return matchSearch && matchCategory && matchArchived;
+  });
 
   const paginatedInventory = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
@@ -286,7 +310,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, filterCategory]);
+  }, [searchTerm, filterCategory, filterArchived]);
 
   const renderField = (label, key, type='text', placeholder='') => (
     <div>
@@ -312,7 +336,13 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
           </div>
           <select className="rounded border px-3 py-1 bg-white text-sm outline-none flex-1 md:flex-none" value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
             <option value="All">All Categories</option>
-            {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+            <option value="Service">Service</option>
+            {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+          </select>
+          <select className="rounded border px-3 py-1 bg-white text-sm outline-none flex-1 md:flex-none" value={filterArchived} onChange={(e) => setFilterArchived(e.target.value)}>
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
+            <option value="all">All Items</option>
           </select>
           <button
             onClick={() => { setCalendarItemId(''); setIsCalendarOpen(true); }}
@@ -344,13 +374,14 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
           </thead>
           <tbody className="divide-y divide-slate-100">
             {paginatedInventory.map((item, idx) => (
-              <tr key={idx} className="hover:bg-slate-50 group">
+              <tr key={idx} className={`hover:bg-slate-50 group ${item.is_archived ? 'opacity-60' : ''}`}>
                 <td className="p-4 font-medium text-slate-800">
                   <div className="flex flex-col">
                     <span className="flex items-center gap-2">
                       {item.name}
                       {item.is_composite && <span className="rounded bg-indigo-100 px-2 py-0.5 text-xs text-indigo-700 border border-indigo-200">Kit</span>}
                       {item.is_external && <span className="rounded bg-purple-100 px-2 py-0.5 text-xs text-purple-700 border border-purple-200">Ext</span>}
+                      {item.is_archived && <span className="rounded bg-slate-200 px-2 py-0.5 text-xs text-slate-500 border border-slate-300">Archived</span>}
                     </span>
                     {item.asset_id && <span className="text-xs text-slate-400 font-mono">ID: {item.asset_id}</span>}
                     {/* version 3.3.0 vendors database addition: Show vendor name */}
@@ -363,9 +394,20 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                 <td className="p-4 text-slate-500 hidden md:table-cell">{item.category}</td>
                 {role !== 'tech' && <td className="p-4 text-right text-slate-800 font-mono">{formatCurrency(item.rate_per_day || 0)}</td>}
                 <td className="p-4 text-center text-slate-800">
-                    <span className={`px-2 py-1 rounded text-xs font-bold ${item.total > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                        {item.total}
-                    </span>
+                    {(() => {
+                      const total = parseInt(item.total) || 0;
+                      const reorder = parseInt(item.reorder_level) || 0;
+                      // M-3: red when out of stock, amber when at/below reorder level, green otherwise.
+                      const cls = total <= 0
+                        ? 'bg-red-100 text-red-700'
+                        : (reorder > 0 && total <= reorder ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700');
+                      return (
+                        <span className={`px-2 py-1 rounded text-xs font-bold ${cls}`}
+                          title={reorder > 0 && total <= reorder && total > 0 ? `Low stock — at or below reorder level (${reorder})` : ''}>
+                          {item.total}{reorder > 0 && total <= reorder && total > 0 ? ' ⚠' : ''}
+                        </span>
+                      );
+                    })()}
                 </td>
                 <td className="p-4 text-slate-500 hidden md:table-cell">{item.location}</td>
                 <td className="p-4 text-center">
@@ -381,6 +423,11 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                   <td className="p-4 text-center">
                     <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button onClick={() => openEdit(item)} className="rounded p-1 text-blue-600 hover:bg-blue-50"><Edit size={16} /></button>
+                      {item.is_archived ? (
+                        <button onClick={() => handleArchive(item.id, false)} title="Unarchive" className="rounded p-1 text-green-600 hover:bg-green-50"><ArchiveRestore size={16} /></button>
+                      ) : (
+                        <button onClick={() => handleArchive(item.id, true)} title="Archive item" className="rounded p-1 text-amber-600 hover:bg-amber-50"><Archive size={16} /></button>
+                      )}
                       <button onClick={() => handleDelete(item.id)} className="rounded p-1 text-red-600 hover:bg-red-50"><Trash2 size={16} /></button>
                     </div>
                   </td>
@@ -430,6 +477,23 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                     const serialCount = (formData.serial_details || []).length;
                     return (
                     <div className="space-y-4">
+                        {/* Item Type Toggle */}
+                        <div>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">Item Type</label>
+                            <div className="flex gap-2">
+                                {['Equipment', 'Service'].map(t => (
+                                    <button
+                                        key={t}
+                                        type="button"
+                                        onClick={() => setFormData({...formData, item_type: t})}
+                                        className={`px-4 py-1.5 rounded-full text-sm font-medium border transition ${formData.item_type === t ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-300 hover:border-indigo-400'}`}
+                                    >{t}</button>
+                                ))}
+                            </div>
+                            {formData.item_type === 'Service' && (
+                                <p className="text-xs text-slate-500 mt-1">Service items (internet, outsourced services) can be allocated to projects without physical tracking.</p>
+                            )}
+                        </div>
                         {/* Row 1: Asset ID + Item Name */}
                         <div className="grid grid-cols-2 gap-4">
                             {renderField('Asset ID / Barcode', 'asset_id', 'text', 'Scan Code')}
@@ -440,7 +504,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 mb-1">Category</label>
                                 <input className="w-full rounded border p-2 text-sm text-black bg-white" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} list="categories" />
-                                <datalist id="categories">{CATEGORIES.map(cat => <option key={cat} value={cat} />)}</datalist>
+                                <datalist id="categories">{categories.map(cat => <option key={cat} value={cat} />)}</datalist>
                             </div>
                         </div>
                         <div className="grid grid-cols-2 gap-4">
@@ -747,6 +811,10 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                         <div className="grid grid-cols-2 gap-4">
                             {renderField('GST Rate %', 'gst_rate', 'number')}
                             {renderField('HSN Code', 'hsn_code')}
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            {renderField('Reorder Level (qty)', 'reorder_level', 'number')}
+                            <div></div>
                         </div>
                     </div>
                 )}

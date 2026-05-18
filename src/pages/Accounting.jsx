@@ -1,0 +1,4998 @@
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import {
+  addDoc,
+  collection,
+  doc,
+  writeBatch,
+  deleteDoc,
+  getDocs,
+  updateDoc,
+  getDoc,
+  onSnapshot,
+  setDoc,
+} from 'firebase/firestore';
+import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { storage, auth } from '../firebase';
+import {
+  BookOpen,
+  FileSpreadsheet,
+  Receipt,
+  ReceiptText,
+  Scale,
+  Wallet,
+  Landmark,
+  PlusCircle,
+  ClipboardCheck,
+  CalendarSync,
+  Trash2,
+  Sparkles,
+  Edit,
+  Plus,
+  Download,
+  Clock,
+  FileText,
+} from 'lucide-react';
+import { formatCurrency, getFYFromDate, getProjectGSTBreakdown } from '../utils/helpers';
+import { assertFYNotLocked } from '../utils/fyLock';
+import * as XLSX from '@e965/xlsx';
+import {
+  buildAccountingSnapshot,
+  generateBookInvoiceNumber,
+  generateJournalVoucherNumber,
+  getDefaultChartOfAccounts,
+  getNextFinancialYear,
+} from '../utils/accounting';
+import { can } from '../utils/permissions';
+import { ConfirmDeleteModal, Modal } from '../components/Shared';
+import VirtualAccountant from '../components/VirtualAccountant';
+import RecurringEntries from './RecurringEntries';
+import BankReconciliation from './BankReconciliation';
+import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
+import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
+
+const TABS = [
+  // ── Money Overview (layman-friendly first) ──
+  { id: 'overview',             label: 'Overview',              icon: Wallet,          group: 'overview' },
+  // ── Books & Records ──
+  { id: 'sales',               label: 'Invoiced Sales',        icon: ReceiptText,     group: 'books',  hint: 'All billed work' },
+  { id: 'non_invoiced_sales',  label: 'Unbilled Work',         icon: ReceiptText,     group: 'books',  hint: 'Completed but not yet billed' },
+  { id: 'purchase',            label: 'Purchases & Outsourcing', icon: Receipt,       group: 'books',  hint: 'Bills from vendors' },
+  { id: 'ledger',              label: 'Party Accounts',        icon: FileSpreadsheet, group: 'books',  hint: 'Who owes you / who you owe' },
+  { id: 'cn_dn',               label: 'Credit/Debit Notes',    icon: FileText,        group: 'books',  hint: 'Issue CN/DN to adjust invoices' },
+  // ── Reports ──
+  { id: 'pl',                  label: 'Profit & Loss',         icon: Wallet,          group: 'reports' },
+  { id: 'bs',                  label: 'Balance Sheet',         icon: Scale,           group: 'reports' },
+  { id: 'trial',               label: 'Trial Balance',         icon: ClipboardCheck,  group: 'reports' },
+  { id: 'ageing',              label: 'Ageing Report',         icon: Clock,           group: 'reports', hint: '0-30-60-90 day outstanding' },
+  { id: 'gst',                 label: 'GST Reports',           icon: Receipt,         group: 'reports', hint: 'GSTR-1, GSTR-2, HSN summary' },
+  { id: 'tds',                 label: 'TDS Tracker',           icon: Receipt,         group: 'reports', hint: 'TDS deducted & deductible' },
+  // ── Admin & Setup (accountant-level) ──
+  { id: 'journal',             label: 'All Entries',           icon: BookOpen,        group: 'admin' },
+  { id: 'approvals',           label: 'Approvals',             icon: ClipboardCheck,  group: 'admin', hint: 'Pending manager-created drafts' },
+  { id: 'manual',              label: 'Manual Posting',        icon: PlusCircle,      group: 'admin' },
+  { id: 'recurring',           label: 'Recurring Entries',     icon: CalendarSync,    group: 'admin', hint: 'Auto-post rent, salaries, EMIs' },
+  { id: 'reconcile',           label: 'Bank Reconciliation',   icon: ClipboardCheck,  group: 'admin', hint: 'Match bank statement with journal entries' },
+  { id: 'coa',                 label: 'Account Heads',         icon: Landmark,        group: 'admin' },
+  { id: 'opening',             label: 'Opening Balances',      icon: CalendarSync,    group: 'admin' },
+  { id: 'close',               label: 'Year Close',            icon: CalendarSync,    group: 'admin' },
+];
+
+const ACCOUNT_TYPES = ['Asset', 'Liability', 'Equity', 'Income', 'Expense'];
+
+const guessAccountType = (accountName, chartByName) => {
+  if (chartByName[accountName]?.type) return chartByName[accountName].type;
+  if (accountName.startsWith('Party:')) return 'Asset'; // Party accounts can be assets or liabilities
+  if (accountName.startsWith('Accounts Receivable:')) return 'Asset';
+  if (accountName.startsWith('Accounts Payable:')) return 'Liability';
+  if (accountName.startsWith('Expense:')) return 'Expense';
+  if (accountName.includes('Revenue')) return 'Income';
+  if (accountName.includes('Expense') || accountName.includes('Purchase')) return 'Expense';
+  if (accountName.includes('GST Payable')) return 'Liability';
+  if (accountName.includes('GST Credit')) return 'Asset';
+  if (accountName.includes('Cash') || accountName.includes('Bank')) return 'Asset';
+  return 'Equity';
+};
+
+const Accounting = ({
+  clients = [],
+  projects = [],
+  taxInvoices = [],
+  purchaseInvoices = [],
+  payments = [],
+  vendorPayments = [],
+  payouts = [],
+  expenses = [],
+  advances = [],
+  chartOfAccounts = [],
+  manualJournalEntries = [],
+  openingBalances = [],
+  fiscalYearClosings = [],
+  recurringRules = [],
+  partyAccounts = [],   // M-5: stable party name registry
+  db,
+  appId,
+  role,
+  user,
+  logAction,
+  addToast,
+  lockedFYs = [],
+}) => {
+  const [activeTab, setActiveTab] = useState('overview');
+  const [fyFilter, setFyFilter] = useState(() => getFYFromDate(new Date().toISOString().slice(0, 10)));
+  const [selectedLedger, setSelectedLedger] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [deleteModal, setDeleteModal] = useState({ isOpen: false, entry: null });
+  const [isAssistantOpen, setIsAssistantOpen] = useState(false);
+
+  // Ctrl/Cmd+K → open the Virtual Accountant chat anywhere on the Accounting page.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setIsAssistantOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // ── Parked (draft) journal entries from chat ───────────────────────────────
+  const [journalDrafts, setJournalDrafts] = useState([]);
+  const [editingDraft, setEditingDraft] = useState(null); // { id, date, narration, party_name, entries:[{debitAccount,creditAccount,amount}], schedule_post_on }
+  const [selectedDraftIds, setSelectedDraftIds] = useState(new Set());
+  const [bulkScheduleDate, setBulkScheduleDate] = useState('');
+  const [journalTemplates, setJournalTemplates] = useState([]);
+  const [templatePrompt, setTemplatePrompt] = useState(null); // { tpl, vars: [{name,type,default}], values: {name: ''} }
+  const [editingTemplate, setEditingTemplate] = useState(null); // { id, name, narration, party_name, entries }
+  const [templateCategoryFilter, setTemplateCategoryFilter] = useState('all');
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState(new Set());
+  const [bulkRecategorize, setBulkRecategorize] = useState('');
+  const [recurringFromTpl, setRecurringFromTpl] = useState(null); // { tpl, frequency, interval, dayOfMonth, startDate, endDate, active }
+  useEffect(() => {
+    if (!db || !appId) return undefined;
+    const unsub = onSnapshot(
+      collection(db, 'artifacts', appId, 'public', 'data', 'journal_drafts'),
+      (snap) => setJournalDrafts(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      () => setJournalDrafts([]),
+    );
+    return () => { try { unsub?.(); } catch { /* noop */ } };
+  }, [db, appId]);
+
+  useEffect(() => {
+    if (!db || !appId) return undefined;
+    const unsub = onSnapshot(
+      collection(db, 'artifacts', appId, 'public', 'data', 'journal_templates'),
+      (snap) => setJournalTemplates(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      () => setJournalTemplates([]),
+    );
+    return () => { try { unsub?.(); } catch { /* noop */ } };
+  }, [db, appId]);
+
+  const [coaForm, setCoaForm] = useState({
+    code: '',
+    name: '',
+    type: 'Asset',
+    subType: 'Current Asset',
+    normalSide: 'Dr',
+  });
+
+  const [journalForm, setJournalForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    narration: '',
+    debitAccount: '',
+    creditAccount: '',
+    amount: '',
+    currency: 'INR',
+    fx_rate_to_inr: 1,
+  });
+
+  const [openingForm, setOpeningForm] = useState({
+    fy: '',
+    date: new Date().toISOString().slice(0, 10),
+    account_name: '',
+    side: 'Dr',
+    amount: '',
+    remarks: '',
+  });
+
+  const piInitialForm = {
+    invoice_date: new Date().toISOString().slice(0, 10),
+    vendor_name: '',
+    vendor_id: '',
+    description: '',
+    amount: '',
+    gst_amount: '',
+    purchase_mode: 'Credit',
+    status: 'Pending',
+    remarks: '',
+  };
+  const [piForm, setPiForm] = useState(piInitialForm);
+  const [piEditingId, setPiEditingId] = useState(null);
+  const [isPiModalOpen, setIsPiModalOpen] = useState(false);
+  const [piDeleteModal, setPiDeleteModal] = useState({ isOpen: false, entry: null });
+
+  const [cnDnEditingId, setCnDnEditingId] = useState(null);
+  const [cnDnDeleteModal, setCnDnDeleteModal] = useState({ isOpen: false, entry: null });
+  const [cnDnForm, setCnDnForm] = useState({
+    type: 'credit_note',
+    date: new Date().toISOString().slice(0, 10),
+    party_name: '',
+    original_invoice: '',
+    taxable: '',
+    gst: '',
+    reason: '',
+  });
+
+  const [tdsForm, setTdsForm] = useState({
+    type: 'tds_receivable',
+    date: new Date().toISOString().slice(0, 10),
+    party_name: '',
+    section: '194J',
+    rate: '10',
+    base_amount: '',
+    tds_amount: '',
+    remarks: '',
+  });
+
+  const fyOptions = useMemo(() => {
+    const set = new Set();
+    taxInvoices.forEach((row) => row.invoice_date && set.add(getFYFromDate(row.invoice_date)));
+    purchaseInvoices.forEach((row) => row.invoice_date && set.add(getFYFromDate(row.invoice_date)));
+    payments.forEach((row) => row.date && set.add(getFYFromDate(row.date)));
+    vendorPayments.forEach((row) => row.date && set.add(getFYFromDate(row.date)));
+    payouts.forEach((row) => row.date && set.add(getFYFromDate(row.date)));
+    expenses.forEach((row) => row.date && set.add(getFYFromDate(row.date)));
+    advances.forEach((row) => row.date && set.add(getFYFromDate(row.date)));
+    openingBalances.forEach((row) => row.fy && set.add(row.fy));
+    manualJournalEntries.forEach((row) => row.fy && set.add(row.fy));
+    fiscalYearClosings.forEach((row) => row.fy && set.add(row.fy));
+    return ['all', ...Array.from(set).sort().reverse()];
+  }, [taxInvoices, purchaseInvoices, payments, vendorPayments, payouts, expenses, advances, openingBalances, manualJournalEntries, fiscalYearClosings]);
+
+  const snapshot = useMemo(
+    () =>
+      buildAccountingSnapshot({
+        clients,
+        projects,
+        taxInvoices,
+        purchaseInvoices,
+        payments,
+        vendorPayments,
+        payouts,
+        expenses,
+        advances,
+        chartOfAccounts,
+        openingBalances,
+        manualJournalEntries,
+        fiscalYearClosings,
+        fyFilter,
+        partyAccounts,  // M-5
+      }),
+    [
+      clients,
+      projects,
+      taxInvoices,
+      purchaseInvoices,
+      payments,
+      vendorPayments,
+      payouts,
+      expenses,
+      advances,
+      chartOfAccounts,
+      openingBalances,
+      manualJournalEntries,
+      fiscalYearClosings,
+      fyFilter,
+      partyAccounts,  // M-5
+    ]
+  );
+
+  const chartByName = useMemo(
+    () => chartOfAccounts.reduce((acc, item) => {
+      acc[item.name] = item;
+      return acc;
+    }, {}),
+    [chartOfAccounts]
+  );
+
+  const allAccounts = useMemo(() => {
+    const set = new Set(chartOfAccounts.map((row) => row.name));
+    snapshot.ledger.forEach((row) => set.add(row.account));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [chartOfAccounts, snapshot.ledger]);
+
+  // Attachments lookup keyed by voucher_no for quick per-row chip rendering.
+  const attachmentsByVoucher = useMemo(() => {
+    const m = {};
+    (manualJournalEntries || []).forEach((e) => {
+      if (Array.isArray(e.attachments) && e.attachments.length && e.voucher_no) {
+        m[e.voucher_no] = e.attachments;
+      }
+    });
+    return m;
+  }, [manualJournalEntries]);
+  const [attachmentsModal, setAttachmentsModal] = useState(null); // { voucher, attachments }
+
+  const selectedLedgerRow = selectedLedger
+    ? snapshot.ledger.find((row) => row.account === selectedLedger)
+    : snapshot.ledger[0];
+
+  const totals = {
+    sales: snapshot.salesBook.reduce((sum, row) => sum + row.total, 0),
+    nonInvoicedSales: (snapshot.nonInvoicedSalesBook || []).reduce((sum, row) => sum + row.total, 0),
+    purchase: snapshot.purchaseBook.reduce((sum, row) => sum + row.total, 0),
+    journal: snapshot.journal.reduce((sum, row) => sum + row.amount, 0),
+  };
+
+  const canEditFinance = can(role, 'finance', 'edit') || can(role, 'finance', 'create');
+
+  // ── Ageing Analysis (FIFO-based) ──
+  const ageingData = useMemo(() => {
+    const today = new Date();
+    const receivableRows = [];
+    const payableRows = [];
+    snapshot.ledger
+      .filter(r => r.account.startsWith('Party:'))
+      .forEach(ledgerRow => {
+        const entries = [...(ledgerRow.entries || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+        const debits = entries.filter(e => e.side === 'Dr').map(e => ({ date: e.date, remaining: e.amount }));
+        const credits = entries.filter(e => e.side === 'Cr').map(e => ({ date: e.date, remaining: e.amount }));
+        credits.forEach(cr => {
+          let toMatch = cr.remaining;
+          for (const dr of debits) {
+            if (toMatch <= 0.005) break;
+            const m = Math.min(dr.remaining, toMatch);
+            dr.remaining -= m;
+            toMatch -= m;
+          }
+          cr.remaining = toMatch;
+        });
+        const bucket = (date) => {
+          const days = Math.max(0, Math.floor((today - new Date(date)) / 86400000));
+          if (days <= 30) return '0_30';
+          if (days <= 60) return '31_60';
+          if (days <= 90) return '61_90';
+          return '90_plus';
+        };
+        const recB = { '0_30': 0, '31_60': 0, '61_90': 0, '90_plus': 0, total: 0 };
+        debits.filter(d => d.remaining > 0.01).forEach(d => { recB[bucket(d.date)] += d.remaining; recB.total += d.remaining; });
+        if (recB.total > 0.01) receivableRows.push({ account: ledgerRow.account, name: ledgerRow.account.replace('Party: ', ''), ...recB });
+        const payB = { '0_30': 0, '31_60': 0, '61_90': 0, '90_plus': 0, total: 0 };
+        credits.filter(c => c.remaining > 0.01).forEach(c => { payB[bucket(c.date)] += c.remaining; payB.total += c.remaining; });
+        if (payB.total > 0.01) payableRows.push({ account: ledgerRow.account, name: ledgerRow.account.replace('Party: ', ''), ...payB });
+      });
+    const sumB = (rows) => rows.reduce((a, r) => ({ '0_30': a['0_30'] + r['0_30'], '31_60': a['31_60'] + r['31_60'], '61_90': a['61_90'] + r['61_90'], '90_plus': a['90_plus'] + r['90_plus'], total: a.total + r.total }), { '0_30': 0, '31_60': 0, '61_90': 0, '90_plus': 0, total: 0 });
+    return { receivable: receivableRows.sort((a, b) => b.total - a.total), payable: payableRows.sort((a, b) => b.total - a.total), receivableTotals: sumB(receivableRows), payableTotals: sumB(payableRows) };
+  }, [snapshot.ledger]);
+
+  // ── Export Reports to Excel / Tally ──
+  const exportReport = (type) => {
+    const wb = XLSX.utils.book_new();
+    const fy = fyFilter === 'all' ? 'All' : fyFilter;
+    if (type === 'sales' || type === 'all') {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(snapshot.salesBook.map(r => ({ Date: r.date, 'Invoice No': r.invoiceNo, Client: r.clientName, Mode: r.mode, 'Taxable': r.taxable, 'GST': r.gst, 'Total': r.total }))), 'Sales Book');
+    }
+    if (type === 'non_invoiced' || type === 'all') {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet((snapshot.nonInvoicedSalesBook || []).map(r => ({ Date: r.date, Project: r.projectName, Client: r.clientName, 'Taxable': r.taxable, 'GST': r.gst, 'Total': r.total }))), 'Unbilled Work');
+    }
+    if (type === 'purchase' || type === 'all') {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(snapshot.purchaseBook.map(r => ({ Date: r.date, 'PI/PO No': r.invoiceNo, Vendor: r.vendorName, Mode: r.mode, 'Taxable': r.taxable, 'GST': r.gst, 'Total': r.total }))), 'Purchase Book');
+    }
+    if (type === 'trial' || type === 'all') {
+      const rows = snapshot.trialBalance.rows.map(r => ({ Account: r.account, Debit: r.debit, Credit: r.credit, Balance: Math.abs(r.balance), Side: r.balanceType }));
+      rows.push({ Account: 'TOTAL', Debit: snapshot.trialBalance.totalDebit, Credit: snapshot.trialBalance.totalCredit });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Trial Balance');
+    }
+    if (type === 'ledger' || type === 'all') {
+      snapshot.ledger.forEach(l => {
+        let running = 0;
+        const rows = l.entries.map(e => { running += e.side === 'Dr' ? e.amount : -e.amount; return { Date: e.date, Type: e.source, Ref: e.refNo, Narration: e.remarks, Debit: e.side === 'Dr' ? e.amount : '', Credit: e.side === 'Cr' ? e.amount : '', Balance: Math.abs(running), Side: running >= 0 ? 'Dr' : 'Cr' }; });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), l.account.substring(0, 31).replace(/[*?:/\\[\]]/g, '_'));
+      });
+    }
+    if (type === 'ageing' || type === 'all') {
+      const rr = ageingData.receivable.map(r => ({ Party: r.name, '0-30 Days': r['0_30'], '31-60 Days': r['31_60'], '61-90 Days': r['61_90'], '90+ Days': r['90_plus'], Total: r.total }));
+      rr.push({ Party: 'TOTAL', '0-30 Days': ageingData.receivableTotals['0_30'], '31-60 Days': ageingData.receivableTotals['31_60'], '61-90 Days': ageingData.receivableTotals['61_90'], '90+ Days': ageingData.receivableTotals['90_plus'], Total: ageingData.receivableTotals.total });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rr), 'Receivable Ageing');
+      const pr = ageingData.payable.map(r => ({ Party: r.name, '0-30 Days': r['0_30'], '31-60 Days': r['31_60'], '61-90 Days': r['61_90'], '90+ Days': r['90_plus'], Total: r.total }));
+      pr.push({ Party: 'TOTAL', '0-30 Days': ageingData.payableTotals['0_30'], '31-60 Days': ageingData.payableTotals['31_60'], '61-90 Days': ageingData.payableTotals['61_90'], '90+ Days': ageingData.payableTotals['90_plus'], Total: ageingData.payableTotals.total });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pr), 'Payable Ageing');
+    }
+    if (type === 'journal' || type === 'all') {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(snapshot.journal.map(r => ({ Date: r.date, Source: r.source, Ref: r.refNo, 'Debit Account': r.debitAccount, 'Credit Account': r.creditAccount, Amount: r.amount, Narration: r.remarks }))), 'Journal');
+    }
+    if (type === 'tally' || type === 'all') {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(snapshot.journal.map(r => ({ 'Voucher Date': r.date, 'Voucher Type': r.source === 'sales_invoice' ? 'Sales' : r.source === 'purchase_invoice' ? 'Purchase' : r.source === 'receipt' ? 'Receipt' : r.source === 'vendor_payment' ? 'Payment' : 'Journal', 'Voucher No': r.refNo, 'Ledger (Dr)': r.debitAccount, 'Ledger (Cr)': r.creditAccount, Amount: r.amount, Narration: r.remarks }))), 'Tally Import');
+    }
+    const label = type === 'all' ? 'Full_Export' : type === 'tally' ? 'Tally_Export' : type.charAt(0).toUpperCase() + type.slice(1);
+    XLSX.writeFile(wb, `Accounting_${label}_${fy}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    addToast(`${label} exported to Excel`, 'success');
+  };
+
+  // ── Credit/Debit Note CRUD ──
+  const cnDnInitialForm = { type: 'credit_note', date: new Date().toISOString().slice(0, 10), party_name: '', original_invoice: '', taxable: '', gst: '', reason: '' };
+
+  const editCreditDebitNote = (row) => {
+    if (!canEditFinance) return alert('Access denied.');
+    if (!assertFYNotLocked(row.date, lockedFYs)) return;
+    // Reverse-engineer form fields from journal entries.
+    const isCN = row.source === 'credit_note';
+    const taxableLine = (row.entries || []).find((e) => isCN ? e.debitAccount === 'Sales Revenue' : e.creditAccount === 'Purchase Expense');
+    const gstLine = (row.entries || []).find((e) => isCN ? e.debitAccount === 'Output GST Payable' : e.creditAccount === 'Input GST Credit');
+    // Extract original_invoice + reason from narration: `Credit Note: <reason> | Ref: <inv> | Party: <name>`
+    const narration = row.narration || '';
+    const reasonMatch = narration.match(/^(?:Credit|Debit) Note:\s*([^|]*?)\s*\|/);
+    const refMatch = narration.match(/Ref:\s*([^|]*?)\s*\|/);
+    const partyMatch = narration.match(/Party:\s*(.*)$/);
+    setCnDnEditingId(row.id);
+    setCnDnForm({
+      type: row.source,
+      date: row.date || '',
+      party_name: (partyMatch?.[1] || '').trim(),
+      original_invoice: (refMatch?.[1] || '').trim() === 'N/A' ? '' : (refMatch?.[1] || '').trim(),
+      taxable: taxableLine ? String(taxableLine.amount) : '',
+      gst: gstLine ? String(gstLine.amount) : '',
+      reason: (reasonMatch?.[1] || '').trim(),
+    });
+  };
+
+  const cancelCreditDebitNoteEdit = () => {
+    setCnDnEditingId(null);
+    setCnDnForm(cnDnInitialForm);
+  };
+
+  const saveCreditDebitNote = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    const taxable = parseFloat(cnDnForm.taxable || 0);
+    const gst = parseFloat(cnDnForm.gst || 0);
+    const total = taxable + gst;
+    if (!cnDnForm.date || !cnDnForm.party_name || total <= 0) return alert('Date, party and amount are required.');
+    if (!assertFYNotLocked(cnDnForm.date, lockedFYs)) return;
+    try {
+      setIsSaving(true);
+      const partyAccount = `Party: ${cnDnForm.party_name}`;
+      const isCN = cnDnForm.type === 'credit_note';
+      const entries = [];
+      if (isCN) {
+        if (taxable > 0) entries.push({ debitAccount: 'Sales Revenue', creditAccount: partyAccount, amount: taxable });
+        if (gst > 0) entries.push({ debitAccount: 'Output GST Payable', creditAccount: partyAccount, amount: gst });
+      } else {
+        if (taxable > 0) entries.push({ debitAccount: partyAccount, creditAccount: 'Purchase Expense', amount: taxable });
+        if (gst > 0) entries.push({ debitAccount: partyAccount, creditAccount: 'Input GST Credit', amount: gst });
+      }
+      const narration = `${isCN ? 'Credit Note' : 'Debit Note'}: ${cnDnForm.reason || ''} | Ref: ${cnDnForm.original_invoice || 'N/A'} | Party: ${cnDnForm.party_name}`;
+
+      if (cnDnEditingId) {
+        const existing = manualJournalEntries.find((r) => r.id === cnDnEditingId);
+        // If the original posting date is in a now-locked FY, block.
+        if (existing && !assertFYNotLocked(existing.date, lockedFYs)) { setIsSaving(false); return; }
+        const updatePayload = {
+          fy: getFYFromDate(cnDnForm.date),
+          date: cnDnForm.date,
+          narration,
+          source: isCN ? 'credit_note' : 'debit_note',
+          entries,
+          updated_by: user?.uid || '',
+          updated_at: new Date().toISOString(),
+        };
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', cnDnEditingId), updatePayload);
+        logAction('journal_entries', 'update', cnDnEditingId, updatePayload, `${isCN ? 'CN' : 'DN'} ${existing?.voucher_no || ''}`);
+        addToast(`${isCN ? 'Credit Note' : 'Debit Note'} updated`, 'success');
+      } else {
+        const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: cnDnForm.date });
+        const payload = { voucher_no: voucherNo, fy: getFYFromDate(cnDnForm.date), date: cnDnForm.date, narration, source: isCN ? 'credit_note' : 'debit_note', status: 'posted', entries, created_by: user?.uid || '', created_at: new Date().toISOString() };
+        const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+        logAction('journal_entries', 'create', ref.id, payload, `${isCN ? 'CN' : 'DN'} ${voucherNo}`);
+        addToast(`${isCN ? 'Credit Note' : 'Debit Note'} posted`, 'success');
+      }
+      setCnDnEditingId(null);
+      setCnDnForm(cnDnInitialForm);
+    } catch (err) { console.error(err); addToast('Failed to save note: ' + err.message, 'error'); }
+    setIsSaving(false);
+  };
+
+  const deleteCreditDebitNote = async (row) => {
+    if (!canEditFinance) return alert('Access denied.');
+    if (!row?.id) return;
+    if (!assertFYNotLocked(row.date, lockedFYs)) return;
+    try {
+      setIsSaving(true);
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', row.id));
+      logAction('journal_entries', 'delete', row.id, null, `${row.source === 'credit_note' ? 'CN' : 'DN'} ${row.voucher_no || ''}`);
+      addToast(`${row.source === 'credit_note' ? 'Credit Note' : 'Debit Note'} deleted`, 'success');
+      setCnDnDeleteModal({ isOpen: false, entry: null });
+      if (cnDnEditingId === row.id) {
+        setCnDnEditingId(null);
+        setCnDnForm(cnDnInitialForm);
+      }
+    } catch (err) { console.error(err); addToast('Delete failed: ' + err.message, 'error'); }
+    setIsSaving(false);
+  };
+
+  // ── TDS Entry Save ──
+  const saveTdsEntry = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    const tdsAmt = parseFloat(tdsForm.tds_amount || 0);
+    if (!tdsForm.date || !tdsForm.party_name || tdsAmt <= 0) return alert('Date, party and TDS amount are required.');
+    if (!assertFYNotLocked(tdsForm.date, lockedFYs)) return;
+    try {
+      setIsSaving(true);
+      const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: tdsForm.date });
+      const partyAccount = `Party: ${tdsForm.party_name}`;
+      const isRec = tdsForm.type === 'tds_receivable';
+      const entries = isRec
+        ? [{ debitAccount: 'TDS Receivable', creditAccount: partyAccount, amount: tdsAmt }]
+        : [{ debitAccount: partyAccount, creditAccount: 'TDS Payable', amount: tdsAmt }];
+      const payload = { voucher_no: voucherNo, fy: getFYFromDate(tdsForm.date), date: tdsForm.date, narration: `TDS u/s ${tdsForm.section} @ ${tdsForm.rate}% | ${isRec ? 'Deducted by' : 'Deducted on'} ${tdsForm.party_name} | Base: ${formatCurrency(parseFloat(tdsForm.base_amount || 0))} | ${tdsForm.remarks || ''}`, source: 'tds_entry', status: 'posted', entries, created_by: user?.uid || '', created_at: new Date().toISOString() };
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+      logAction('journal_entries', 'create', ref.id, payload, `TDS ${voucherNo}`);
+      setTdsForm({ type: 'tds_receivable', date: new Date().toISOString().slice(0, 10), party_name: '', section: '194J', rate: '10', base_amount: '', tds_amount: '', remarks: '' });
+      addToast('TDS entry posted', 'success');
+    } catch (err) { console.error(err); addToast('Failed to post TDS entry', 'error'); }
+    setIsSaving(false);
+  };
+
+  // ── Drill-down: click party name → open ledger ──
+  const drillToLedger = (account) => { setSelectedLedger(account); setActiveTab('ledger'); };
+
+  // Real party balances for the "Money In / Out" overview cards.
+  // Includes EVERY journal posting that hits a party account — invoiced sales,
+  // non-invoiced sales accruals, purchase invoices, vendor allocations,
+  // payments received/made, expenses, advances, manual journals, FY rollovers,
+  // any other source. Single party account per stable entityId (M-5), so an
+  // entity that is BOTH vendor and customer auto-nets: outsourcing payable
+  // offsets work-done receivable. Final sign decides receivable vs payable.
+  const realPartyBalances = useMemo(
+    () => (snapshot.ledger || []).filter((r) => r.account.startsWith('Party:')),
+    [snapshot.ledger]
+  );
+
+  const realReceivableTotal = useMemo(
+    () => realPartyBalances.filter((r) => r.balance > 0.01).reduce((s, r) => s + r.balance, 0),
+    [realPartyBalances]
+  );
+  const realPayableTotal = useMemo(
+    () => realPartyBalances.filter((r) => r.balance < -0.01).reduce((s, r) => s + Math.abs(r.balance), 0),
+    [realPartyBalances]
+  );
+
+  // ── GST Reports Data ──
+  const [orgGstin, setOrgGstin] = useState('');
+  const [gstSubTab, setGstSubTab] = useState('gstr1');
+
+  // Fetch org GSTIN once
+  React.useEffect(() => {
+    const fetchOrg = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
+        if (snap.exists()) setOrgGstin(snap.data().gstin || '');
+      } catch { /* ignore */ }
+    };
+    fetchOrg();
+  }, [db, appId]);
+
+  const gstData = useMemo(() => {
+    const inFY = (dateStr) => {
+      if (!dateStr) return false;
+      if (fyFilter === 'all') return true;
+      return getFYFromDate(dateStr) === fyFilter;
+    };
+    const clientById = {};
+    clients.forEach((c) => { clientById[c.id] = c; });
+
+    // ── GSTR-1: Outward supplies (sales) ──
+    const gstr1 = [];
+    // From tax invoices
+    taxInvoices.filter((inv) => inFY(inv.invoice_date)).forEach((inv) => {
+      const client = clientById[inv.client_id];
+      const clientGstin = inv.sale_company_gstin || client?.gstin || '';
+      const orgState = (orgGstin || '').substring(0, 2);
+      const clientState = (clientGstin || '').substring(0, 2);
+      const isIntra = orgState && clientState && orgState === clientState;
+      const taxable = parseFloat(inv.taxable || 0);
+      const gstAmt = parseFloat(inv.gst_amount || 0);
+      gstr1.push({
+        date: inv.invoice_date,
+        invoiceNo: inv.invoice_no,
+        clientName: inv.client_name || client?.name || '',
+        clientGstin,
+        placeOfSupply: clientState || orgState,
+        supplyType: isIntra ? 'Intra-State' : 'Inter-State',
+        taxable,
+        cgst: isIntra ? gstAmt / 2 : 0,
+        sgst: isIntra ? gstAmt / 2 : 0,
+        igst: isIntra ? 0 : gstAmt,
+        total: parseFloat(inv.final_amount || inv.computed_total || (taxable + gstAmt)),
+        source: 'Tax Invoice',
+      });
+    });
+    // From projects with invoice_status = 'Invoiced'
+    const invoicedProjIds = new Set(taxInvoices.map(i => i.project_id).filter(Boolean));
+    projects
+      .filter(p => (p.status === 'Completed' || p.status === 'Closed') && p.invoice_status === 'Invoiced' && !invoicedProjIds.has(p.id))
+      .filter(p => inFY(p.invoice_date || p.end_date))
+      .forEach((p) => {
+        const client = clientById[p.client_id];
+        const clientGstin = client?.gstin || '';
+        const bd = getProjectGSTBreakdown(p, orgGstin, clientGstin);
+        gstr1.push({
+          date: p.invoice_date || p.end_date,
+          invoiceNo: p.invoice_no || `PROJECT-${p.project_name}`,
+          clientName: client?.name || 'Unknown',
+          clientGstin,
+          placeOfSupply: bd.placeOfSupply,
+          supplyType: bd.supplyType === 'IGST' ? 'Inter-State' : 'Intra-State',
+          taxable: bd.totals.taxable,
+          cgst: bd.totals.cgstAmt,
+          sgst: bd.totals.sgstAmt,
+          igst: bd.totals.igstAmt,
+          total: bd.totals.total,
+          source: 'Project Invoice',
+        });
+      });
+    gstr1.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    // ── GSTR-2: Inward supplies (purchases) ──
+    const gstr2 = purchaseInvoices
+      .filter(pi => pi.status !== 'Rejected' && inFY(pi.invoice_date))
+      .map((pi) => {
+        const vendor = clientById[pi.vendor_id];
+        const vendorGstin = pi.vendor_company_gstin || vendor?.gstin || '';
+        const orgState = (orgGstin || '').substring(0, 2);
+        const vendorState = (vendorGstin || '').substring(0, 2);
+        const isIntra = orgState && vendorState && orgState === vendorState;
+        const taxable = parseFloat(pi.amount || 0);
+        const gstAmt = parseFloat(pi.gst_amount || 0);
+        return {
+          date: pi.invoice_date,
+          piNo: pi.pi_no,
+          invoiceRef: pi.invoice_ref || '',
+          vendorName: pi.vendor_name || vendor?.name || '',
+          vendorGstin,
+          type: pi.type || 'Service',
+          placeOfSupply: vendorState || orgState,
+          supplyType: isIntra ? 'Intra-State' : 'Inter-State',
+          taxable,
+          cgst: isIntra ? gstAmt / 2 : 0,
+          sgst: isIntra ? gstAmt / 2 : 0,
+          igst: isIntra ? 0 : gstAmt,
+          total: taxable + gstAmt,
+        };
+      })
+      .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    // ── GSTR-3B Summary ──
+    const totalOutputCgst = gstr1.reduce((s, r) => s + r.cgst, 0);
+    const totalOutputSgst = gstr1.reduce((s, r) => s + r.sgst, 0);
+    const totalOutputIgst = gstr1.reduce((s, r) => s + r.igst, 0);
+    const totalInputCgst = gstr2.reduce((s, r) => s + r.cgst, 0);
+    const totalInputSgst = gstr2.reduce((s, r) => s + r.sgst, 0);
+    const totalInputIgst = gstr2.reduce((s, r) => s + r.igst, 0);
+    const gstr3b = {
+      outputTaxable: gstr1.reduce((s, r) => s + r.taxable, 0),
+      outputCgst: totalOutputCgst,
+      outputSgst: totalOutputSgst,
+      outputIgst: totalOutputIgst,
+      outputTotal: totalOutputCgst + totalOutputSgst + totalOutputIgst,
+      inputTaxable: gstr2.reduce((s, r) => s + r.taxable, 0),
+      inputCgst: totalInputCgst,
+      inputSgst: totalInputSgst,
+      inputIgst: totalInputIgst,
+      inputTotal: totalInputCgst + totalInputSgst + totalInputIgst,
+      netCgst: totalOutputCgst - totalInputCgst,
+      netSgst: totalOutputSgst - totalInputSgst,
+      netIgst: totalOutputIgst - totalInputIgst,
+      netPayable: (totalOutputCgst + totalOutputSgst + totalOutputIgst) - (totalInputCgst + totalInputSgst + totalInputIgst),
+    };
+
+    // ── HSN Summary ──
+    const hsnMap = {};
+    // Sales HSN
+    taxInvoices.filter(inv => inFY(inv.invoice_date)).forEach((inv) => {
+      const proj = projects.find(p => p.id === inv.project_id);
+      if (proj) {
+        const client = clientById[proj.client_id];
+        const bd = getProjectGSTBreakdown(proj, orgGstin, client?.gstin || '');
+        bd.items.forEach(item => {
+          const key = `${item.hsn || '998599'}_${item.gstRate || 18}`;
+          if (!hsnMap[key]) hsnMap[key] = { hsn: item.hsn || '998599', gstRate: item.gstRate || 18, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
+          hsnMap[key].salesTaxable += item.taxable;
+          hsnMap[key].salesGst += (item.cgstAmt + item.sgstAmt + item.igstAmt);
+        });
+      }
+    });
+    // Purchase HSN (default SAC 998599 for services, 998431 for assets)
+    gstr2.forEach(pi => {
+      const hsn = pi.type === 'Asset' ? '998431' : '998599';
+      const key = `${hsn}_18`;
+      if (!hsnMap[key]) hsnMap[key] = { hsn, gstRate: 18, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
+      hsnMap[key].purchaseTaxable += pi.taxable;
+      hsnMap[key].purchaseGst += (pi.cgst + pi.sgst + pi.igst);
+    });
+    const hsnSummary = Object.values(hsnMap).sort((a, b) => a.hsn.localeCompare(b.hsn));
+
+    return { gstr1, gstr2, gstr3b, hsnSummary };
+  }, [taxInvoices, purchaseInvoices, projects, clients, fyFilter, orgGstin]);
+
+  // ── Excel Export ──
+  const exportGstToExcel = (reportType) => {
+    const wb = XLSX.utils.book_new();
+    const fy = fyFilter === 'all' ? 'All' : fyFilter;
+
+    if (reportType === 'gstr1' || reportType === 'all') {
+      const rows = gstData.gstr1.map(r => ({
+        'Date': r.date, 'Invoice No': r.invoiceNo, 'Client': r.clientName, 'Client GSTIN': r.clientGstin,
+        'Place of Supply': r.placeOfSupply, 'Supply Type': r.supplyType, 'Taxable (₹)': r.taxable,
+        'CGST (₹)': r.cgst, 'SGST (₹)': r.sgst, 'IGST (₹)': r.igst, 'Total (₹)': r.total, 'Source': r.source,
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'GSTR-1 Sales');
+    }
+    if (reportType === 'gstr2' || reportType === 'all') {
+      const rows = gstData.gstr2.map(r => ({
+        'Date': r.date, 'PI No': r.piNo, 'Invoice Ref': r.invoiceRef, 'Vendor': r.vendorName, 'Vendor GSTIN': r.vendorGstin,
+        'Type': r.type, 'Place of Supply': r.placeOfSupply, 'Supply Type': r.supplyType, 'Taxable (₹)': r.taxable,
+        'CGST (₹)': r.cgst, 'SGST (₹)': r.sgst, 'IGST (₹)': r.igst, 'Total (₹)': r.total,
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'GSTR-2 Purchases');
+    }
+    if (reportType === 'gstr3b' || reportType === 'all') {
+      const s = gstData.gstr3b;
+      const rows = [
+        { 'Head': 'OUTPUT TAX (Sales)', 'Taxable': s.outputTaxable, 'CGST': s.outputCgst, 'SGST': s.outputSgst, 'IGST': s.outputIgst, 'Total GST': s.outputTotal },
+        { 'Head': 'INPUT TAX CREDIT (Purchases)', 'Taxable': s.inputTaxable, 'CGST': s.inputCgst, 'SGST': s.inputSgst, 'IGST': s.inputIgst, 'Total GST': s.inputTotal },
+        { 'Head': 'NET GST PAYABLE', 'Taxable': '', 'CGST': s.netCgst, 'SGST': s.netSgst, 'IGST': s.netIgst, 'Total GST': s.netPayable },
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'GSTR-3B Summary');
+    }
+    if (reportType === 'hsn' || reportType === 'all') {
+      const rows = gstData.hsnSummary.map(r => ({
+        'HSN/SAC': r.hsn, 'GST Rate (%)': r.gstRate,
+        'Sales Taxable (₹)': r.salesTaxable, 'Sales GST (₹)': r.salesGst,
+        'Purchase Taxable (₹)': r.purchaseTaxable, 'Purchase GST (₹)': r.purchaseGst,
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'HSN Summary');
+    }
+
+    XLSX.writeFile(wb, `GST_Reports_${fy}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    addToast('GST report exported to Excel', 'success');
+  };
+
+  // GSTR-1 / GSTR-3B JSON export — best-effort GSTN-spec JSON for portal upload.
+  const exportGstrJson = (kind) => {
+    const fy = fyFilter === 'all' ? 'All' : fyFilter;
+    const periodFromDate = (d) => {
+      if (!d) return '';
+      const dt = new Date(d);
+      if (Number.isNaN(dt.getTime())) return '';
+      const mm = String(dt.getMonth() + 1).padStart(2, '0');
+      return `${mm}${dt.getFullYear()}`;
+    };
+    // Prefer the actual data date over "today" so exporting historical
+    // months produces the correct `fp` / `ret_period`.
+    const referenceDate = (() => {
+      const sales = gstData.gstr1 || [];
+      const purchases = gstData.gstr2 || [];
+      const allDates = [...sales, ...purchases]
+        .map((r) => r.date)
+        .filter(Boolean)
+        .sort();
+      return allDates.length ? allDates[allDates.length - 1] : new Date().toISOString();
+    })();
+    const stateCode = (orgGstin || '').slice(0, 2) || '00';
+    // GSTIN validator — 15 chars, 2-digit state, 10-char PAN, entity char,
+    // 'Z' at position 14, alphanumeric check at 15. Returns a category.
+    const classifyGstin = (gstin) => {
+      const g = String(gstin || '').trim().toUpperCase();
+      if (g.length !== 15) return 'UNREG';
+      if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g)) return 'UNREG';
+      // UINs follow the same 15-char pattern but are identified in-app via
+      // the explicit client_type field (maintained in /clients). Without
+      // that context, treat every valid 15-char GSTIN as regular (B2B),
+      // which means it's excluded from inter_sup entirely — the safer
+      // classification (missing data vs. mis-classification).
+      return 'REG';
+    };
+    let payload;
+    let filename;
+
+    if (kind === 'gstr1') {
+      const rows = gstData.gstr1 || [];
+      const fp = periodFromDate(referenceDate);
+      // Group B2B by client GSTIN -> invoices array.
+      const b2bMap = new Map();
+      const b2cl = []; // inter-state to unregistered, invoice value > 2.5L
+      const b2csMap = new Map(); // intra-state aggregated by rate
+      rows.forEach((r) => {
+        const isInter = r.placeOfSupply && stateCode && r.placeOfSupply.slice(0, 2) !== stateCode;
+        const rate = (Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) > 0 && Number(r.taxable || 0) > 0
+          ? +(((Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) / Number(r.taxable)) * 100).toFixed(2)
+          : 0;
+        const itm = {
+          num: 1,
+          itm_det: {
+            txval: Number(r.taxable || 0),
+            rt: rate,
+            iamt: Number(r.igst || 0),
+            camt: Number(r.cgst || 0),
+            samt: Number(r.sgst || 0),
+            csamt: 0,
+          },
+        };
+        const inv = {
+          inum: r.invoiceNo || '',
+          idt: r.date ? new Date(r.date).toLocaleDateString('en-GB').replace(/\//g, '-') : '',
+          val: Number(r.total || 0),
+          pos: (r.placeOfSupply || '').slice(0, 2) || stateCode,
+          rchrg: 'N',
+          inv_typ: 'R',
+          itms: [itm],
+        };
+        if (r.clientGstin && classifyGstin(r.clientGstin) === 'REG') {
+          if (!b2bMap.has(r.clientGstin)) b2bMap.set(r.clientGstin, { ctin: r.clientGstin, inv: [] });
+          b2bMap.get(r.clientGstin).inv.push(inv);
+        } else if (isInter && Number(r.total || 0) > 250000) {
+          b2cl.push({ pos: inv.pos, inv: [{ inum: inv.inum, idt: inv.idt, val: inv.val, itms: [itm] }] });
+        } else {
+          const key = `${rate}|${inv.pos}|${isInter ? 'INTER' : 'INTRA'}`;
+          if (!b2csMap.has(key)) {
+            b2csMap.set(key, { sply_ty: isInter ? 'INTER' : 'INTRA', rt: rate, typ: 'OE', pos: inv.pos, txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 });
+          }
+          const bucket = b2csMap.get(key);
+          bucket.txval += Number(r.taxable || 0);
+          bucket.iamt += Number(r.igst || 0);
+          bucket.camt += Number(r.cgst || 0);
+          bucket.samt += Number(r.sgst || 0);
+        }
+      });
+      const hsn = (gstData.hsnSummary || []).map((h, i) => ({
+        num: i + 1,
+        hsn_sc: h.hsn || '',
+        uqc: 'NOS',
+        qty: 0,
+        txval: Number(h.salesTaxable || 0),
+        iamt: 0, camt: 0, samt: 0, csamt: 0,
+        rt: Number(h.gstRate || 0),
+      }));
+      payload = {
+        gstin: orgGstin || '',
+        fp,
+        gt: 0,
+        cur_gt: 0,
+        b2b: Array.from(b2bMap.values()),
+        b2cl,
+        b2cs: Array.from(b2csMap.values()),
+        hsn: { data: hsn },
+      };
+      filename = `GSTR1_${orgGstin || 'NA'}_${fp || fy}.json`;
+    } else if (kind === 'gstr3b') {
+      const s = gstData.gstr3b || {};
+      const fp = periodFromDate(referenceDate);
+      // Split outward supplies to unregistered / composition / UIN holders
+      // by place-of-supply state for the inter_sup section. Without a
+      // reliable composition/UIN flag in-app, we currently only split
+      // unregistered (no GSTIN) — the common case. Registered B2B is
+      // excluded from inter_sup per GSTN spec anyway.
+      const unregMap = new Map(); // pos -> { pos, txval, iamt }
+      (gstData.gstr1 || []).forEach((r) => {
+        const pos = (r.placeOfSupply || '').slice(0, 2);
+        if (!pos || pos === stateCode) return; // only inter-state goes here
+        const cat = classifyGstin(r.clientGstin);
+        if (cat !== 'UNREG') return;
+        const txval = Number(r.taxable || 0);
+        const iamt = Number(r.igst || 0);
+        if (!unregMap.has(pos)) unregMap.set(pos, { pos, txval: 0, iamt: 0 });
+        const b = unregMap.get(pos);
+        b.txval += txval;
+        b.iamt += iamt;
+      });
+      const toDetails = (m) => Array.from(m.values()).map((v) => ({
+        pos: v.pos,
+        txval: +v.txval.toFixed(2),
+        iamt: +v.iamt.toFixed(2),
+      }));
+      // Inward supplies intra/inter split (GST-taxable purchases only).
+      let inwardInter = 0;
+      let inwardIntra = 0;
+      (gstData.gstr2 || []).forEach((r) => {
+        const total = Number(r.taxable || 0);
+        if (Number(r.igst || 0) > 0) inwardInter += total;
+        else inwardIntra += total;
+      });
+      payload = {
+        gstin: orgGstin || '',
+        ret_period: fp,
+        sup_details: {
+          osup_det: {
+            txval: Number(s.outputTaxable || 0),
+            iamt: Number(s.outputIgst || 0),
+            camt: Number(s.outputCgst || 0),
+            samt: Number(s.outputSgst || 0),
+            csamt: 0,
+          },
+          osup_zero: { txval: 0, iamt: 0, csamt: 0 },
+          osup_nil_exmp: { txval: 0 },
+          isup_rev: { txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 },
+          osup_nongst: { txval: 0 },
+        },
+        inter_sup: {
+          unreg_details: toDetails(unregMap),
+          comp_details: [],
+          uin_details: [],
+        },
+        itc_elg: {
+          itc_avl: [
+            { ty: 'IMPG', iamt: 0, camt: 0, samt: 0, csamt: 0 },
+            { ty: 'IMPS', iamt: 0, camt: 0, samt: 0, csamt: 0 },
+            { ty: 'ISRC', iamt: 0, camt: 0, samt: 0, csamt: 0 },
+            { ty: 'ISD', iamt: 0, camt: 0, samt: 0, csamt: 0 },
+            {
+              ty: 'OTH',
+              iamt: Number(s.inputIgst || 0),
+              camt: Number(s.inputCgst || 0),
+              samt: Number(s.inputSgst || 0),
+              csamt: 0,
+            },
+          ],
+          itc_rev: [],
+          itc_net: {
+            iamt: Number(s.inputIgst || 0),
+            camt: Number(s.inputCgst || 0),
+            samt: Number(s.inputSgst || 0),
+            csamt: 0,
+          },
+          itc_inelg: [],
+        },
+        inward_sup: {
+          isup_details: [
+            { ty: 'GST', inter: +inwardInter.toFixed(2), intra: +inwardIntra.toFixed(2) },
+            { ty: 'NONGST', inter: 0, intra: 0 },
+          ],
+        },
+      };
+      filename = `GSTR3B_${orgGstin || 'NA'}_${fp || fy}.json`;
+    } else {
+      return;
+    }
+
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast(`${kind.toUpperCase()} JSON downloaded`, 'success');
+    } catch (err) {
+      console.error(err);
+      addToast(`Failed to export ${kind.toUpperCase()} JSON`, 'error');
+    }
+  };
+
+  const addAccount = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    if (!coaForm.code || !coaForm.name) return alert('Code and name are required.');
+
+    try {
+      setIsSaving(true);
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts'), {
+        ...coaForm,
+        isActive: true,
+        isSystem: false,
+        created_by: user?.uid || '',
+        created_at: new Date().toISOString(),
+      });
+      logAction('chart_of_accounts', 'create', '', coaForm, `COA add ${coaForm.name}`);
+      setCoaForm({ code: '', name: '', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr' });
+      addToast('Account added', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to add account', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const seedDefaultCoa = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    try {
+      setIsSaving(true);
+      const defaults = getDefaultChartOfAccounts();
+      const batch = writeBatch(db);
+      defaults.forEach((row) => {
+        const ref = doc(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts', row.code);
+        batch.set(ref, {
+          ...row,
+          created_by: user?.uid || '',
+          created_at: new Date().toISOString(),
+        }, { merge: true });
+      });
+      await batch.commit();
+      logAction('chart_of_accounts', 'seed', 'default', {}, 'Seeded default COA');
+      addToast('Default COA seeded', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to seed default COA', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const postManualJournal = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    const amount = parseFloat(journalForm.amount || 0);
+    if (!journalForm.date || !journalForm.debitAccount || !journalForm.creditAccount || amount <= 0) {
+      return alert('Date, debit, credit and valid amount are required.');
+    }
+    if (journalForm.debitAccount === journalForm.creditAccount) return alert('Debit and credit account cannot be same.');
+    if (!assertFYNotLocked(journalForm.date, lockedFYs)) return;
+
+    try {
+      setIsSaving(true);
+      const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: journalForm.date });
+      const fy = getFYFromDate(journalForm.date);
+      const fxRate = Number(journalForm.fx_rate_to_inr) || 1;
+      const currency = (journalForm.currency || 'INR').toUpperCase();
+      const payload = {
+        voucher_no: voucherNo,
+        fy,
+        date: journalForm.date,
+        narration: journalForm.narration || '',
+        source: 'manual_journal',
+        status: 'posted',
+        entries: [
+          {
+            debitAccount: journalForm.debitAccount,
+            creditAccount: journalForm.creditAccount,
+            amount: amount * fxRate, // store in INR for snapshot consistency
+            original_amount: amount,
+            currency,
+          },
+        ],
+        currency,
+        fx_rate_to_inr: fxRate,
+        created_by: user?.uid || '',
+        created_at: new Date().toISOString(),
+      };
+
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+      logAction('journal_entries', 'create', ref.id, payload, `Posted JV ${voucherNo}`);
+      setJournalForm({
+        date: new Date().toISOString().slice(0, 10),
+        narration: '',
+        debitAccount: '',
+        creditAccount: '',
+        amount: '',
+        currency: 'INR',
+        fx_rate_to_inr: 1,
+      });
+      addToast('Journal entry posted', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to post journal entry', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const addOpeningBalance = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    const amount = parseFloat(openingForm.amount || 0);
+    if (!openingForm.fy || !openingForm.account_name || amount <= 0) {
+      return alert('FY, account and amount are required.');
+    }
+
+    try {
+      setIsSaving(true);
+      const payload = {
+        ...openingForm,
+        amount,
+        created_by: user?.uid || '',
+        created_at: new Date().toISOString(),
+      };
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'opening_balances'), payload);
+      logAction('opening_balances', 'create', ref.id, payload, `Opening balance ${openingForm.account_name}`);
+      setOpeningForm({
+        fy: openingForm.fy,
+        date: new Date().toISOString().slice(0, 10),
+        account_name: '',
+        side: 'Dr',
+        amount: '',
+        remarks: '',
+      });
+      addToast('Opening balance saved', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to save opening balance', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const handleDeleteJournalEntry = (entry) => {
+    if (!canEditFinance) {
+      addToast('Access denied. Only admin/manager can delete journal entries.', 'error');
+      return;
+    }
+    // M-6: posted manual JVs are reversed, not deleted, to preserve the audit
+    // trail. Only drafts (or non-manual generated entries) may be hard-deleted.
+    if (entry?.source === 'manual_journal' && entry?.status !== 'draft') {
+      addToast('Posted journal entries cannot be deleted. Use "Reverse" to issue a reversal voucher.', 'error');
+      return;
+    }
+    setDeleteModal({ isOpen: true, entry });
+  };
+
+  const handleReverseJournalEntry = async (entry) => {
+    if (!canEditFinance) {
+      addToast('Access denied.', 'error');
+      return;
+    }
+    if (!entry || !Array.isArray(entry.entries) || entry.entries.length === 0) {
+      addToast('Nothing to reverse on this voucher.', 'error');
+      return;
+    }
+    if (entry.reversed) {
+      addToast('This voucher has already been reversed.', 'info');
+      return;
+    }
+    if (entry.source === 'fy_closing') {
+      addToast('FY-closing vouchers cannot be reversed individually. Reopen the FY instead.', 'error');
+      return;
+    }
+    const reversalDate = new Date().toISOString().slice(0, 10);
+    const fy = getFYFromDate(reversalDate);
+    if (!assertFYNotLocked(reversalDate, lockedFYs)) return;
+    if (fiscalYearClosings.some((row) => row.fy === fy && row.status === 'closed')) {
+      addToast(`Financial year ${fy} is closed.`, 'error');
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: reversalDate });
+      const reversedEntries = entry.entries.map((line) => ({
+        debitAccount: line.creditAccount,
+        creditAccount: line.debitAccount,
+        amount: line.amount,
+        original_amount: line.original_amount,
+        currency: line.currency,
+      }));
+      const payload = {
+        voucher_no: voucherNo,
+        fy,
+        date: reversalDate,
+        narration: `Reversal of ${entry.voucher_no || entry.id}: ${entry.narration || ''}`.slice(0, 500),
+        source: 'manual_journal_reversal',
+        status: 'posted',
+        entries: reversedEntries,
+        currency: entry.currency || 'INR',
+        fx_rate_to_inr: entry.fx_rate_to_inr || 1,
+        reverses_voucher_id: entry.id,
+        reverses_voucher_no: entry.voucher_no || '',
+        created_by: user?.uid || '',
+        created_at: new Date().toISOString(),
+      };
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+      // Mark original as reversed so the UI hides the button + audit links the pair.
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', entry.id), {
+        reversed: true,
+        reversed_by_voucher_id: ref.id,
+        reversed_by_voucher_no: voucherNo,
+        reversed_at: new Date().toISOString(),
+      });
+      logAction('journal_entries', 'reverse', ref.id, payload, `Reversed JV ${entry.voucher_no || entry.id} via ${voucherNo}`);
+      addToast(`Reversal voucher ${voucherNo} posted`, 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to post reversal voucher', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const confirmDeleteJournalEntry = async () => {
+    if (!deleteModal.entry) return;
+    // C-2 / M-6 fix: prevent deletion of a JV in a locked FY — use reversal
+    // voucher pattern instead.
+    if (!assertFYNotLocked(deleteModal.entry?.date, lockedFYs)) return;
+
+    try {
+      setIsSaving(true);
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', deleteModal.entry.id));
+      logAction(
+        'journal_entries',
+        'delete',
+        deleteModal.entry.id,
+        deleteModal.entry,
+        `Deleted journal entry ${deleteModal.entry.voucher_no || deleteModal.entry.id}`
+      );
+      addToast('Journal entry deleted successfully', 'success');
+      setDeleteModal({ isOpen: false, entry: null });
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to delete journal entry', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const handleApplyTemplate = (template) => {
+    setJournalForm((prev) => ({
+      ...prev,
+      debitAccount: template.debitAccount || prev.debitAccount,
+      creditAccount: template.creditAccount || prev.creditAccount,
+      narration: template.narration || prev.narration,
+    }));
+    addToast('Template applied successfully', 'success');
+  };
+
+  const partyNames = useMemo(() => {
+    const names = new Set();
+    snapshot.ledger.filter(r => r.account.startsWith('Party: ')).forEach(r => names.add(r.account.replace('Party: ', '')));
+    clients.forEach(c => c.name && names.add(c.name));
+    return Array.from(names).sort();
+  }, [snapshot.ledger, clients]);
+
+  const handleChatPostEntry = async (parsed) => {
+    if (!canEditFinance) throw new Error('Access denied.');
+    const dateStr = parsed?.date || new Date().toISOString().slice(0, 10);
+    const fy = getFYFromDate(dateStr);
+
+    // Respect FY lock even if the UI path missed it.
+    const isClosed = fiscalYearClosings.some((row) => row.fy === fy && row.status === 'closed');
+    if (isClosed) throw new Error(`Financial year ${fy} is closed.`);
+    if (Array.isArray(lockedFYs) && lockedFYs.includes(fy)) throw new Error(`Financial year ${fy} is locked.`);
+
+    // Auto-create any referenced accounts that don't exist yet in the COA.
+    const existingNames = new Set(chartOfAccounts.map((a) => a.name));
+    const toCreate = (parsed.accountCreates || []).filter((a) => a && a.name && !existingNames.has(a.name));
+    if (toCreate.length) {
+      await Promise.all(toCreate.map((a) =>
+        addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts'), {
+          code: '',
+          name: a.name,
+          type: a.type,
+          subType: a.subType || '',
+          normalSide: a.normalSide,
+          auto_created: true,
+          created_by_origin: 'ai_chat',
+          created_at: new Date().toISOString(),
+        })
+      ));
+    }
+
+    const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr });
+
+    // Best-effort link to an existing client/vendor by name (metadata only; does
+    // NOT write to payments/vendor_payments to avoid double-counting in ledger).
+    let linkedPartyId = null;
+    let linkedPartyType = null;
+    const partyName = parsed?.party?.name || '';
+    if (partyName) {
+      const lc = partyName.toLowerCase();
+      const hit = clients.find((c) => (c.name || '').toLowerCase() === lc)
+        || clients.find((c) => (c.name || '').toLowerCase().startsWith(lc))
+        || clients.find((c) => lc.startsWith((c.name || '').toLowerCase()) && (c.name || '').length > 2);
+      if (hit) {
+        linkedPartyId = hit.id;
+        linkedPartyType = (hit.type || '').toLowerCase() === 'vendor' || hit.is_vendor ? 'vendor' : 'client';
+      }
+    }
+
+    // Best-effort project linkage (tag like #P-123 or "project ABC").
+    let linkedProjectId = null;
+    let linkedProjectName = null;
+    const projectTag = parsed?.meta?.projectTag;
+    if (projectTag && Array.isArray(projects) && projects.length) {
+      const tLower = projectTag.toLowerCase();
+      const byCode = projects.find((p) => (p.code || p.project_code || '').toLowerCase() === tLower);
+      const byName = !byCode && projects.find((p) => (p.name || '').toLowerCase() === tLower);
+      const byPrefix = !byCode && !byName && projects.find((p) => (p.name || '').toLowerCase().startsWith(tLower.replace(/^p-/, '')));
+      const hit = byCode || byName || byPrefix;
+      if (hit) {
+        linkedProjectId = hit.id;
+        linkedProjectName = hit.name || null;
+      }
+    }
+
+    const payload = {
+      voucher_no: voucherNo,
+      fy,
+      date: dateStr,
+      narration: parsed.narration || '',
+      source: 'chat_entry',
+      status: 'posted',
+      entries: parsed.entries,
+      // AI provenance / audit metadata
+      origin: 'ai_chat',
+      ai_intent: parsed.intent || parsed.type || null,
+      ai_confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null,
+      ai_model: parsed.model || 'rule-v1',
+      ai_prompt: parsed.rawPrompt || '',
+      ai_issues: (parsed.issues || []).filter((i) => i.level !== 'error'),
+      // Party linkage (for reconciliation views; NOT a side-effect write)
+      party_name: partyName || null,
+      party_type: parsed?.party?.type || null,
+      linked_party_id: linkedPartyId,
+      linked_party_type: linkedPartyType,
+      // Project linkage
+      project_tag: projectTag || null,
+      linked_project_id: linkedProjectId,
+      linked_project_name: linkedProjectName,
+      attachments: parsed.attachments || [],
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+    };
+    const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+    logAction('journal_entries', 'create', ref.id, payload, `Chat JV ${voucherNo}`);
+    addToast(`Entry ${voucherNo} posted via chat`, 'success');
+  };
+
+  // ── Parked (draft) entries ────────────────────────────────────────────────
+  // Save a parsed chat entry to journal_drafts WITHOUT creating any COA
+  // accounts or ledger postings. Posting happens later from the Drafts panel.
+  const handleChatParkEntry = async (parsed) => {
+    if (!canEditFinance) throw new Error('Access denied.');
+    const dateStr = parsed?.date || new Date().toISOString().slice(0, 10);
+    const requiresApproval = role === 'manager';
+    const payload = {
+      date: dateStr,
+      narration: parsed.narration || '',
+      entries: parsed.entries || [],
+      party_name: parsed?.party?.name || null,
+      party_type: parsed?.party?.type || null,
+      intent: parsed.intent || parsed.type || null,
+      account_creates: parsed.accountCreates || [],
+      project_tag: parsed?.meta?.projectTag || null,
+      raw_prompt: parsed.rawPrompt || '',
+      ai_issues: parsed.issues || [],
+      source: 'chat_park',
+      status: 'draft',
+      requires_approval: requiresApproval,
+      approval_status: requiresApproval ? 'pending' : 'approved',
+      approved_by: null,
+      approved_at: null,
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const offline = typeof navigator !== 'undefined' && navigator && navigator.onLine === false;
+    try {
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_drafts'), payload);
+      logAction('journal_drafts', 'create', ref.id, payload, `Parked draft: ${parsed.narration || parsed.intent || '—'}`);
+      if (offline) {
+        addToast('Offline — Firestore will sync when reconnected', 'info');
+      } else {
+        addToast(requiresApproval ? 'Entry parked — awaiting admin approval' : 'Entry parked as draft', 'success');
+      }
+    } catch (err) {
+      // Firestore's offline queue usually absorbs failures. If addDoc
+      // hard-rejects (quota, corrupt cache, rules while re-authenticating)
+      // we fall back to our own IDB outbox and replay on reconnect.
+      console.warn('[Accounting] addDoc failed, queuing to IDB outbox', err);
+      await enqueueDraft(appId, 'journal_drafts', payload);
+      await refreshQueueCount();
+      addToast('Draft saved offline — will retry automatically', 'info');
+    }
+  };
+
+  // Offline outbox state + flusher. Firestore already queues writes, but this
+  // custom IDB outbox gives deterministic replay + a visible pending count
+  // and catches hard-reject failures the SDK wouldn't retry.
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const refreshQueueCount = useCallback(async () => {
+    try { setOfflineQueueCount(await queueSize(appId)); } catch { /* noop */ }
+  }, [appId]);
+  useEffect(() => { refreshQueueCount(); }, [refreshQueueCount]);
+  useEffect(() => {
+    if (!db || !appId) return undefined;
+    const replay = async () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const result = await flushQueue(appId, async (collName, pl) => {
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', collName), pl);
+      });
+      if (result.flushed > 0) {
+        addToast(`Synced ${result.flushed} queued draft${result.flushed === 1 ? '' : 's'}`, 'success');
+      }
+      await refreshQueueCount();
+    };
+    window.addEventListener('online', replay);
+    replay();
+    return () => window.removeEventListener('online', replay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db, appId, refreshQueueCount]);
+
+  // Reconstruct a "parsed" shape from a draft and hand it to the main post flow.
+  const handlePostDraft = async (draft) => {
+    if (!canEditFinance) return;
+    if (draft.requires_approval && draft.approval_status !== 'approved' && role !== 'admin') {
+      addToast('Draft is awaiting admin approval', 'error');
+      return;
+    }
+    const parsed = {
+      date: draft.date,
+      narration: draft.narration,
+      entries: draft.entries || [],
+      party: { name: draft.party_name, type: draft.party_type },
+      intent: draft.intent,
+      accountCreates: draft.account_creates || [],
+      meta: { projectTag: draft.project_tag },
+      rawPrompt: draft.raw_prompt || '',
+      issues: draft.ai_issues || [],
+      attachments: draft.attachments || [],
+    };
+    try {
+      await handleChatPostEntry(parsed);
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id));
+      logAction('journal_drafts', 'delete', draft.id, {}, 'Draft posted');
+    } catch (err) {
+      console.error(err);
+      addToast(`Failed to post draft: ${err.message}`, 'error');
+    }
+  };
+
+  // Auto-post drafts whose schedule_post_on ≤ today. Fires on drafts list
+  // change (incl. initial load). Sequential to avoid races.
+  useEffect(() => {
+    if (!canEditFinance || journalDrafts.length === 0) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const due = journalDrafts.filter((d) => d.schedule_post_on && d.schedule_post_on <= today
+      && !(d.requires_approval && d.approval_status !== 'approved'));
+    if (due.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const d of due) {
+        if (cancelled) return;
+        try {
+          await handlePostDraft(d);
+          addToast(`Auto-posted scheduled draft: ${d.narration || d.party_name || '—'}`, 'success');
+        } catch { /* already toasted */ }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [journalDrafts.length]);
+
+  const handleDeleteDraft = async (draft) => {
+    if (!canEditFinance) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id));
+      logAction('journal_drafts', 'delete', draft.id, {}, `Discarded draft: ${draft.narration || '—'}`);
+      addToast('Draft discarded', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to discard draft', 'error');
+    }
+  };
+
+  // ── Approval workflow ─────────────────────────────────────────────────────
+  const handleApproveDraft = async (draft) => {
+    if (role !== 'admin') { addToast('Admin only', 'error'); return; }
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id), {
+        approval_status: 'approved',
+        approved_by: user?.uid || '',
+        approved_at: new Date().toISOString(),
+      });
+      logAction('journal_drafts', 'approve', draft.id, {}, `Approved draft: ${draft.narration || '—'}`);
+      addToast('Approved', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to approve: ' + err.message, 'error');
+    }
+  };
+  const handleRejectDraft = async (draft) => {
+    if (role !== 'admin') { addToast('Admin only', 'error'); return; }
+    const reason = window.prompt('Reason for rejection (optional)');
+    if (reason === null) return;
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id), {
+        approval_status: 'rejected',
+        approved_by: user?.uid || '',
+        approved_at: new Date().toISOString(),
+        rejection_reason: reason || '',
+      });
+      logAction('journal_drafts', 'reject', draft.id, { reason }, `Rejected draft: ${draft.narration || '—'}`);
+      addToast('Rejected', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to reject: ' + err.message, 'error');
+    }
+  };
+  const handleSaveDraftEdit = async () => {
+    if (!canEditFinance || !editingDraft) return;
+    const entries = (editingDraft.entries || []).map((e) => ({
+      debitAccount: e.debitAccount || '',
+      creditAccount: e.creditAccount || '',
+      amount: Number(e.amount) || 0,
+    }));
+    // Basic validation: every line needs both accounts and a positive amount
+    const bad = entries.findIndex((e) => !e.debitAccount || !e.creditAccount || e.amount <= 0);
+    if (bad !== -1) { addToast(`Line ${bad + 1}: complete both accounts and a positive amount`, 'error'); return; }
+    if (!editingDraft.date) { addToast('Date is required', 'error'); return; }
+
+    const patch = {
+      date: editingDraft.date,
+      narration: editingDraft.narration || '',
+      party_name: editingDraft.party_name || null,
+      entries,
+      schedule_post_on: editingDraft.schedule_post_on || null,
+      attachments: editingDraft.attachments || [],
+      updated_at: new Date().toISOString(),
+    };
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', editingDraft.id), patch);
+      logAction('journal_drafts', 'update', editingDraft.id, patch, `Edited draft: ${patch.narration || '—'}`);
+      addToast('Draft updated', 'success');
+      setEditingDraft(null);
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to update draft: ' + err.message, 'error');
+    }
+  };
+
+  const addDraftLine = () => setEditingDraft((d) => d ? { ...d, entries: [...(d.entries || []), { debitAccount: '', creditAccount: '', amount: 0 }] } : d);
+  const removeDraftLine = (idx) => setEditingDraft((d) => d ? { ...d, entries: d.entries.filter((_, i) => i !== idx) } : d);
+  const updateDraftLine = (idx, field, value) => setEditingDraft((d) => d ? {
+    ...d,
+    entries: d.entries.map((e, i) => i === idx ? { ...e, [field]: value } : e),
+  } : d);
+
+  // ── Attachments (Firebase Storage) ────────────────────────────────────────
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const handleAttachFile = async (file) => {
+    if (!file || !editingDraft || !canEditFinance) return;
+    if (file.size > 10 * 1024 * 1024) { addToast('File exceeds 10 MB limit', 'error'); return; }
+    setUploadingAttachment(true);
+    try {
+      const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `artifacts/${appId}/journal_drafts/${editingDraft.id}/${Date.now()}-${safe}`;
+      const ref = storageRef(storage, path);
+      await uploadBytes(ref, file, { contentType: file.type });
+      const url = await getDownloadURL(ref);
+      const meta = { name: file.name, path, url, size: file.size, type: file.type, uploadedAt: new Date().toISOString() };
+      setEditingDraft((d) => d ? { ...d, attachments: [...(d.attachments || []), meta] } : d);
+      addToast('File attached', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Upload failed: ' + err.message, 'error');
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+  const handleRemoveAttachment = async (att) => {
+    if (!editingDraft) return;
+    try {
+      if (att.path) await deleteObject(storageRef(storage, att.path)).catch(() => {});
+      setEditingDraft((d) => d ? { ...d, attachments: (d.attachments || []).filter((a) => a.path !== att.path) } : d);
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to remove attachment', 'error');
+    }
+  };
+
+  // ── Bulk operations on drafts ─────────────────────────────────────────────
+  const toggleDraftSelection = (id) => setSelectedDraftIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const toggleAllDrafts = () => setSelectedDraftIds((prev) => (
+    prev.size === journalDrafts.length ? new Set() : new Set(journalDrafts.map((d) => d.id))
+  ));
+  const handleBulkPostDrafts = async () => {
+    if (!canEditFinance || selectedDraftIds.size === 0) return;
+    if (!window.confirm(`Post ${selectedDraftIds.size} selected draft(s) to the ledger?`)) return;
+    const selected = journalDrafts.filter((d) => selectedDraftIds.has(d.id));
+    let ok = 0; let fail = 0;
+    for (const d of selected) {
+      try { await handlePostDraft(d); ok += 1; } catch { fail += 1; }
+    }
+    addToast(`Posted ${ok} draft(s)${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    setSelectedDraftIds(new Set());
+  };
+  const handleBulkScheduleDrafts = async () => {
+    if (!canEditFinance || selectedDraftIds.size === 0 || !bulkScheduleDate) return;
+    let ok = 0; let fail = 0;
+    for (const id of selectedDraftIds) {
+      try {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', id), {
+          schedule_post_on: bulkScheduleDate,
+          updated_at: new Date().toISOString(),
+        });
+        ok += 1;
+      } catch { fail += 1; }
+    }
+    logAction('journal_drafts', 'update', 'bulk', { ids: Array.from(selectedDraftIds), schedule_post_on: bulkScheduleDate }, `Bulk schedule ${ok}`);
+    addToast(`Scheduled ${ok} draft(s) for ${bulkScheduleDate}${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    setSelectedDraftIds(new Set());
+    setBulkScheduleDate('');
+  };
+  const handleBulkDeleteDrafts = async () => {
+    if (!canEditFinance || selectedDraftIds.size === 0) return;
+    if (!window.confirm(`Discard ${selectedDraftIds.size} draft(s)? This cannot be undone.`)) return;
+    let ok = 0; let fail = 0;
+    for (const id of selectedDraftIds) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', id));
+        ok += 1;
+      } catch { fail += 1; }
+    }
+    logAction('journal_drafts', 'delete', 'bulk', { ids: Array.from(selectedDraftIds) }, `Bulk discard ${ok}`);
+    addToast(`Discarded ${ok} draft(s)${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    setSelectedDraftIds(new Set());
+  };
+
+  // ── Templates ─────────────────────────────────────────────────────────────
+  const handleSaveDraftAsTemplate = async (draft) => {
+    if (!canEditFinance) return;
+    const name = (window.prompt('Template name?', draft.narration || draft.party_name || 'Template') || '').trim();
+    if (!name) return;
+    const varName = (window.prompt(
+      'Optional: variable name for the amount (leave blank to drop amounts).\n' +
+      'Tip: also use {{var}} or {{var:default}} in narration / party.',
+      'amount',
+    ) || '').trim();
+    const amountPlaceholder = varName ? `{{${varName}|amount}}` : 0;
+    const payload = {
+      name,
+      narration: draft.narration || '',
+      party_name: draft.party_name || null,
+      // Capture structure (accounts) and either zeroed amounts or a {{var}} placeholder.
+      entries: (draft.entries || []).map((e) => ({
+        debitAccount: e.debitAccount || '',
+        creditAccount: e.creditAccount || '',
+        amount: amountPlaceholder,
+      })),
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+      uses: 0,
+    };
+    try {
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_templates'), payload);
+      logAction('journal_templates', 'create', ref.id, payload, `Template: ${name}`);
+      addToast(`Saved template "${name}"`, 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to save template: ' + err.message, 'error');
+    }
+  };
+
+  // Materialize a (possibly variable-bound) template into a new draft.
+  const instantiateTemplate = async (tpl, values = {}) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const expanded = applyVariables(
+      {
+        narration: tpl.narration || '',
+        party_name: tpl.party_name || '',
+        entries: (tpl.entries || []).map((e) => ({
+          debitAccount: e.debitAccount || '',
+          creditAccount: e.creditAccount || '',
+          amount: e.amount,
+        })),
+      },
+      values,
+    );
+    const payload = {
+      date: today,
+      narration: expanded.narration,
+      entries: expanded.entries,
+      party_name: expanded.party_name || null,
+      party_type: null,
+      intent: null,
+      account_creates: [],
+      project_tag: null,
+      raw_prompt: '',
+      ai_issues: [],
+      source: 'template',
+      template_id: tpl.id,
+      template_name: tpl.name || '',
+      template_values: values,
+      status: 'draft',
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_drafts'), payload);
+    logAction('journal_drafts', 'create', ref.id, payload, `Draft from template: ${tpl.name}`);
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', tpl.id), {
+        uses: (tpl.uses || 0) + 1,
+        last_used_at: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    addToast(`Created draft from "${tpl.name}"`, 'success');
+    setEditingDraft({
+      id: ref.id,
+      date: today,
+      narration: payload.narration,
+      party_name: payload.party_name || '',
+      entries: payload.entries,
+      schedule_post_on: '',
+    });
+  };
+
+  // Entry point: if template has user variables, prompt; else instantiate.
+  const handleUseTemplate = async (tpl) => {
+    if (!canEditFinance) return;
+    const vars = extractVariables({
+      narration: tpl.narration,
+      party_name: tpl.party_name,
+      entries: tpl.entries,
+    });
+    if (vars.length === 0) {
+      try { await instantiateTemplate(tpl, {}); }
+      catch (err) { console.error(err); addToast('Failed to apply template: ' + err.message, 'error'); }
+      return;
+    }
+    const initial = {};
+    vars.forEach((v) => { initial[v.name] = v.default || ''; });
+    setTemplatePrompt({ tpl, vars, values: initial });
+  };
+
+  const handleConfirmTemplatePrompt = async () => {
+    if (!templatePrompt) return;
+    const { tpl, vars, values } = templatePrompt;
+    // Coerce amount-typed fields to numbers; reject empties on required (no default).
+    const clean = {};
+    for (const v of vars) {
+      const raw = values[v.name];
+      if ((raw === '' || raw == null) && !v.default) {
+        addToast(`Please provide a value for "${v.name}"`, 'error');
+        return;
+      }
+      clean[v.name] = v.type === 'amount' ? Number(raw) || 0 : raw;
+    }
+    try {
+      await instantiateTemplate(tpl, clean);
+      setTemplatePrompt(null);
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to apply template: ' + err.message, 'error');
+    }
+  };
+
+  const handleDeleteTemplate = async (tpl) => {
+    if (!canEditFinance) return;
+    if (!window.confirm(`Delete template "${tpl.name}"?`)) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', tpl.id));
+      logAction('journal_templates', 'delete', tpl.id, {}, `Deleted template: ${tpl.name}`);
+      addToast('Template deleted', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to delete template', 'error');
+    }
+  };
+
+  // ── Import / Export templates ─────────────────────────────────────────────
+  const handleExportTemplates = () => {
+    const exportable = journalTemplates.map((t) => ({
+      schema: 'rental-ops.journal_template/v1',
+      name: t.name || '',
+      category: t.category || null,
+      narration: t.narration || '',
+      party_name: t.party_name || null,
+      entries: (t.entries || []).map((e) => ({
+        debitAccount: e.debitAccount || '',
+        creditAccount: e.creditAccount || '',
+        amount: e.amount,
+      })),
+    }));
+    const blob = new Blob([JSON.stringify({ schema: 'rental-ops.journal_templates/v1', exportedAt: new Date().toISOString(), templates: exportable }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `journal-templates-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    addToast(`Exported ${exportable.length} template(s)`, 'success');
+  };
+
+  const handleImportTemplates = async (e) => {
+    if (!canEditFinance) return;
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-import of the same file
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const list = Array.isArray(data) ? data : (Array.isArray(data?.templates) ? data.templates : null);
+      if (!list) { addToast('Invalid file: expected templates array', 'error'); return; }
+      let ok = 0; let skipped = 0;
+      for (const raw of list) {
+        if (!raw || !raw.name || !Array.isArray(raw.entries)) { skipped += 1; continue; }
+        const payload = {
+          name: String(raw.name),
+          category: raw.category || null,
+          narration: raw.narration || '',
+          party_name: raw.party_name || null,
+          entries: raw.entries.map((it) => ({
+            debitAccount: String(it.debitAccount || ''),
+            creditAccount: String(it.creditAccount || ''),
+            amount: typeof it.amount === 'string' ? it.amount : (Number(it.amount) || 0),
+          })),
+          uses: 0,
+          created_by: user?.uid || '',
+          created_at: new Date().toISOString(),
+          imported: true,
+        };
+        try {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_templates'), payload);
+          ok += 1;
+        } catch { skipped += 1; }
+      }
+      logAction('journal_templates', 'import', 'bulk', { ok, skipped }, `Imported ${ok} templates`);
+      addToast(`Imported ${ok} template(s)${skipped ? `, ${skipped} skipped` : ''}`, skipped ? 'error' : 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to import: ' + err.message, 'error');
+    }
+  };
+
+  // ── Template bulk operations ──────────────────────────────────────────────
+  const toggleTemplateSelection = (id) => setSelectedTemplateIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const clearTemplateSelection = () => setSelectedTemplateIds(new Set());
+
+  const handleBulkDeleteTemplates = async () => {
+    if (!canEditFinance || selectedTemplateIds.size === 0) return;
+    const n = selectedTemplateIds.size;
+    // Destructive + irreversible — require explicit typed confirmation.
+    const typed = window.prompt(
+      `You are about to DELETE ${n} template(s). This cannot be undone.\nType DELETE to confirm.`
+    );
+    if (typed !== 'DELETE') { addToast('Delete cancelled', 'info'); return; }
+    // Capture names before deletion for the audit trail (post-hoc names
+    // would be empty once docs are gone).
+    const affected = journalTemplates
+      .filter((t) => selectedTemplateIds.has(t.id))
+      .map((t) => ({ id: t.id, name: t.name, category: t.category || null }));
+    let ok = 0; let fail = 0;
+    for (const id of selectedTemplateIds) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', id));
+        ok += 1;
+      } catch { fail += 1; }
+    }
+    logAction(
+      'journal_templates', 'bulk_delete', 'bulk',
+      { ok, fail, affected },
+      `Bulk deleted ${ok} template(s)`,
+    );
+    addToast(`Deleted ${ok}${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    clearTemplateSelection();
+  };
+
+  const handleBulkRecategorize = async () => {
+    if (!canEditFinance || selectedTemplateIds.size === 0) return;
+    const cat = (bulkRecategorize || '').trim() || null;
+    let ok = 0; let fail = 0;
+    for (const id of selectedTemplateIds) {
+      try {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', id), {
+          category: cat,
+          updated_at: new Date().toISOString(),
+        });
+        ok += 1;
+      } catch { fail += 1; }
+    }
+    logAction('journal_templates', 'bulk_recategorize', 'bulk', { ok, cat }, `Recategorized ${ok} → ${cat || '(uncategorized)'}`);
+    addToast(`Updated ${ok}${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    setBulkRecategorize('');
+    clearTemplateSelection();
+  };
+
+  const handleBulkExportTemplates = () => {
+    if (selectedTemplateIds.size === 0) return;
+    const subset = journalTemplates.filter((t) => selectedTemplateIds.has(t.id));
+    const exportable = subset.map((t) => ({
+      schema: 'rental-ops.journal_template/v1',
+      name: t.name || '',
+      category: t.category || null,
+      narration: t.narration || '',
+      party_name: t.party_name || null,
+      entries: (t.entries || []).map((e) => ({
+        debitAccount: e.debitAccount || '',
+        creditAccount: e.creditAccount || '',
+        amount: e.amount,
+      })),
+    }));
+    const blob = new Blob([JSON.stringify({ schema: 'rental-ops.journal_templates/v1', exportedAt: new Date().toISOString(), templates: exportable }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `journal-templates-selected-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    addToast(`Exported ${exportable.length} selected template(s)`, 'success');
+  };
+
+  // ── Recurring rule from template ──────────────────────────────────────────
+  const handleSaveRecurringFromTemplate = async () => {
+    if (!canEditFinance || !recurringFromTpl) return;
+    const r = recurringFromTpl;
+    if (!r.startDate) { addToast('Start date required', 'error'); return; }
+    const payload = {
+      name: r.tpl?.name ? `Recurring · ${r.tpl.name}` : 'Recurring template',
+      active: r.active !== false,
+      frequency: r.frequency || 'monthly',
+      interval: Math.max(1, parseInt(r.interval || 1, 10)),
+      dayOfMonth: r.dayOfMonth ? Math.max(1, Math.min(31, parseInt(r.dayOfMonth, 10))) : null,
+      startDate: r.startDate,
+      endDate: r.endDate || null,
+      template_id: r.tpl?.id || null,
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+    };
+    try {
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'recurring_rules'), payload);
+      logAction('recurring_rules', 'create', ref.id, payload, `Recurring rule from template ${r.tpl?.name}`);
+      addToast('Recurring schedule saved — drafts will auto-generate', 'success');
+      setRecurringFromTpl(null);
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to save schedule: ' + err.message, 'error');
+    }
+  };
+  const handleSaveTemplateEdit = async () => {
+    if (!canEditFinance || !editingTemplate) return;
+    const name = (editingTemplate.name || '').trim();
+    if (!name) { addToast('Template name is required', 'error'); return; }
+    const entries = (editingTemplate.entries || []).map((e) => ({
+      debitAccount: (e.debitAccount || '').trim(),
+      creditAccount: (e.creditAccount || '').trim(),
+      // Preserve string placeholders verbatim; coerce numerics.
+      amount: typeof e.amount === 'string' ? e.amount : (Number(e.amount) || 0),
+    }));
+    const bad = entries.findIndex((e) => !e.debitAccount || !e.creditAccount);
+    if (bad !== -1) { addToast(`Line ${bad + 1}: complete both accounts`, 'error'); return; }
+    const patch = {
+      name,
+      narration: editingTemplate.narration || '',
+      party_name: editingTemplate.party_name || null,
+      category: (editingTemplate.category || '').trim() || null,
+      entries,
+      updated_at: new Date().toISOString(),
+    };
+    try {
+      if (editingTemplate.id) {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', editingTemplate.id), patch);
+        logAction('journal_templates', 'update', editingTemplate.id, patch, `Edited template: ${name}`);
+        addToast('Template updated', 'success');
+      } else {
+        const newDoc = {
+          ...patch,
+          created_by: user?.uid || '',
+          created_at: new Date().toISOString(),
+          uses: 0,
+        };
+        const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_templates'), newDoc);
+        logAction('journal_templates', 'create', ref.id, newDoc, `Template: ${name}`);
+        addToast(`Created template "${name}"`, 'success');
+      }
+      setEditingTemplate(null);
+    } catch (err) {
+      console.error(err);
+      addToast('Failed to save template: ' + err.message, 'error');
+    }
+  };
+
+  const addTemplateLine = () => setEditingTemplate((t) => t ? { ...t, entries: [...(t.entries || []), { debitAccount: '', creditAccount: '', amount: 0 }] } : t);
+  const removeTemplateLine = (idx) => setEditingTemplate((t) => t ? { ...t, entries: t.entries.filter((_, i) => i !== idx) } : t);
+  const updateTemplateLine = (idx, field, value) => setEditingTemplate((t) => t ? {
+    ...t,
+    entries: t.entries.map((e, i) => i === idx ? { ...e, [field]: value } : e),
+  } : t);
+
+  // ── Chat helpers: compute named periods (pure date math). ──────────────────
+  const computeChatPeriod = (period) => {
+    const now = new Date();
+    const toISO = (d) => d.toISOString().slice(0, 10);
+    const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const mkFY = (y) => ({ from: `${y}-04-01`, to: `${y + 1}-03-31` });
+
+    switch (period) {
+      case 'today':      { const d = toISO(startOf(now)); return { from: d, to: d }; }
+      case 'yesterday':  { const y = new Date(now); y.setDate(y.getDate() - 1); const d = toISO(startOf(y)); return { from: d, to: d }; }
+      case 'this_week':  { const w = new Date(now); w.setDate(w.getDate() - ((w.getDay() + 6) % 7)); return { from: toISO(startOf(w)), to: toISO(startOf(now)) }; }
+      case 'last_week':  { const e = new Date(now); e.setDate(e.getDate() - ((e.getDay() + 6) % 7) - 1); const s = new Date(e); s.setDate(s.getDate() - 6); return { from: toISO(startOf(s)), to: toISO(startOf(e)) }; }
+      case 'last_month': { const s = new Date(now.getFullYear(), now.getMonth() - 1, 1); const e = new Date(now.getFullYear(), now.getMonth(), 0); return { from: toISO(s), to: toISO(e) }; }
+      case 'this_fy':    { const y = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1; return mkFY(y); }
+      case 'last_fy':    { const y = now.getMonth() >= 3 ? now.getFullYear() - 1 : now.getFullYear() - 2; return mkFY(y); }
+      case 'this_month':
+      default:           { const s = new Date(now.getFullYear(), now.getMonth(), 1); return { from: toISO(s), to: toISO(startOf(now)) }; }
+    }
+  };
+
+  const prettyPeriod = (period, from, to) => {
+    if (period === 'today' || period === 'yesterday') return `on ${from}`;
+    if (period === 'this_month') return `this month`;
+    if (period === 'last_month') return `last month`;
+    if (period === 'this_fy' || period === 'last_fy') return `(${from} → ${to})`;
+    return `${from} → ${to}`;
+  };
+
+  // Reversal handler: flip debit/credit of the original voucher and post a new JV.
+  const handleChatReverse = async (parsed) => {
+    if (!canEditFinance) throw new Error('Access denied.');
+    const voucher = parsed?.meta?.reverseVoucher;
+    if (!voucher) throw new Error('No voucher number specified.');
+    const original = manualJournalEntries.find((e) =>
+      e.voucher_no === voucher ||
+      e.voucher_no === voucher.replace(/^JV-?/i, '') ||
+      `JV-${(e.voucher_no || '').toString().padStart(4, '0')}` === voucher
+    );
+    if (!original) throw new Error(`Voucher ${voucher} not found.`);
+    if (original.reversed_by || original.is_reversal) throw new Error(`Voucher ${voucher} is already reversed.`);
+
+    const dateStr = parsed.date || new Date().toISOString().slice(0, 10);
+    const fy = getFYFromDate(dateStr);
+    if (fiscalYearClosings.some((row) => row.fy === fy && row.status === 'closed')) {
+      throw new Error(`Financial year ${fy} is closed.`);
+    }
+    if (Array.isArray(lockedFYs) && lockedFYs.includes(fy)) throw new Error(`Financial year ${fy} is locked.`);
+    // Also block if the original voucher's date falls in a locked FY.
+    const originalFY = getFYFromDate(original?.date);
+    if (originalFY && Array.isArray(lockedFYs) && lockedFYs.includes(originalFY)) {
+      throw new Error(`Original voucher's FY ${originalFY} is locked. Unlock it before reversing.`);
+    }
+
+    const flipped = (original.entries || []).map((e) => ({
+      debitAccount: e.creditAccount,
+      creditAccount: e.debitAccount,
+      amount: e.amount,
+    }));
+    const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr });
+    const payload = {
+      voucher_no: voucherNo,
+      fy,
+      date: dateStr,
+      narration: `Reversal of ${original.voucher_no || voucher} — ${original.narration || ''}`.trim(),
+      source: 'chat_reversal',
+      status: 'posted',
+      entries: flipped,
+      is_reversal: true,
+      reverses_voucher_no: original.voucher_no || voucher,
+      reverses_voucher_id: original.id,
+      origin: 'ai_chat',
+      ai_intent: 'reversal',
+      ai_prompt: parsed.rawPrompt || '',
+      created_by: user?.uid || '',
+      created_at: new Date().toISOString(),
+    };
+    const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
+    // Mark original as reversed (metadata only — does not delete it).
+    if (original.id) {
+      try {
+        await updateDoc(
+          doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', original.id),
+          { reversed_by: voucherNo, reversed_at: new Date().toISOString() },
+        );
+      } catch { /* best-effort */ }
+    }
+    logAction('journal_entries', 'create', ref.id, payload, `Reversal JV ${voucherNo} of ${original.voucher_no}`);
+    addToast(`Reversed ${original.voucher_no} as ${voucherNo}`, 'success');
+    return { message: `Posted ${voucherNo} — reversal of ${original.voucher_no}.` };
+  };
+
+  // Query handler: answer simple balance / P&L / expense-by-period questions.
+  const handleChatQuery = async (parsed) => {
+    const qt = parsed?.meta?.queryType;
+    const period = parsed?.meta?.period || 'this_month';
+    const { from, to } = computeChatPeriod(period);
+
+    const inPeriod = (d) => (!from || d >= from) && (!to || d <= to);
+    const periodLabel = prettyPeriod(period, from, to);
+
+    if (qt === 'cash_balance' || qt === 'bank_balance') {
+      const want = qt === 'cash_balance' ? /^Cash($|:)/i : /^Bank($|:)/i;
+      const rows = (snapshot.ledger || []).filter((r) => want.test(r.account));
+      const bal = rows.reduce((s, r) => s + (r.balance || 0), 0);
+      return { message: `${qt === 'cash_balance' ? 'Cash' : 'Bank'} balance: ${formatCurrency(bal)}.` };
+    }
+    if (qt === 'pnl') {
+      const pl = snapshot.profitAndLoss || {};
+      return { message: `P&L — Revenue: ${formatCurrency(pl.revenue || 0)} · Expenses: ${formatCurrency(pl.expenses || 0)} · Net: ${formatCurrency(pl.netProfit || 0)} (${periodLabel}).` };
+    }
+    if (qt === 'balance_sheet') {
+      const bs = snapshot.balanceSheet || {};
+      return { message: `Balance Sheet — Assets: ${formatCurrency(bs.assets?.total || 0)} · Liabilities: ${formatCurrency(bs.liabilities?.total || 0)} · Equity: ${formatCurrency(bs.equity?.total || 0)}.` };
+    }
+    if (qt === 'trial_balance') {
+      const dr = (snapshot.ledger || []).reduce((s, r) => s + Math.max(r.balance || 0, 0), 0);
+      const cr = (snapshot.ledger || []).reduce((s, r) => s + Math.max(-(r.balance || 0), 0), 0);
+      return { message: `Trial balance — Debits: ${formatCurrency(dr)} · Credits: ${formatCurrency(cr)}.` };
+    }
+    if (qt === 'expenses') {
+      const rows = (manualJournalEntries || []).filter((e) => inPeriod(e.date));
+      const byMonth = new Map();
+      const linesByMonth = new Map();
+      let total = 0;
+      rows.forEach((e) => {
+        const monthKey = (e.date || '').slice(0, 7); // YYYY-MM
+        (e.entries || []).forEach((line) => {
+          const acc = chartOfAccounts.find((a) => a.name === line.debitAccount);
+          if (acc?.type === 'Expense') {
+            const amt = line.amount || 0;
+            total += amt;
+            byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+            const arr = linesByMonth.get(monthKey) || [];
+            arr.push({ account: line.debitAccount, amount: amt, voucher_no: e.voucher_no || e.id, date: e.date, narration: e.narration || '' });
+            linesByMonth.set(monthKey, arr);
+          }
+        });
+      });
+      const data = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([x, y]) => ({
+        x, y,
+        _breakdown: { expenses: linesByMonth.get(x) || [] },
+      }));
+      const useChart = data.length >= 2;
+      return {
+        message: `Expenses ${periodLabel}`,
+        stat: formatCurrency(total),
+        chart: useChart ? { kind: 'bar', data, xKey: 'x', yKey: 'y', drill: { seriesKey: 'expenses', label: 'Expenses' } } : null,
+      };
+    }
+    if (qt === 'revenue') {
+      const rows = (manualJournalEntries || []).filter((e) => inPeriod(e.date));
+      const byMonth = new Map();
+      const linesByMonth = new Map();
+      let jvTotal = 0;
+      rows.forEach((e) => {
+        const monthKey = (e.date || '').slice(0, 7);
+        (e.entries || []).forEach((line) => {
+          const acc = chartOfAccounts.find((a) => a.name === line.creditAccount);
+          if (acc?.type === 'Revenue' || acc?.type === 'Income') {
+            const amt = line.amount || 0;
+            jvTotal += amt;
+            byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+            const arr = linesByMonth.get(monthKey) || [];
+            arr.push({ account: line.creditAccount, amount: amt, voucher_no: e.voucher_no || e.id, date: e.date, narration: e.narration || '' });
+            linesByMonth.set(monthKey, arr);
+          }
+        });
+      });
+      (snapshot.salesBook || []).filter((r) => inPeriod(r.date)).forEach((r) => {
+        const monthKey = (r.date || '').slice(0, 7);
+        byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + (r.total || 0));
+        const arr = linesByMonth.get(monthKey) || [];
+        arr.push({ account: 'Sales Book', amount: r.total || 0, voucher_no: r.invoice_no || r.id || '', date: r.date, narration: r.party_name || r.client_name || '' });
+        linesByMonth.set(monthKey, arr);
+      });
+      const salesBookTotal = (snapshot.salesBook || []).filter((r) => inPeriod(r.date)).reduce((s, r) => s + r.total, 0);
+      const total = jvTotal + salesBookTotal;
+      const data = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([x, y]) => ({
+        x, y,
+        _breakdown: { revenue: linesByMonth.get(x) || [] },
+      }));
+      const useChart = data.length >= 2;
+      return {
+        message: `Revenue ${periodLabel}`,
+        stat: formatCurrency(total),
+        chart: useChart ? { kind: 'line', data, xKey: 'x', yKey: 'y', drill: { seriesKey: 'revenue', label: 'Revenue' } } : null,
+      };
+    }
+    if (qt === 'compare') {
+      // Build a shared month timeline across requested series (default: revenue vs expenses).
+      const wanted = Array.isArray(parsed?.meta?.series) && parsed.meta.series.length > 0
+        ? parsed.meta.series
+        : ['revenue', 'expenses'];
+      const rows = (manualJournalEntries || []).filter((e) => inPeriod(e.date));
+      const months = new Set();
+      const rev = new Map();
+      const exp = new Map();
+      const revLines = new Map();
+      const expLines = new Map();
+      rows.forEach((e) => {
+        const monthKey = (e.date || '').slice(0, 7);
+        if (!monthKey) return;
+        (e.entries || []).forEach((line) => {
+          const amt = line.amount || 0;
+          const crAcc = chartOfAccounts.find((a) => a.name === line.creditAccount);
+          const drAcc = chartOfAccounts.find((a) => a.name === line.debitAccount);
+          if (crAcc?.type === 'Revenue' || crAcc?.type === 'Income') {
+            rev.set(monthKey, (rev.get(monthKey) || 0) + amt); months.add(monthKey);
+            const arr = revLines.get(monthKey) || [];
+            arr.push({ account: line.creditAccount, amount: amt, voucher_no: e.voucher_no || e.id, date: e.date, narration: e.narration || '' });
+            revLines.set(monthKey, arr);
+          }
+          if (drAcc?.type === 'Expense') {
+            exp.set(monthKey, (exp.get(monthKey) || 0) + amt); months.add(monthKey);
+            const arr = expLines.get(monthKey) || [];
+            arr.push({ account: line.debitAccount, amount: amt, voucher_no: e.voucher_no || e.id, date: e.date, narration: e.narration || '' });
+            expLines.set(monthKey, arr);
+          }
+        });
+      });
+      (snapshot.salesBook || []).filter((r) => inPeriod(r.date)).forEach((r) => {
+        const monthKey = (r.date || '').slice(0, 7);
+        if (!monthKey) return;
+        rev.set(monthKey, (rev.get(monthKey) || 0) + (r.total || 0));
+        months.add(monthKey);
+        const arr = revLines.get(monthKey) || [];
+        arr.push({ account: 'Sales Book', amount: r.total || 0, voucher_no: r.invoice_no || r.id || '', date: r.date, narration: r.party_name || r.client_name || '' });
+        revLines.set(monthKey, arr);
+      });
+      const sorted = [...months].sort();
+      const data = sorted.map((m) => ({
+        x: m,
+        revenue: rev.get(m) || 0,
+        expenses: exp.get(m) || 0,
+        _breakdown: { revenue: revLines.get(m) || [], expenses: expLines.get(m) || [] },
+      }));
+      const revTotal = [...rev.values()].reduce((a, b) => a + b, 0);
+      const expTotal = [...exp.values()].reduce((a, b) => a + b, 0);
+      const net = revTotal - expTotal;
+      return {
+        message: `${wanted.join(' vs ')} ${periodLabel}`,
+        stat: `${formatCurrency(revTotal)} − ${formatCurrency(expTotal)} = ${formatCurrency(net)}`,
+        chart: data.length >= 1 ? {
+          kind: 'multi-bar',
+          data,
+          xKey: 'x',
+          series: [
+            { key: 'revenue',  color: '#10b981', label: 'Revenue' },
+            { key: 'expenses', color: '#ef4444', label: 'Expenses' },
+          ],
+        } : null,
+      };
+    }
+
+    // Fallback summary
+    return { message: `Sales: ${formatCurrency(totals.sales)} · Purchases: ${formatCurrency(totals.purchase)} · Cash/Bank: ${formatCurrency(snapshot.balanceSheet?.assets?.cashAndBank || 0)}.` };
+  };
+
+  const closeFinancialYear = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    if (fyFilter === 'all') return alert('Select a specific FY first.');
+
+    const alreadyClosed = fiscalYearClosings.some((row) => row.fy === fyFilter && row.status === 'closed');
+    if (alreadyClosed) return alert(`${fyFilter} is already closed.`);
+
+    const nextFy = getNextFinancialYear(fyFilter);
+    const closingDate = `${parseInt(fyFilter.slice(0, 4), 10) + 1}-03-31`;
+    const netProfit = snapshot.profitAndLoss.netProfit;
+    const transferAmount = Math.abs(netProfit);
+
+    try {
+      setIsSaving(true);
+      const batch = writeBatch(db);
+
+      let transferEntry = null;
+      let voucherNo = '';
+
+      if (transferAmount > 0.009) {
+        voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: closingDate });
+        transferEntry = netProfit >= 0
+          ? { debitAccount: 'Profit And Loss Closing', creditAccount: 'Retained Earnings', amount: transferAmount }
+          : { debitAccount: 'Retained Earnings', creditAccount: 'Profit And Loss Closing', amount: transferAmount };
+
+        const journalRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'));
+        batch.set(journalRef, {
+          voucher_no: voucherNo,
+          fy: fyFilter,
+          date: closingDate,
+          narration: `Year closing transfer for ${fyFilter}`,
+          source: 'fy_closing',
+          status: 'posted',
+          entries: [transferEntry],
+          created_by: user?.uid || '',
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      const closeRef = doc(db, 'artifacts', appId, 'public', 'data', 'fiscal_year_closings', fyFilter);
+      batch.set(closeRef, {
+        fy: fyFilter,
+        next_fy: nextFy,
+        date: closingDate,
+        status: 'closed',
+        voucher_no: voucherNo,
+        transferEntry,
+        net_profit: netProfit,
+        closed_by: user?.uid || '',
+        closed_at: new Date().toISOString(),
+      });
+
+      // Source rolloverRows from snapshot.ledger (NOT trialBalance.rows) so we
+      // can capture the stable accountId for party rows. Without accountId,
+      // next-FY opening balance for "Party: ABC" (keyed by name) won't merge
+      // with current-year activity (keyed by party_${id}) → split ledger rows
+      // that never net. This is the bug behind "completed projects not
+      // included in final amount" — the rolled-forward party receivable from
+      // unbilled projects sat in a separate ledger row from the new invoice
+      // posted next year.
+      const rolloverRows = (snapshot.ledger || [])
+        .filter((row) => Math.abs(row.balance) > 0.009)
+        .filter((row) => {
+          const type = guessAccountType(row.account, chartByName);
+          return type === 'Asset' || type === 'Liability' || type === 'Equity';
+        });
+
+      rolloverRows.forEach((row) => {
+        const side = row.balance >= 0 ? 'Dr' : 'Cr';
+        const amount = Math.abs(row.balance);
+        // Doc key prefers stable accountId so a party rename next year doesn't
+        // create a duplicate opening-balance doc.
+        const slug = row.accountId || row.account.replace(/[^a-zA-Z0-9]/g, '_');
+        const key = `${nextFy}_${slug}`;
+        const obRef = doc(db, 'artifacts', appId, 'public', 'data', 'opening_balances', key);
+        batch.set(obRef, {
+          fy: nextFy,
+          date: `${parseInt(nextFy.slice(0, 4), 10)}-04-01`,
+          account_name: row.account,
+          account_id: row.accountId || null,  // stable identity for party rows
+          side,
+          amount,
+          remarks: `FY rollover from ${fyFilter}`,
+          source: 'fy_rollover',
+          closed_from_fy: fyFilter,
+          created_by: user?.uid || '',
+          created_at: new Date().toISOString(),
+        }, { merge: true });
+      });
+
+      await batch.commit();
+      logAction('fiscal_year_closings', 'close', fyFilter, { fy: fyFilter, next_fy: nextFy }, `Closed FY ${fyFilter}`);
+      addToast(`FY ${fyFilter} closed and rolled to ${nextFy}`, 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('FY close failed', 'error');
+    }
+    setIsSaving(false);
+  };
+
+  // ── Purchase Invoice CRUD ──
+  const vendorOptions = useMemo(() =>
+    clients
+      .filter(c => c.type === 'Vendor' || c.type === 'Both' || c.type === 'Supplier')
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '')),
+    [clients]
+  );
+
+  const openPiAdd = () => {
+    setPiEditingId(null);
+    setPiForm(piInitialForm);
+    setIsPiModalOpen(true);
+  };
+
+  const openPiEdit = (piRaw) => {
+    setPiEditingId(piRaw.id);
+    setPiForm({
+      invoice_date: piRaw.invoice_date || '',
+      vendor_name: piRaw.vendor_name || '',
+      vendor_id: piRaw.vendor_id || '',
+      description: piRaw.description || '',
+      amount: piRaw.amount ?? '',
+      gst_amount: piRaw.gst_amount ?? '',
+      purchase_mode: piRaw.purchase_mode || 'Credit',
+      status: piRaw.status || 'Pending',
+      remarks: piRaw.remarks || '',
+    });
+    setIsPiModalOpen(true);
+  };
+
+  const handlePiSave = async () => {
+    if (!canEditFinance) return alert('Access denied.');
+    if (!piForm.invoice_date) return alert('Invoice date is required.');
+    if (!piForm.vendor_name && !piForm.vendor_id) return alert('Vendor name is required.');
+
+    setIsSaving(true);
+    try {
+      const vendorClient = piForm.vendor_id ? clients.find(c => c.id === piForm.vendor_id) : null;
+      const vendorName = vendorClient?.name || piForm.vendor_name;
+
+      let piNo = null;
+      if (piEditingId) {
+        const existing = purchaseInvoices.find(r => r.id === piEditingId);
+        piNo = existing?.pi_no;
+      }
+      if (!piNo) {
+        const orgSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
+        const orgSettings = orgSnap.exists() ? orgSnap.data() : {};
+        piNo = await generateBookInvoiceNumber({ db, appId, dateStr: piForm.invoice_date, bookType: 'purchase', orgSettings });
+      }
+
+      const data = {
+        pi_no: piNo,
+        type: 'Service',
+        invoice_date: piForm.invoice_date,
+        invoice_ref: '',
+        vendor_name: vendorName,
+        vendor_id: piForm.vendor_id || '',
+        description: piForm.description,
+        amount: parseFloat(piForm.amount) || 0,
+        gst_amount: parseFloat(piForm.gst_amount) || 0,
+        purchase_mode: piForm.purchase_mode || 'Credit',
+        status: piForm.status,
+        remarks: piForm.remarks,
+        fy: getFYFromDate(piForm.invoice_date),
+        updated_at: new Date().toISOString(),
+      };
+
+      const colPath = collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices');
+      if (piEditingId) {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', piEditingId), data);
+        logAction('purchase_invoices', 'update', piEditingId, data, piNo);
+      } else {
+        data.created_at = new Date().toISOString();
+        const ref = await addDoc(colPath, data);
+        logAction('purchase_invoices', 'create', ref.id, data, piNo);
+      }
+      setIsPiModalOpen(false);
+      addToast(piEditingId ? 'Purchase invoice updated' : 'Purchase invoice created', 'success');
+    } catch (err) {
+      console.error(err);
+      addToast('Save failed: ' + err.message, 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const handlePiDelete = async (piRaw) => {
+    if (!canEditFinance) return alert('Access denied.');
+    try {
+      setIsSaving(true);
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', piRaw.id));
+      logAction('purchase_invoices', 'delete', piRaw.id, null, piRaw.pi_no);
+      addToast('Purchase invoice deleted', 'success');
+      setPiDeleteModal({ isOpen: false, entry: null });
+    } catch (err) {
+      console.error(err);
+      addToast('Delete failed: ' + err.message, 'error');
+    }
+    setIsSaving(false);
+  };
+
+  const undoFinancialYearClose = async (closingRow) => {
+    if (role !== 'admin') {
+      return alert('Only an Admin can undo a financial year closing. Managers cannot reverse a closed FY because it deletes journal entries, rolled-over opening balances, and the closing record.');
+    }
+    if (!closingRow || closingRow.status !== 'closed') return;
+    const confirmed = window.confirm(
+      `Are you sure you want to UNDO the closing of FY ${closingRow.fy}?\n\n` +
+      `This will:\n` +
+      `• Delete the closing journal entry (${closingRow.voucher_no || 'N/A'})\n` +
+      `• Remove rolled-over opening balances for ${closingRow.next_fy}\n` +
+      `• Reopen FY ${closingRow.fy} for editing\n\n` +
+      `This action cannot be undone automatically.`
+    );
+    if (!confirmed) return;
+
+    try {
+      setIsSaving(true);
+
+      // Pre-flight: Firestore rules require the caller to be authenticated AND
+      // have role='admin' on /users/{uid}. The synthetic 'admin' username
+      // login writes that mirror fire-and-forget, so on a fresh session it
+      // may not be present yet. Verify and self-heal before the destructive
+      // batch, otherwise rules return "Missing or insufficient permissions".
+      const authedUser = auth.currentUser;
+      if (!authedUser) {
+        addToast(
+          'You are not signed in to Firebase Auth. Please log out and log back in (the admin login provisions Firebase Auth in the background — it may not have completed on this session). Then retry "Undo Close".',
+          'error'
+        );
+        setIsSaving(false);
+        return;
+      }
+      try {
+        const mirrorRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', authedUser.uid);
+        const mirrorSnap = await getDoc(mirrorRef);
+        const mirrorRole = mirrorSnap.exists() ? mirrorSnap.data().role : null;
+        if (mirrorRole !== 'admin') {
+          // Refresh / create the admin mirror so rules can authorise the batch.
+          await setDoc(
+            mirrorRef,
+            {
+              email: authedUser.email || 'admin@rentalops.com',
+              role: 'admin',
+              updated_at: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        }
+      } catch (mirrorErr) {
+        console.warn('Could not refresh /users/{uid} admin mirror before FY undo:', mirrorErr);
+      }
+
+      const batch = writeBatch(db);
+
+      // 1. Delete the closing journal entry if it exists
+      if (closingRow.voucher_no) {
+        const jeSnap = await getDocs(
+          collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries')
+        );
+        jeSnap.docs.forEach((d) => {
+          const data = d.data();
+          if (data.source === 'fy_closing' && data.voucher_no === closingRow.voucher_no) {
+            batch.delete(d.ref);
+          }
+        });
+      }
+
+      // 2. Delete rolled-over opening balances for the next FY
+      if (closingRow.next_fy) {
+        const obSnap = await getDocs(
+          collection(db, 'artifacts', appId, 'public', 'data', 'opening_balances')
+        );
+        obSnap.docs.forEach((d) => {
+          const data = d.data();
+          if (data.source === 'fy_rollover' && data.closed_from_fy === closingRow.fy) {
+            batch.delete(d.ref);
+          }
+        });
+      }
+
+      // 3. Delete the fiscal_year_closings record
+      const closeRef = doc(db, 'artifacts', appId, 'public', 'data', 'fiscal_year_closings', closingRow.fy);
+      batch.delete(closeRef);
+
+      await batch.commit();
+      logAction('fiscal_year_closings', 'undo', closingRow.fy, { fy: closingRow.fy }, `Undid FY ${closingRow.fy} close`);
+      addToast(`FY ${closingRow.fy} reopened successfully`, 'success');
+    } catch (err) {
+      console.error(err);
+      const code = err?.code || '';
+      if (code === 'permission-denied' || /insufficient|permission/i.test(err?.message || '')) {
+        addToast(
+          'Undo FY close blocked by Firestore security rules. Cause: your Firebase Auth account is not recognised as admin on /users/{uid}. Fix: log out, log back in as admin, then retry. If this persists, an Admin must set role=\"admin\" on artifacts/<appId>/public/data/users/<your-uid>.',
+          'error'
+        );
+      } else {
+        addToast('Undo FY close failed: ' + (err?.message || String(err)), 'error');
+      }
+    }
+    setIsSaving(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">Accounts & Finance</h1>
+          <p className="text-sm text-slate-500">Track your income, expenses, and who owes what — all in one place.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsAssistantOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-600 to-indigo-700 px-4 py-2 text-sm font-semibold text-white shadow-md hover:from-indigo-700 hover:to-indigo-800 transition"
+            title="Ask Assistant (Ctrl+K)"
+          >
+            <Sparkles size={16} />
+            Ask Assistant
+            <kbd className="hidden sm:inline-flex items-center gap-0.5 rounded border border-white/30 bg-white/10 px-1.5 py-0.5 text-[10px] font-mono">⌘K</kbd>
+          </button>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-semibold text-slate-600">Year</label>
+            <select
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+              value={fyFilter}
+              onChange={(e) => {
+                setFyFilter(e.target.value);
+                setOpeningForm((f) => ({ ...f, fy: e.target.value === 'all' ? '' : e.target.value }));
+              }}
+            >
+              {fyOptions.map((fy) => (
+                <option key={fy} value={fy}>
+                  {fy === 'all' ? 'All Years' : `FY ${fy}`}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Tab Navigation — grouped ── */}
+      <div className="rounded-xl border border-slate-200 bg-white p-2 space-y-1">
+        {['overview', 'books', 'reports', 'admin'].map((group) => {
+          const groupTabs = TABS.filter((t) => t.group === group);
+          if (groupTabs.length === 0) return null;
+          const groupLabel = { overview: '', books: 'Books & Records', reports: 'Reports', admin: 'Setup & Admin' }[group];
+          return (
+            <div key={group} className="flex flex-wrap items-center gap-1">
+              {groupLabel && <span className="mr-1 px-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{groupLabel}</span>}
+              {groupTabs.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    title={tab.hint || tab.label}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                      activeTab === tab.id ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Icon size={13} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+              {group !== 'admin' && <div className="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ══════ OVERVIEW TAB — the layman dashboard ══════ */}
+      {activeTab === 'overview' && (
+        <div className="space-y-4">
+          {/* Top-level numbers in plain English */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl border border-green-200 bg-gradient-to-br from-green-50 to-white p-4">
+              <p className="text-xs font-semibold uppercase text-green-600">Total Income</p>
+              <p className="mt-1 text-2xl font-bold text-green-800">{formatCurrency(totals.sales + totals.nonInvoicedSales)}</p>
+              <p className="mt-1 text-xs text-green-600">{formatCurrency(totals.sales)} billed + {formatCurrency(totals.nonInvoicedSales)} unbilled</p>
+            </div>
+            <div className="rounded-xl border border-orange-200 bg-gradient-to-br from-orange-50 to-white p-4">
+              <p className="text-xs font-semibold uppercase text-orange-600">Total Spending</p>
+              <p className="mt-1 text-2xl font-bold text-orange-800">{formatCurrency(totals.purchase)}</p>
+              <p className="mt-1 text-xs text-orange-600">Purchases + Outsourcing</p>
+            </div>
+            <div className={`rounded-xl border p-4 ${snapshot.profitAndLoss.netProfit >= 0 ? 'border-blue-200 bg-gradient-to-br from-blue-50 to-white' : 'border-red-200 bg-gradient-to-br from-red-50 to-white'}`}>
+              <p className={`text-xs font-semibold uppercase ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+                {snapshot.profitAndLoss.netProfit >= 0 ? 'Net Profit' : 'Net Loss'}
+              </p>
+              <p className={`mt-1 text-2xl font-bold ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-blue-800' : 'text-red-800'}`}>
+                {formatCurrency(Math.abs(snapshot.profitAndLoss.netProfit))}
+              </p>
+              <p className={`mt-1 text-xs ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+                Income minus all costs
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4">
+              <p className="text-xs font-semibold uppercase text-slate-600">Cash & Bank</p>
+              <p className="mt-1 text-2xl font-bold text-slate-800">{formatCurrency(snapshot.balanceSheet.assets.cashAndBank)}</p>
+              <p className="mt-1 text-xs text-slate-500">Available balance</p>
+            </div>
+          </div>
+
+          {/* Accounting analytics — drafts aging, top templates, AI vs manual */}
+          {(() => {
+            const todayMs = Date.now();
+            const draftAge = (d) => {
+              const t = d.created_at ? new Date(d.created_at).getTime() : todayMs;
+              return Math.max(0, Math.round((todayMs - t) / (24 * 60 * 60 * 1000)));
+            };
+            const oldestDrafts = [...journalDrafts]
+              .filter((d) => !d.requires_approval || d.approval_status === 'approved')
+              .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+              .slice(0, 5);
+            const overdueScheduled = journalDrafts.filter((d) => d.schedule_post_on && d.schedule_post_on < new Date().toISOString().slice(0, 10));
+            const topTemplates = [...journalTemplates]
+              .filter((t) => (t.uses || 0) > 0)
+              .sort((a, b) => (b.uses || 0) - (a.uses || 0))
+              .slice(0, 5);
+            const sourceCounts = (manualJournalEntries || []).reduce((acc, e) => {
+              const isAi = e.origin === 'ai_chat' || e.source === 'chat_entry' || e.source === 'scheduled_post';
+              const key = isAi ? 'ai' : 'manual';
+              acc[key] = (acc[key] || 0) + 1;
+              return acc;
+            }, { ai: 0, manual: 0 });
+            const totalEntries = sourceCounts.ai + sourceCounts.manual;
+            const aiPct = totalEntries > 0 ? Math.round((sourceCounts.ai / totalEntries) * 100) : 0;
+            return (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="rounded-xl border border-amber-200 bg-white p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-semibold text-amber-700">⏱️ Drafts aging</p>
+                    {overdueScheduled.length > 0 && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">{overdueScheduled.length} overdue</span>}
+                  </div>
+                  {oldestDrafts.length === 0 ? (
+                    <p className="text-xs text-slate-400">No parked drafts.</p>
+                  ) : (
+                    <ul className="space-y-1 text-xs">
+                      {oldestDrafts.map((d) => (
+                        <li key={d.id} className="flex justify-between gap-2">
+                          <span className="truncate text-slate-600">{d.narration || d.party_name || '—'}</span>
+                          <span className="text-amber-700 font-semibold whitespace-nowrap">{draftAge(d)}d</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="rounded-xl border border-purple-200 bg-white p-4">
+                  <p className="text-sm font-semibold text-purple-700 mb-2">⭐ Top templates</p>
+                  {topTemplates.length === 0 ? (
+                    <p className="text-xs text-slate-400">No template usage yet.</p>
+                  ) : (
+                    <ul className="space-y-1 text-xs">
+                      {topTemplates.map((t) => (
+                        <li key={t.id} className="flex justify-between gap-2">
+                          <span className="truncate text-slate-600">{t.name}{t.category ? ` · ${t.category}` : ''}</span>
+                          <span className="text-purple-700 font-semibold whitespace-nowrap">{t.uses}×</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="rounded-xl border border-indigo-200 bg-white p-4">
+                  <p className="text-sm font-semibold text-indigo-700 mb-2">🤖 AI vs manual posting</p>
+                  <div className="text-2xl font-bold text-indigo-800">{aiPct}%</div>
+                  <p className="text-[11px] text-slate-500">{sourceCounts.ai} AI/auto · {sourceCounts.manual} manual</p>
+                  <div className="mt-2 h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full bg-indigo-500" style={{ width: `${aiPct}%` }} />
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Who owes you / Who you owe — the #1 thing a layman needs */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-emerald-200 bg-white p-4">
+              <p className="text-sm font-semibold text-emerald-700">💰 Money Coming In (Receivable)</p>
+              <p className="text-xs text-slate-500 mb-3">Clients, employees & vendors who owe you money</p>
+              <p className="text-2xl font-bold text-emerald-800 mb-3">{formatCurrency(realReceivableTotal)}</p>
+              {realPartyBalances.filter(r => r.balance > 0.01).length > 0 ? (
+                <div className="space-y-1 max-h-48 overflow-auto">
+                  {realPartyBalances
+                    .filter(r => r.balance > 0.01)
+                    .sort((a, b) => b.balance - a.balance)
+                    .map(r => (
+                      <div key={r.account} onClick={() => drillToLedger(r.account)} className="flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-2 text-sm cursor-pointer hover:bg-emerald-100 transition">
+                        <span className="text-slate-700">{r.account.replace('Party: ', '')}</span>
+                        <span className="font-semibold text-emerald-800">{formatCurrency(r.balance)}</span>
+                      </div>
+                    ))
+                  }
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No outstanding receivables</p>
+              )}
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-white p-4">
+              <p className="text-sm font-semibold text-rose-700">📤 Money Going Out (Payable)</p>
+              <p className="text-xs text-slate-500 mb-3">Clients, employees & vendors you owe money to</p>
+              <p className="text-2xl font-bold text-rose-800 mb-3">{formatCurrency(realPayableTotal)}</p>
+              {realPartyBalances.filter(r => r.balance < -0.01).length > 0 ? (
+                <div className="space-y-1 max-h-48 overflow-auto">
+                  {realPartyBalances
+                    .filter(r => r.balance < -0.01)
+                    .sort((a, b) => a.balance - b.balance)
+                    .map(r => (
+                      <div key={r.account} onClick={() => drillToLedger(r.account)} className="flex items-center justify-between rounded-lg bg-rose-50 px-3 py-2 text-sm cursor-pointer hover:bg-rose-100 transition">
+                        <span className="text-slate-700">{r.account.replace('Party: ', '')}</span>
+                        <span className="font-semibold text-rose-800">{formatCurrency(Math.abs(r.balance))}</span>
+                      </div>
+                    ))
+                  }
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No outstanding payables</p>
+              )}
+            </div>
+          </div>
+
+          {/* Ageing Summary Bars */}
+          {(ageingData.receivableTotals.total > 0.01 || ageingData.payableTotals.total > 0.01) && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">⏰ Ageing Summary</p>
+                <button onClick={() => setActiveTab('ageing')} className="text-xs text-indigo-600 hover:underline">View Details →</button>
+              </div>
+              {ageingData.receivableTotals.total > 0.01 && (
+                <div>
+                  <p className="text-xs font-semibold text-emerald-700 mb-1">Receivable Ageing</p>
+                  <div className="flex h-4 w-full overflow-hidden rounded-full bg-slate-100">
+                    {['0_30', '31_60', '61_90', '90_plus'].map((key, i) => {
+                      const pct = (ageingData.receivableTotals[key] / ageingData.receivableTotals.total) * 100;
+                      const colors = ['bg-green-400', 'bg-yellow-400', 'bg-orange-400', 'bg-red-500'];
+                      return pct > 0.5 ? <div key={key} style={{ width: `${pct}%` }} className={`${colors[i]}`} title={`${['0-30','31-60','61-90','90+'][i]} days: ${formatCurrency(ageingData.receivableTotals[key])}`} /> : null;
+                    })}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-3 text-[10px] text-slate-500">
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-400" />0-30d: {formatCurrency(ageingData.receivableTotals['0_30'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-yellow-400" />31-60d: {formatCurrency(ageingData.receivableTotals['31_60'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-orange-400" />61-90d: {formatCurrency(ageingData.receivableTotals['61_90'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />90+d: {formatCurrency(ageingData.receivableTotals['90_plus'])}</span>
+                  </div>
+                </div>
+              )}
+              {ageingData.payableTotals.total > 0.01 && (
+                <div>
+                  <p className="text-xs font-semibold text-rose-700 mb-1">Payable Ageing</p>
+                  <div className="flex h-4 w-full overflow-hidden rounded-full bg-slate-100">
+                    {['0_30', '31_60', '61_90', '90_plus'].map((key, i) => {
+                      const pct = (ageingData.payableTotals[key] / ageingData.payableTotals.total) * 100;
+                      const colors = ['bg-green-400', 'bg-yellow-400', 'bg-orange-400', 'bg-red-500'];
+                      return pct > 0.5 ? <div key={key} style={{ width: `${pct}%` }} className={`${colors[i]}`} title={`${['0-30','31-60','61-90','90+'][i]} days: ${formatCurrency(ageingData.payableTotals[key])}`} /> : null;
+                    })}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-3 text-[10px] text-slate-500">
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-green-400" />0-30d: {formatCurrency(ageingData.payableTotals['0_30'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-yellow-400" />31-60d: {formatCurrency(ageingData.payableTotals['31_60'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-orange-400" />61-90d: {formatCurrency(ageingData.payableTotals['61_90'])}</span>
+                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" />90+d: {formatCurrency(ageingData.payableTotals['90_plus'])}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* GST at a glance */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-violet-200 bg-violet-50 p-4">
+              <p className="text-xs font-semibold uppercase text-violet-600">GST Collected</p>
+              <p className="mt-1 text-lg font-bold text-violet-800">{formatCurrency(Math.abs(Math.min(snapshot.ledger.find(r => r.account === 'Output GST Payable')?.balance || 0, 0)))}</p>
+              <p className="text-xs text-violet-500">From your invoices</p>
+            </div>
+            <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+              <p className="text-xs font-semibold uppercase text-cyan-600">GST Paid</p>
+              <p className="mt-1 text-lg font-bold text-cyan-800">{formatCurrency(Math.max(snapshot.ledger.find(r => r.account === 'Input GST Credit')?.balance || 0, 0))}</p>
+              <p className="text-xs text-cyan-500">On your purchases</p>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-xs font-semibold uppercase text-amber-600">GST to Pay Govt</p>
+              <p className="mt-1 text-lg font-bold text-amber-800">{formatCurrency(snapshot.balanceSheet.liabilities.gstPayable)}</p>
+              <p className="text-xs text-amber-500">Collected − Paid</p>
+            </div>
+          </div>
+
+          {/* Quick actions */}
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => setActiveTab('sales')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">View Billed Sales →</button>
+            <button onClick={() => setActiveTab('non_invoiced_sales')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">View Unbilled Work →</button>
+            <button onClick={() => setActiveTab('purchase')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">View Purchases →</button>
+            <button onClick={() => setActiveTab('ledger')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">View Party Details →</button>
+            <div className="w-px h-6 bg-slate-300 self-center" />
+            <button onClick={() => exportReport('all')} className="inline-flex items-center gap-1 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-xs font-semibold text-green-700 hover:bg-green-100"><Download size={12} /> Export All (Excel)</button>
+            <button onClick={() => exportReport('tally')} className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100"><Download size={12} /> Tally Export</button>
+          </div>
+
+          {/* Trial balance health check — simple green/red */}
+          <div className={`rounded-xl border p-3 text-sm ${snapshot.trialBalance.isBalanced ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+            {snapshot.trialBalance.isBalanced
+              ? '✅ Your books are balanced — everything adds up correctly.'
+              : `⚠️ Your books have a difference of ${formatCurrency(Math.abs(snapshot.trialBalance.difference))}. Check Trial Balance tab for details.`
+            }
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'sales' && (
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Invoice No</th>
+                  <th className="px-3 py-2 text-left">Client</th>
+                  <th className="px-3 py-2 text-left">Mode</th>
+                  <th className="px-3 py-2 text-right">Taxable</th>
+                  <th className="px-3 py-2 text-right">GST</th>
+                  <th className="px-3 py-2 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {snapshot.salesBook.map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-3 py-2">{row.date || '-'}</td>
+                    <td className="px-3 py-2 font-mono font-semibold text-slate-800">{row.invoiceNo || '-'}</td>
+                    <td className="px-3 py-2">{row.clientName || '-'}</td>
+                    <td className="px-3 py-2">{row.mode}</td>
+                    <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.taxable)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.gst)}</td>
+                    <td className="px-3 py-2 text-right font-bold">{formatCurrency(row.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'non_invoiced_sales' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-teal-200 bg-teal-50 p-3">
+            <p className="text-sm text-teal-800">
+              <strong>Non-Invoiced Sales:</strong> Completed projects pending invoice. 
+              Once invoice is raised, these entries automatically move to Invoiced Sales Book.
+            </p>
+          </div>
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Project Name</th>
+                    <th className="px-3 py-2 text-left">Client</th>
+                    <th className="px-3 py-2 text-left">Status</th>
+                    <th className="px-3 py-2 text-right">Taxable</th>
+                    <th className="px-3 py-2 text-right">GST</th>
+                    <th className="px-3 py-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(snapshot.nonInvoicedSalesBook || []).map((row) => (
+                    <tr key={row.id} className="bg-teal-50/30">
+                      <td className="px-3 py-2">{row.date || '-'}</td>
+                      <td className="px-3 py-2 font-semibold text-slate-800">{row.projectName || '-'}</td>
+                      <td className="px-3 py-2">{row.clientName || '-'}</td>
+                      <td className="px-3 py-2">
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
+                          Pending Invoice
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.taxable)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.gst)}</td>
+                      <td className="px-3 py-2 text-right font-bold">{formatCurrency(row.total)}</td>
+                    </tr>
+                  ))}
+                  {(snapshot.nonInvoicedSalesBook || []).length === 0 && (
+                    <tr>
+                      <td colSpan="7" className="px-3 py-8 text-center text-slate-500">
+                        No non-invoiced sales. All completed projects have been invoiced.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'purchase' && (
+        <div className="space-y-3">
+          {canEditFinance && (
+            <div className="flex justify-end">
+              <button onClick={openPiAdd} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700">
+                <Plus size={14} /> Add Purchase Invoice
+              </button>
+            </div>
+          )}
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">PI No</th>
+                    <th className="px-3 py-2 text-left">Vendor</th>
+                    <th className="px-3 py-2 text-left">Mode</th>
+                    <th className="px-3 py-2 text-left">Status</th>
+                    <th className="px-3 py-2 text-right">Taxable</th>
+                    <th className="px-3 py-2 text-right">GST</th>
+                    <th className="px-3 py-2 text-right">Total</th>
+                    {canEditFinance && <th className="px-3 py-2 text-center">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {purchaseInvoices
+                    .filter((r) => r.status !== 'Rejected')
+                    .filter((r) => fyFilter === 'all' || getFYFromDate(r.invoice_date) === fyFilter)
+                    .sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || ''))
+                    .map((row) => (
+                      <tr key={row.id} className="hover:bg-slate-50">
+                        <td className="px-3 py-2">{row.invoice_date || '-'}</td>
+                        <td className="px-3 py-2 font-mono font-semibold text-slate-800">{row.pi_no || '-'}</td>
+                        <td className="px-3 py-2">{row.vendor_name || '-'}</td>
+                        <td className="px-3 py-2">{row.purchase_mode || 'Credit'}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${
+                            row.status === 'Verified' ? 'bg-green-100 text-green-800' : row.status === 'Rejected' ? 'bg-red-100 text-red-800' : 'bg-orange-100 text-orange-800'
+                          }`}>{row.status || 'Pending'}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.amount || 0)}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.gst_amount || 0)}</td>
+                        <td className="px-3 py-2 text-right font-bold">{formatCurrency((row.amount || 0) + (row.gst_amount || 0))}</td>
+                        {canEditFinance && (
+                          <td className="px-3 py-2 text-center">
+                            <div className="inline-flex gap-1">
+                              <button onClick={() => openPiEdit(row)} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-indigo-600"><Edit size={14} /></button>
+                              <button onClick={() => setPiDeleteModal({ isOpen: true, entry: row })} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-red-600"><Trash2 size={14} /></button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'approvals' && (
+        <div className="space-y-3">
+          {(() => {
+            const pending = journalDrafts.filter((d) => d.requires_approval && d.approval_status === 'pending');
+            const recent = journalDrafts.filter((d) => d.requires_approval && d.approval_status !== 'pending').slice(0, 20);
+            return (
+              <>
+                <div className="rounded-xl border-2 border-amber-200 bg-amber-50/40">
+                  <div className="px-3 py-2 border-b border-amber-200 bg-amber-50 text-sm font-semibold text-amber-700 flex items-center justify-between">
+                    <span>Pending approval ({pending.length})</span>
+                    {role !== 'admin' && <span className="text-[11px] text-amber-600">View only — admin must approve</span>}
+                  </div>
+                  {pending.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-xs text-amber-700/70">No drafts awaiting approval.</div>
+                  ) : (
+                    <div className="divide-y divide-amber-100">
+                      {pending.map((d) => {
+                        const totalDebit = (d.entries || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+                        return (
+                          <div key={d.id} className="px-3 py-2 grid grid-cols-12 gap-2 items-center">
+                            <div className="col-span-2 text-xs text-slate-600">{d.date}</div>
+                            <div className="col-span-4 text-sm">
+                              <div className="font-medium text-slate-700 truncate">{d.narration || '—'}</div>
+                              <div className="text-[11px] text-slate-500">{d.party_name || ''} · by {d.created_by?.slice(0, 8) || '—'}</div>
+                            </div>
+                            <div className="col-span-3 text-[11px] text-slate-600 truncate">
+                              {(d.entries || []).slice(0, 2).map((e, i) => (
+                                <div key={i}>{e.debitAccount || '—'} → {e.creditAccount || '—'}</div>
+                              ))}
+                              {(d.entries || []).length > 2 && <div className="text-slate-400">+{(d.entries || []).length - 2}</div>}
+                            </div>
+                            <div className="col-span-1 text-right font-mono text-xs">{formatCurrency(totalDebit)}</div>
+                            <div className="col-span-2 flex justify-end gap-1">
+                              {role === 'admin' ? (
+                                <>
+                                  <button onClick={() => handleApproveDraft(d)} className="rounded bg-green-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-green-700">Approve</button>
+                                  <button onClick={() => handleRejectDraft(d)} className="rounded bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-700">Reject</button>
+                                </>
+                              ) : (
+                                <span className="text-[11px] text-amber-700">Pending</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                {recent.length > 0 && (
+                  <div className="rounded-xl border border-slate-200 bg-white">
+                    <div className="px-3 py-2 border-b border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700">Recently decided ({recent.length})</div>
+                    <div className="divide-y divide-slate-100 text-xs">
+                      {recent.map((d) => (
+                        <div key={d.id} className="px-3 py-1.5 flex items-center justify-between">
+                          <div className="truncate">
+                            <span className={`mr-2 rounded px-1.5 py-0.5 text-[10px] font-semibold ${d.approval_status === 'approved' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{d.approval_status}</span>
+                            {d.narration || '—'}
+                          </div>
+                          <div className="text-slate-400">{d.approved_at ? d.approved_at.slice(0, 10) : ''}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {activeTab === 'journal' && (
+        <div className="space-y-3">
+          {offlineQueueCount > 0 && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center justify-between">
+              <span>📥 {offlineQueueCount} draft{offlineQueueCount === 1 ? '' : 's'} queued offline — will sync when reconnected.</span>
+              <button
+                onClick={async () => {
+                  const result = await flushQueue(appId, async (collName, pl) => {
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', collName), pl);
+                  });
+                  if (result.flushed > 0) addToast(`Synced ${result.flushed} queued draft(s)`, 'success');
+                  if (result.failed > 0) addToast(`${result.failed} still pending`, 'error');
+                  await refreshQueueCount();
+                }}
+                className="rounded bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-700"
+              >Retry now</button>
+            </div>
+          )}
+          {(journalTemplates.length > 0 || canEditFinance) && (
+            <div className="overflow-hidden rounded-xl border-2 border-purple-200 bg-purple-50/30">
+              <div className="flex items-center justify-between px-3 py-2 border-b border-purple-200 bg-purple-50">
+                <div className="text-sm font-semibold text-purple-700">Journal Templates ({journalTemplates.length})</div>
+                <div className="flex items-center gap-2">
+                  {canEditFinance && selectedTemplateIds.size > 0 ? (
+                    <>
+                      <span className="text-[11px] font-semibold text-purple-700">{selectedTemplateIds.size} selected</span>
+                      <button onClick={handleBulkExportTemplates} className="rounded border border-purple-300 bg-white px-2 py-1 text-[11px] font-semibold text-purple-700 hover:bg-purple-50" title="Download selected as JSON">Export selected</button>
+                      <input
+                        type="text"
+                        list="template-category-options"
+                        value={bulkRecategorize}
+                        onChange={(e) => setBulkRecategorize(e.target.value)}
+                        placeholder="New category…"
+                        className="rounded border border-purple-300 px-2 py-1 text-[11px] w-32"
+                      />
+                      <button onClick={handleBulkRecategorize} className="rounded bg-purple-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-purple-700">Recategorize</button>
+                      <button onClick={handleBulkDeleteTemplates} className="rounded bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-700">Delete</button>
+                      <button onClick={clearTemplateSelection} className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50">Clear</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[11px] text-purple-600 hidden sm:inline">One-click drafts for recurring entries</span>
+                      {canEditFinance && (
+                        <>
+                          <button
+                            onClick={handleExportTemplates}
+                            disabled={journalTemplates.length === 0}
+                            className="rounded border border-purple-300 bg-white px-2 py-1 text-[11px] font-semibold text-purple-700 hover:bg-purple-50 disabled:opacity-40"
+                            title="Download all templates as JSON"
+                          >Export</button>
+                          <label className="cursor-pointer rounded border border-purple-300 bg-white px-2 py-1 text-[11px] font-semibold text-purple-700 hover:bg-purple-50" title="Upload a JSON file to import templates">
+                            Import
+                            <input type="file" accept="application/json,.json" className="hidden" onChange={handleImportTemplates} />
+                          </label>
+                          <button
+                            onClick={() => setEditingTemplate({
+                              id: null,
+                              name: '',
+                              category: '',
+                              narration: '',
+                              party_name: '',
+                              entries: [{ debitAccount: '', creditAccount: '', amount: '{{amount|amount}}' }],
+                            })}
+                            className="rounded bg-purple-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-purple-700"
+                          >+ New Template</button>
+                        </>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+              {journalTemplates.length === 0 ? (
+                <div className="px-4 py-6 text-center text-xs text-purple-600/70">
+                  No templates yet. Click <strong>+ New Template</strong> above, or save any parked draft as a template.
+                </div>
+              ) : (
+                <>
+                  {(() => {
+                    const cats = Array.from(new Set(journalTemplates.map((t) => t.category).filter(Boolean))).sort();
+                    if (cats.length === 0) return null;
+                    return (
+                      <div className="flex flex-wrap items-center gap-1 px-3 py-2 border-b border-purple-100 bg-white/60">
+                        <span className="text-[10px] uppercase font-semibold text-purple-600 mr-1">Filter:</span>
+                        <button
+                          onClick={() => setTemplateCategoryFilter('all')}
+                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${templateCategoryFilter === 'all' ? 'bg-purple-600 text-white' : 'bg-white border border-purple-200 text-purple-700 hover:bg-purple-50'}`}
+                        >All</button>
+                        {cats.map((c) => (
+                          <button
+                            key={c}
+                            onClick={() => setTemplateCategoryFilter(c)}
+                            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${templateCategoryFilter === c ? 'bg-purple-600 text-white' : 'bg-white border border-purple-200 text-purple-700 hover:bg-purple-50'}`}
+                          >{c}</button>
+                        ))}
+                        <button
+                          onClick={() => setTemplateCategoryFilter('__uncat__')}
+                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${templateCategoryFilter === '__uncat__' ? 'bg-purple-600 text-white' : 'bg-white border border-purple-200 text-purple-700 hover:bg-purple-50'}`}
+                        >Uncategorized</button>
+                      </div>
+                    );
+                  })()}
+                  <div className="flex flex-wrap gap-2 p-3">
+                {journalTemplates
+                  .filter((t) => templateCategoryFilter === 'all' ? true : templateCategoryFilter === '__uncat__' ? !t.category : t.category === templateCategoryFilter)
+                  .slice()
+                  .sort((a, b) => (b.uses || 0) - (a.uses || 0) || (a.name || '').localeCompare(b.name || ''))
+                  .map((tpl) => {
+                    const firstLine = (tpl.entries || [])[0] || {};
+                    return (
+                      <div key={tpl.id} className="group relative rounded-lg border border-purple-200 bg-white px-3 py-2 shadow-sm hover:border-purple-400 hover:shadow-md transition">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex items-start gap-2">
+                            {canEditFinance && (
+                              <input
+                                type="checkbox"
+                                checked={selectedTemplateIds.has(tpl.id)}
+                                onChange={() => toggleTemplateSelection(tpl.id)}
+                                className="mt-1 h-3.5 w-3.5 cursor-pointer rounded border-purple-300 text-purple-600"
+                                title="Select for bulk action"
+                              />
+                            )}
+                            <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <div className="text-sm font-semibold text-slate-800 truncate max-w-[180px]" title={tpl.name}>{tpl.name}</div>
+                              {tpl.category && <span className="rounded-full bg-purple-100 px-1.5 py-0.5 text-[9px] font-semibold text-purple-700 uppercase">{tpl.category}</span>}
+                            </div>
+                            <div className="text-[10px] text-slate-500 truncate max-w-[200px]" title={`${firstLine.debitAccount || '—'} → ${firstLine.creditAccount || '—'}`}>
+                              {firstLine.debitAccount || '—'} → {firstLine.creditAccount || '—'}
+                              {(tpl.entries || []).length > 1 && <span className="ml-1 text-slate-400">+{(tpl.entries || []).length - 1}</span>}
+                            </div>
+                            {(tpl.uses || 0) > 0 && <div className="text-[10px] text-purple-600 font-semibold mt-0.5">Used {tpl.uses}×</div>}
+                            {extractVariables(tpl).length > 0 && (
+                              <div className="text-[10px] text-slate-500 mt-0.5" title="Will prompt for these on Use">
+                                Vars: {extractVariables(tpl).map((v) => v.name).join(', ')}
+                              </div>
+                            )}
+                            </div>
+                          </div>
+                          {canEditFinance && (
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <button
+                                onClick={() => handleUseTemplate(tpl)}
+                                className="rounded bg-purple-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-purple-700"
+                              >Use</button>
+                              <button
+                                onClick={() => setRecurringFromTpl({
+                                  tpl,
+                                  frequency: 'monthly',
+                                  interval: 1,
+                                  dayOfMonth: new Date().getDate(),
+                                  startDate: new Date().toISOString().slice(0, 10),
+                                  endDate: '',
+                                  active: true,
+                                })}
+                                className="rounded border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-purple-700 hover:bg-purple-50"
+                                title="Schedule this template to auto-generate drafts"
+                              >↻ Schedule</button>
+                              <button
+                                onClick={() => setEditingTemplate({
+                                  id: tpl.id,
+                                  name: tpl.name || '',
+                                  category: tpl.category || '',
+                                  narration: tpl.narration || '',
+                                  party_name: tpl.party_name || '',
+                                  entries: (tpl.entries || []).map((e) => ({
+                                    debitAccount: e.debitAccount || '',
+                                    creditAccount: e.creditAccount || '',
+                                    amount: e.amount,
+                                  })),
+                                })}
+                                className="rounded border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-purple-700 hover:bg-purple-50"
+                                title="Edit template"
+                              >Edit</button>
+                              <button
+                                onClick={() => handleDeleteTemplate(tpl)}
+                                className="rounded border border-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-500 hover:bg-red-50 hover:text-red-600"
+                                title="Delete template"
+                              >×</button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {journalDrafts.length > 0 && (
+            <div className="overflow-hidden rounded-xl border-2 border-indigo-200 bg-indigo-50/30">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-indigo-200 bg-indigo-50">
+                <div className="text-sm font-semibold text-indigo-700">Parked Drafts ({journalDrafts.length})</div>
+                {canEditFinance && selectedDraftIds.size > 0 ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold text-indigo-700">{selectedDraftIds.size} selected</span>
+                    <button onClick={handleBulkPostDrafts} className="rounded bg-green-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-green-700">Post selected</button>
+                    <input
+                      type="date"
+                      value={bulkScheduleDate}
+                      onChange={(e) => setBulkScheduleDate(e.target.value)}
+                      className="rounded border border-indigo-300 px-2 py-1 text-[11px]"
+                      title="Pick a date, then click Schedule"
+                    />
+                    <button
+                      onClick={handleBulkScheduleDrafts}
+                      disabled={!bulkScheduleDate}
+                      className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                    >Schedule selected</button>
+                    <button onClick={handleBulkDeleteDrafts} className="rounded border border-red-300 bg-white px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-50">Discard</button>
+                    <button onClick={() => setSelectedDraftIds(new Set())} className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50">Clear</button>
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-indigo-600">Not yet posted to the ledger</div>
+                )}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-indigo-50 text-xs uppercase text-indigo-600">
+                    <tr>
+                      {canEditFinance && (
+                        <th className="px-3 py-2 text-center w-8">
+                          <input
+                            type="checkbox"
+                            checked={selectedDraftIds.size === journalDrafts.length && journalDrafts.length > 0}
+                            onChange={toggleAllDrafts}
+                            title="Select all"
+                          />
+                        </th>
+                      )}
+                      <th className="px-3 py-2 text-left">Date</th>
+                      <th className="px-3 py-2 text-left">Party / Narration</th>
+                      <th className="px-3 py-2 text-left">Dr → Cr</th>
+                      <th className="px-3 py-2 text-right">Amount</th>
+                      {canEditFinance && <th className="px-3 py-2 text-center">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-indigo-100">
+                    {journalDrafts
+                      .slice()
+                      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+                      .map((d) => {
+                        const line = (d.entries || [])[0] || {};
+                        const amt = (d.entries || []).reduce((s, e) => s + (e.amount || 0), 0);
+                        return (
+                          <tr key={d.id} className="hover:bg-indigo-50/50">
+                            {canEditFinance && (
+                              <td className="px-3 py-2 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedDraftIds.has(d.id)}
+                                  onChange={() => toggleDraftSelection(d.id)}
+                                />
+                              </td>
+                            )}
+                            <td className="px-3 py-2">{d.date}</td>
+                            <td className="px-3 py-2">
+                              <div className="font-medium text-slate-700">{d.party_name || d.narration || '—'}</div>
+                              {d.raw_prompt && <div className="text-[10px] text-slate-400 italic truncate max-w-[260px]" title={d.raw_prompt}>"{d.raw_prompt}"</div>}
+                              {d.schedule_post_on && (
+                                <div className={`text-[10px] font-semibold mt-0.5 ${d.schedule_post_on <= new Date().toISOString().slice(0,10) ? 'text-red-600' : 'text-indigo-600'}`}>
+                                  ⏱ Auto-post on {d.schedule_post_on}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-xs">
+                              <span className="text-slate-600">{line.debitAccount || '—'}</span>
+                              <span className="mx-1 text-slate-400">→</span>
+                              <span className="text-slate-600">{line.creditAccount || '—'}</span>
+                              {(d.entries || []).length > 1 && <span className="ml-1 text-[10px] text-slate-400">+{(d.entries || []).length - 1} more</span>}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-semibold">{formatCurrency(amt)}</td>
+                            {canEditFinance && (
+                              <td className="px-3 py-2 text-center space-x-1">
+                                <button
+                                  onClick={() => handlePostDraft(d)}
+                                  className="rounded bg-green-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-green-700"
+                                >
+                                  Post
+                                </button>
+                                <button
+                                  onClick={() => setEditingDraft({
+                                    id: d.id,
+                                    date: d.date || new Date().toISOString().slice(0, 10),
+                                    narration: d.narration || '',
+                                    party_name: d.party_name || '',
+                                    entries: (d.entries || []).map((e) => ({
+                                      debitAccount: e.debitAccount || '',
+                                      creditAccount: e.creditAccount || '',
+                                      amount: e.amount || 0,
+                                    })),
+                                    schedule_post_on: d.schedule_post_on || '',
+                                    attachments: d.attachments || [],
+                                  })}
+                                  className="rounded border border-indigo-300 bg-white px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => handleSaveDraftAsTemplate(d)}
+                                  className="rounded border border-purple-300 bg-white px-2 py-1 text-[11px] font-semibold text-purple-700 hover:bg-purple-50"
+                                  title="Save the account structure as a reusable template"
+                                >
+                                  Save as Template
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteDraft(d)}
+                                  className="rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+                                >
+                                  Discard
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Ref</th>
+                    <th className="px-3 py-2 text-left">Debit Account</th>
+                    <th className="px-3 py-2 text-left">Credit Account</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                    <th className="px-3 py-2 text-center w-16">Files</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {snapshot.journal.map((row, idx) => {
+                    const atts = attachmentsByVoucher[row.refNo] || [];
+                    return (
+                      <tr key={`${row.refNo}-${idx}`}>
+                        <td className="px-3 py-2">{row.date || '-'}</td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.refNo || row.source}</td>
+                        <td className="px-3 py-2">{row.debitAccount}</td>
+                        <td className="px-3 py-2">{row.creditAccount}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.amount)}</td>
+                        <td className="px-3 py-2 text-center">
+                          {atts.length > 0 ? (
+                            <button
+                              onClick={() => setAttachmentsModal({ voucher: row.refNo, attachments: atts })}
+                              className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-200"
+                              title={`${atts.length} file(s) attached`}
+                            >📎 {atts.length}</button>
+                          ) : <span className="text-slate-300">—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'ledger' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Select Account</label>
+            <select
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+              value={selectedLedgerRow?.account || ''}
+              onChange={(e) => setSelectedLedger(e.target.value)}
+            >
+              {snapshot.ledger.length === 0 && <option value="">No accounts found</option>}
+              {snapshot.ledger.map((row) => (
+                <option key={row.accountId || row.account} value={row.account}>
+                  {row.account} ({row.balanceType} {formatCurrency(Math.abs(row.balance))})
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedLedgerRow && (
+            <>
+              {/* Summary cards */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-center">
+                  <p className="text-xs font-semibold uppercase text-green-600">Total Debit</p>
+                  <p className="mt-1 text-lg font-bold text-green-800">{formatCurrency(selectedLedgerRow.debit)}</p>
+                </div>
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-center">
+                  <p className="text-xs font-semibold uppercase text-red-600">Total Credit</p>
+                  <p className="mt-1 text-lg font-bold text-red-800">{formatCurrency(selectedLedgerRow.credit)}</p>
+                </div>
+                <div className={`rounded-xl border p-3 text-center ${selectedLedgerRow.balance >= 0 ? 'border-blue-200 bg-blue-50' : 'border-amber-200 bg-amber-50'}`}>
+                  <p className={`text-xs font-semibold uppercase ${selectedLedgerRow.balance >= 0 ? 'text-blue-600' : 'text-amber-600'}`}>Net Balance</p>
+                  <p className={`mt-1 text-lg font-bold ${selectedLedgerRow.balance >= 0 ? 'text-blue-800' : 'text-amber-800'}`}>
+                    {formatCurrency(Math.abs(selectedLedgerRow.balance))} {selectedLedgerRow.balanceType}
+                  </p>
+                </div>
+              </div>
+              {/* Entries table */}
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-500 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Date</th>
+                        <th className="px-3 py-2 text-left">Type</th>
+                        <th className="px-3 py-2 text-left">Ref / Narration</th>
+                        <th className="px-3 py-2 text-left">Contra Account</th>
+                        <th className="px-3 py-2 text-right text-green-700">Debit (Dr)</th>
+                        <th className="px-3 py-2 text-right text-red-700">Credit (Cr)</th>
+                        <th className="px-3 py-2 text-right">Running Bal.</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(() => {
+                        let running = 0;
+                        return selectedLedgerRow.entries.map((row, idx) => {
+                          running += row.side === 'Dr' ? row.amount : -row.amount;
+                          const sourceLabel = {
+                            sales_invoice: 'Sale',
+                            non_invoiced_sales: 'Sale (Pending Inv)',
+                            purchase_invoice: 'Purchase',
+                            receipt: 'Payment Recd',
+                            vendor_payment: 'Payment Made',
+                            expense: 'Expense',
+                            employee_payout: 'Salary',
+                            employee_advance: 'Advance',
+                            opening_balance: 'Opening Bal',
+                            manual_journal: 'Journal Entry',
+                            fy_closing: 'FY Closing',
+                          }[row.source] || row.source;
+                          const contra = row.side === 'Dr' ? row.creditAccount : row.debitAccount;
+                          return (
+                            <tr key={`${row.refNo}-${idx}`} className="hover:bg-slate-50">
+                              <td className="px-3 py-2 whitespace-nowrap">{row.date || '-'}</td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${
+                                  row.source === 'sales_invoice' || row.source === 'non_invoiced_sales'
+                                    ? 'bg-green-100 text-green-800'
+                                    : row.source === 'purchase_invoice'
+                                    ? 'bg-orange-100 text-orange-800'
+                                    : row.source === 'receipt'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : row.source === 'vendor_payment'
+                                    ? 'bg-red-100 text-red-800'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}>
+                                  {sourceLabel}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className="font-mono text-xs">{row.refNo || '-'}</span>
+                                {row.remarks && <span className="ml-1 text-xs text-slate-400">— {row.remarks}</span>}
+                              </td>
+                              <td className="px-3 py-2 text-xs text-slate-600">{contra || '-'}</td>
+                              <td className="px-3 py-2 text-right font-mono">
+                                {row.side === 'Dr' ? <span className="text-green-700">{formatCurrency(row.amount)}</span> : ''}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono">
+                                {row.side === 'Cr' ? <span className="text-red-700">{formatCurrency(row.amount)}</span> : ''}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-semibold">
+                                <span className={running >= 0 ? 'text-green-700' : 'text-red-700'}>
+                                  {formatCurrency(Math.abs(running))} {running >= 0 ? 'Dr' : 'Cr'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+          {!selectedLedgerRow && snapshot.ledger.length === 0 && (
+            <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-500">
+              <p className="text-lg font-semibold">No Ledger Data</p>
+              <p className="mt-1 text-sm">Create invoices, record payments, or add expenses to see ledger entries.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'trial' && (
+        <div className="space-y-3">
+          <div className={`rounded-xl border p-3 text-sm font-semibold ${snapshot.trialBalance.isBalanced ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+            Total Dr: {formatCurrency(snapshot.trialBalance.totalDebit)} | Total Cr: {formatCurrency(snapshot.trialBalance.totalCredit)} | Difference: {formatCurrency(snapshot.trialBalance.difference)}
+          </div>
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Account</th>
+                    <th className="px-3 py-2 text-right">Debit</th>
+                    <th className="px-3 py-2 text-right">Credit</th>
+                    <th className="px-3 py-2 text-right">Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {snapshot.trialBalance.rows.map((row) => (
+                    <tr key={row.account}>
+                      <td className="px-3 py-2">{row.account}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.debit)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.credit)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCurrency(Math.abs(row.balance))} {row.balanceType}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ GST REPORTS TAB ══════ */}
+      {activeTab === 'gst' && (
+        <div className="space-y-4">
+          {/* Sub-tab navigation */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex gap-1.5">
+              {[
+                { id: 'gstr1', label: 'GSTR-1 (Sales)' },
+                { id: 'gstr2', label: 'GSTR-2 (Purchases)' },
+                { id: 'gstr3b', label: 'GST Summary' },
+                { id: 'hsn', label: 'HSN Summary' },
+              ].map(t => (
+                <button key={t.id} onClick={() => setGstSubTab(t.id)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${gstSubTab === t.id ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1.5">
+              <button onClick={() => exportGstToExcel(gstSubTab)} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                <Download size={12} /> Export Current
+              </button>
+              <button onClick={() => exportGstToExcel('all')} className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700">
+                <Download size={12} /> Export All GST
+              </button>
+              <button onClick={() => exportGstrJson('gstr1')} className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700" title="GSTR-1 JSON for portal upload">
+                <Download size={12} /> GSTR-1 JSON
+              </button>
+              <button onClick={() => exportGstrJson('gstr3b')} className="inline-flex items-center gap-1 rounded-lg bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800" title="GSTR-3B JSON for portal upload">
+                <Download size={12} /> GSTR-3B JSON
+              </button>
+            </div>
+          </div>
+
+          {orgGstin && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              Your GSTIN: <span className="font-mono font-semibold text-slate-800">{orgGstin}</span>
+              <span className="ml-2 text-slate-400">|</span>
+              <span className="ml-2">State: {orgGstin.substring(0, 2)}</span>
+            </div>
+          )}
+
+          {/* ── GSTR-1: Outward Supplies ── */}
+          {gstSubTab === 'gstr1' && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-sm text-green-800">
+                <strong>GSTR-1 — Outward Supplies (Sales)</strong>: All invoiced sales with client GSTIN and GST breakup. Use this data to file your GSTR-1 return.
+              </div>
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Date</th>
+                        <th className="px-3 py-2 text-left">Invoice No</th>
+                        <th className="px-3 py-2 text-left">Client</th>
+                        <th className="px-3 py-2 text-left">GSTIN</th>
+                        <th className="px-3 py-2 text-left">Supply</th>
+                        <th className="px-3 py-2 text-right">Taxable</th>
+                        <th className="px-3 py-2 text-right">CGST</th>
+                        <th className="px-3 py-2 text-right">SGST</th>
+                        <th className="px-3 py-2 text-right">IGST</th>
+                        <th className="px-3 py-2 text-right">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {gstData.gstr1.map((r, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="px-3 py-2">{r.date || '-'}</td>
+                          <td className="px-3 py-2 font-mono text-xs font-semibold">{r.invoiceNo}</td>
+                          <td className="px-3 py-2">{r.clientName}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{r.clientGstin || <span className="text-orange-500">Unregistered</span>}</td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${r.supplyType === 'Intra-State' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>{r.supplyType}</span>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(r.taxable)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{r.cgst ? formatCurrency(r.cgst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{r.sgst ? formatCurrency(r.sgst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono text-purple-700">{r.igst ? formatCurrency(r.igst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(r.total)}</td>
+                        </tr>
+                      ))}
+                      {gstData.gstr1.length === 0 && <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-400">No sales invoices for the selected period</td></tr>}
+                    </tbody>
+                    {gstData.gstr1.length > 0 && (
+                      <tfoot className="bg-slate-100 font-semibold text-sm">
+                        <tr>
+                          <td colSpan={5} className="px-3 py-2 text-right">Total ({gstData.gstr1.length} invoices)</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(gstData.gstr1.reduce((s, r) => s + r.taxable, 0))}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCurrency(gstData.gstr3b.outputCgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCurrency(gstData.gstr3b.outputSgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-purple-700">{formatCurrency(gstData.gstr3b.outputIgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(gstData.gstr1.reduce((s, r) => s + r.total, 0))}</td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── GSTR-2: Inward Supplies ── */}
+          {gstSubTab === 'gstr2' && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">
+                <strong>GSTR-2 — Inward Supplies (Purchases)</strong>: All purchase invoices with vendor GSTIN, type (Asset/Service), and input tax credit. Use for GSTR-2 and ITC reconciliation.
+              </div>
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Date</th>
+                        <th className="px-3 py-2 text-left">PI No</th>
+                        <th className="px-3 py-2 text-left">Vendor</th>
+                        <th className="px-3 py-2 text-left">GSTIN</th>
+                        <th className="px-3 py-2 text-left">Type</th>
+                        <th className="px-3 py-2 text-left">Supply</th>
+                        <th className="px-3 py-2 text-right">Taxable</th>
+                        <th className="px-3 py-2 text-right">CGST</th>
+                        <th className="px-3 py-2 text-right">SGST</th>
+                        <th className="px-3 py-2 text-right">IGST</th>
+                        <th className="px-3 py-2 text-right">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {gstData.gstr2.map((r, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="px-3 py-2">{r.date || '-'}</td>
+                          <td className="px-3 py-2 font-mono text-xs font-semibold">{r.piNo}</td>
+                          <td className="px-3 py-2">{r.vendorName}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{r.vendorGstin || <span className="text-orange-500">Unregistered</span>}</td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${r.type === 'Asset' ? 'bg-emerald-100 text-emerald-800' : 'bg-violet-100 text-violet-800'}`}>{r.type}</span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${r.supplyType === 'Intra-State' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>{r.supplyType}</span>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(r.taxable)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{r.cgst ? formatCurrency(r.cgst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{r.sgst ? formatCurrency(r.sgst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono text-purple-700">{r.igst ? formatCurrency(r.igst) : '-'}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(r.total)}</td>
+                        </tr>
+                      ))}
+                      {gstData.gstr2.length === 0 && <tr><td colSpan={11} className="px-3 py-6 text-center text-slate-400">No purchase invoices for the selected period</td></tr>}
+                    </tbody>
+                    {gstData.gstr2.length > 0 && (
+                      <tfoot className="bg-slate-100 font-semibold text-sm">
+                        <tr>
+                          <td colSpan={6} className="px-3 py-2 text-right">Total ({gstData.gstr2.length} invoices)</td>
+                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(gstData.gstr2.reduce((s, r) => s + r.taxable, 0))}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCurrency(gstData.gstr3b.inputCgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-blue-700">{formatCurrency(gstData.gstr3b.inputSgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-purple-700">{formatCurrency(gstData.gstr3b.inputIgst)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(gstData.gstr2.reduce((s, r) => s + r.total, 0))}</td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── GSTR-3B Style Summary ── */}
+          {gstSubTab === 'gstr3b' && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800">
+                <strong>GST Summary (GSTR-3B Style)</strong>: Quick view of output tax vs input tax credit and net GST payable to the government.
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {/* Output Tax */}
+                <div className="rounded-xl border-2 border-green-200 bg-white p-4">
+                  <p className="text-sm font-bold text-green-700">Output Tax (Sales)</p>
+                  <p className="text-xs text-green-600 mb-3">GST you collected from clients</p>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span>Taxable Value</span><span className="font-mono font-semibold">{formatCurrency(gstData.gstr3b.outputTaxable)}</span></div>
+                    <div className="flex justify-between"><span>CGST</span><span className="font-mono font-semibold text-blue-700">{formatCurrency(gstData.gstr3b.outputCgst)}</span></div>
+                    <div className="flex justify-between"><span>SGST</span><span className="font-mono font-semibold text-blue-700">{formatCurrency(gstData.gstr3b.outputSgst)}</span></div>
+                    <div className="flex justify-between"><span>IGST</span><span className="font-mono font-semibold text-purple-700">{formatCurrency(gstData.gstr3b.outputIgst)}</span></div>
+                    <div className="flex justify-between border-t pt-2 font-bold"><span>Total Output GST</span><span className="font-mono text-green-800">{formatCurrency(gstData.gstr3b.outputTotal)}</span></div>
+                  </div>
+                </div>
+                {/* Input Tax Credit */}
+                <div className="rounded-xl border-2 border-orange-200 bg-white p-4">
+                  <p className="text-sm font-bold text-orange-700">Input Tax Credit (Purchases)</p>
+                  <p className="text-xs text-orange-600 mb-3">GST you paid to vendors</p>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span>Taxable Value</span><span className="font-mono font-semibold">{formatCurrency(gstData.gstr3b.inputTaxable)}</span></div>
+                    <div className="flex justify-between"><span>CGST</span><span className="font-mono font-semibold text-blue-700">{formatCurrency(gstData.gstr3b.inputCgst)}</span></div>
+                    <div className="flex justify-between"><span>SGST</span><span className="font-mono font-semibold text-blue-700">{formatCurrency(gstData.gstr3b.inputSgst)}</span></div>
+                    <div className="flex justify-between"><span>IGST</span><span className="font-mono font-semibold text-purple-700">{formatCurrency(gstData.gstr3b.inputIgst)}</span></div>
+                    <div className="flex justify-between border-t pt-2 font-bold"><span>Total Input ITC</span><span className="font-mono text-orange-800">{formatCurrency(gstData.gstr3b.inputTotal)}</span></div>
+                  </div>
+                </div>
+                {/* Net Payable */}
+                <div className={`rounded-xl border-2 p-4 ${gstData.gstr3b.netPayable >= 0 ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}>
+                  <p className={`text-sm font-bold ${gstData.gstr3b.netPayable >= 0 ? 'text-red-700' : 'text-green-700'}`}>
+                    {gstData.gstr3b.netPayable >= 0 ? '💸 Net GST Payable' : '💰 Net GST Refundable'}
+                  </p>
+                  <p className={`text-xs mb-3 ${gstData.gstr3b.netPayable >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                    {gstData.gstr3b.netPayable >= 0 ? 'Amount to pay the government' : 'ITC excess — carry forward or claim refund'}
+                  </p>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span>CGST</span><span className={`font-mono font-semibold ${gstData.gstr3b.netCgst >= 0 ? 'text-red-700' : 'text-green-700'}`}>{formatCurrency(Math.abs(gstData.gstr3b.netCgst))}</span></div>
+                    <div className="flex justify-between"><span>SGST</span><span className={`font-mono font-semibold ${gstData.gstr3b.netSgst >= 0 ? 'text-red-700' : 'text-green-700'}`}>{formatCurrency(Math.abs(gstData.gstr3b.netSgst))}</span></div>
+                    <div className="flex justify-between"><span>IGST</span><span className={`font-mono font-semibold ${gstData.gstr3b.netIgst >= 0 ? 'text-red-700' : 'text-green-700'}`}>{formatCurrency(Math.abs(gstData.gstr3b.netIgst))}</span></div>
+                    <div className="flex justify-between border-t pt-2 font-bold text-lg">
+                      <span>Total</span>
+                      <span className={`font-mono ${gstData.gstr3b.netPayable >= 0 ? 'text-red-800' : 'text-green-800'}`}>{formatCurrency(Math.abs(gstData.gstr3b.netPayable))}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── HSN Summary ── */}
+          {gstSubTab === 'hsn' && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                <strong>HSN/SAC Summary</strong>: Taxable value and GST grouped by HSN/SAC code. Required for GSTR-1 Annexure and annual return.
+              </div>
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 text-left">HSN/SAC</th>
+                        <th className="px-3 py-2 text-right">GST Rate</th>
+                        <th className="px-3 py-2 text-right">Sales Taxable</th>
+                        <th className="px-3 py-2 text-right">Sales GST</th>
+                        <th className="px-3 py-2 text-right">Purchase Taxable</th>
+                        <th className="px-3 py-2 text-right">Purchase GST</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {gstData.hsnSummary.map((r, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="px-3 py-2 font-mono font-semibold">{r.hsn}</td>
+                          <td className="px-3 py-2 text-right">{r.gstRate}%</td>
+                          <td className="px-3 py-2 text-right font-mono text-green-700">{formatCurrency(r.salesTaxable)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-green-700">{formatCurrency(r.salesGst)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-orange-700">{formatCurrency(r.purchaseTaxable)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-orange-700">{formatCurrency(r.purchaseGst)}</td>
+                        </tr>
+                      ))}
+                      {gstData.hsnSummary.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400">No HSN data for the selected period</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'coa' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-3 grid gap-2 sm:grid-cols-6">
+            <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black" placeholder="Code" value={coaForm.code} onChange={(e) => setCoaForm((f) => ({ ...f, code: e.target.value }))} />
+            <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" placeholder="Account Name" value={coaForm.name} onChange={(e) => setCoaForm((f) => ({ ...f, name: e.target.value }))} />
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={coaForm.type} onChange={(e) => setCoaForm((f) => ({ ...f, type: e.target.value }))}>
+              {ACCOUNT_TYPES.map((row) => <option key={row} value={row}>{row}</option>)}
+            </select>
+            <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black" placeholder="Sub Type" value={coaForm.subType} onChange={(e) => setCoaForm((f) => ({ ...f, subType: e.target.value }))} />
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={coaForm.normalSide} onChange={(e) => setCoaForm((f) => ({ ...f, normalSide: e.target.value }))}>
+              <option value="Dr">Dr</option>
+              <option value="Cr">Cr</option>
+            </select>
+            <button disabled={isSaving} onClick={addAccount} className="rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">Add Account</button>
+            <button disabled={isSaving} onClick={seedDefaultCoa} className="rounded border border-indigo-300 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-60">Seed Default COA</button>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Code</th>
+                    <th className="px-3 py-2 text-left">Name</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-left">Sub Type</th>
+                    <th className="px-3 py-2 text-left">Normal</th>
+                    <th className="px-3 py-2 text-left">Source</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {chartOfAccounts
+                    .slice()
+                    .sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
+                    .map((row) => (
+                      <tr key={row.id || row.code}>
+                        <td className="px-3 py-2 font-mono">{row.code}</td>
+                        <td className="px-3 py-2">{row.name}</td>
+                        <td className="px-3 py-2">{row.type}</td>
+                        <td className="px-3 py-2">{row.subType || '-'}</td>
+                        <td className="px-3 py-2">{row.normalSide || '-'}</td>
+                        <td className="px-3 py-2 text-xs">{row.isSystem ? 'System' : 'Manual'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'manual' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-3 grid gap-2 sm:grid-cols-6">
+            <input type="date" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={journalForm.date} onChange={(e) => setJournalForm((f) => ({ ...f, date: e.target.value }))} />
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={journalForm.debitAccount} onChange={(e) => setJournalForm((f) => ({ ...f, debitAccount: e.target.value }))}>
+              <option value="">Debit Account</option>
+              {allAccounts.map((row) => <option key={`dr-${row}`} value={row}>{row}</option>)}
+            </select>
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={journalForm.creditAccount} onChange={(e) => setJournalForm((f) => ({ ...f, creditAccount: e.target.value }))}>
+              <option value="">Credit Account</option>
+              {allAccounts.map((row) => <option key={`cr-${row}`} value={row}>{row}</option>)}
+            </select>
+            <input type="number" min="0" step="0.01" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" placeholder="Amount" value={journalForm.amount} onChange={(e) => setJournalForm((f) => ({ ...f, amount: e.target.value }))} />
+            <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-4" placeholder="Narration" value={journalForm.narration} onChange={(e) => setJournalForm((f) => ({ ...f, narration: e.target.value }))} />
+            <select
+              className="rounded border border-slate-300 px-2 py-2 text-sm text-black"
+              value={journalForm.currency || 'INR'}
+              onChange={(e) => setJournalForm((f) => ({ ...f, currency: e.target.value, fx_rate_to_inr: e.target.value === 'INR' ? 1 : f.fx_rate_to_inr }))}
+              title="Currency"
+            >
+              <option value="INR">INR</option>
+              <option value="USD">USD</option>
+              <option value="EUR">EUR</option>
+              <option value="GBP">GBP</option>
+              <option value="AED">AED</option>
+              <option value="SGD">SGD</option>
+            </select>
+            <input
+              type="number" min="0" step="0.0001"
+              className="rounded border border-slate-300 px-2 py-2 text-sm text-black"
+              placeholder="FX → INR"
+              value={journalForm.fx_rate_to_inr || 1}
+              onChange={(e) => setJournalForm((f) => ({ ...f, fx_rate_to_inr: e.target.value }))}
+              disabled={(journalForm.currency || 'INR') === 'INR'}
+              title="FX rate snapshot at post time"
+            />
+            <button disabled={isSaving} onClick={postManualJournal} className="rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">Post Journal</button>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Voucher</th>
+                    <th className="px-3 py-2 text-left">Narration</th>
+                    <th className="px-3 py-2 text-right">Entries</th>
+                    <th className="px-3 py-2 text-right">Source</th>
+                    {canEditFinance && <th className="px-3 py-2 text-center">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {manualJournalEntries
+                    .filter((row) => (fyFilter === 'all' ? true : row.fy === fyFilter))
+                    .slice()
+                    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+                    .map((row) => (
+                      <tr key={row.id}>
+                        <td className="px-3 py-2">{row.date}</td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.voucher_no}</td>
+                        <td className="px-3 py-2">{row.narration || '-'}</td>
+                        <td className="px-3 py-2 text-right text-xs">{(row.entries || []).length}</td>
+                        <td className="px-3 py-2 text-right text-xs">
+                          <span className={`px-2 py-0.5 rounded text-xs ${
+                            row.source === 'manual_journal' ? 'bg-indigo-100 text-indigo-700' :
+                            row.source === 'fy_closing' ? 'bg-amber-100 text-amber-700' :
+                            'bg-slate-100 text-slate-600'
+                          }`}>
+                            {row.source === 'manual_journal' ? 'Manual' : 
+                             row.source === 'fy_closing' ? 'FY Close' : 
+                             row.source || 'System'}
+                          </span>
+                        </td>
+                        {canEditFinance && (
+                          <td className="px-3 py-2 text-center">
+                            <div className="inline-flex items-center gap-1">
+                              {row.source === 'manual_journal' && !row.reversed && row.status !== 'draft' && (
+                                <button
+                                  onClick={() => handleReverseJournalEntry(row)}
+                                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-amber-700 hover:bg-amber-50 transition"
+                                  title="Post a reversal voucher (M-6)"
+                                  disabled={isSaving}
+                                >
+                                  Reverse
+                                </button>
+                              )}
+                              {row.reversed && (
+                                <span className="text-[10px] text-slate-500" title={`Reversed by ${row.reversed_by_voucher_no || ''}`}>Reversed</span>
+                              )}
+                              <button
+                                onClick={() => handleDeleteJournalEntry(row)}
+                                className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-red-600 hover:bg-red-50 transition disabled:opacity-40"
+                                title={row.source === 'manual_journal' && row.status !== 'draft' ? 'Posted manual JVs cannot be deleted — use Reverse' : 'Delete entry'}
+                                disabled={isSaving || (row.source === 'manual_journal' && row.status !== 'draft')}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'recurring' && (
+        <RecurringEntries
+          db={db}
+          appId={appId}
+          role={role}
+          user={user}
+          recurringRules={recurringRules}
+          chartOfAccounts={chartOfAccounts}
+          logAction={logAction}
+          addToast={addToast}
+          lockedFYs={lockedFYs}
+        />
+      )}
+
+      {activeTab === 'reconcile' && (
+        <BankReconciliation
+          db={db}
+          appId={appId}
+          role={role}
+          user={user}
+          manualJournalEntries={manualJournalEntries}
+          logAction={logAction}
+          addToast={addToast}
+        />
+      )}
+
+      {activeTab === 'opening' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-3 grid gap-2 sm:grid-cols-6">
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={openingForm.fy} onChange={(e) => setOpeningForm((f) => ({ ...f, fy: e.target.value }))}>
+              <option value="">Select FY</option>
+              {fyOptions.filter((row) => row !== 'all').map((row) => <option key={row} value={row}>{row}</option>)}
+            </select>
+            <input type="date" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={openingForm.date} onChange={(e) => setOpeningForm((f) => ({ ...f, date: e.target.value }))} />
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={openingForm.account_name} onChange={(e) => setOpeningForm((f) => ({ ...f, account_name: e.target.value }))}>
+              <option value="">Account</option>
+              {allAccounts.map((row) => <option key={`ob-${row}`} value={row}>{row}</option>)}
+            </select>
+            <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={openingForm.side} onChange={(e) => setOpeningForm((f) => ({ ...f, side: e.target.value }))}>
+              <option value="Dr">Dr</option>
+              <option value="Cr">Cr</option>
+            </select>
+            <input type="number" min="0" step="0.01" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" placeholder="Amount" value={openingForm.amount} onChange={(e) => setOpeningForm((f) => ({ ...f, amount: e.target.value }))} />
+            <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-5" placeholder="Remarks" value={openingForm.remarks} onChange={(e) => setOpeningForm((f) => ({ ...f, remarks: e.target.value }))} />
+            <button disabled={isSaving} onClick={addOpeningBalance} className="rounded bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">Save Opening Balance</button>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">FY</th>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Account</th>
+                    <th className="px-3 py-2 text-left">Side</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                    <th className="px-3 py-2 text-left">Remarks</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {openingBalances
+                    .filter((row) => (fyFilter === 'all' ? true : row.fy === fyFilter))
+                    .slice()
+                    .sort((a, b) => (b.fy || '').localeCompare(a.fy || '') || (b.date || '').localeCompare(a.date || ''))
+                    .map((row) => (
+                      <tr key={row.id}>
+                        <td className="px-3 py-2">{row.fy}</td>
+                        <td className="px-3 py-2">{row.date || '-'}</td>
+                        <td className="px-3 py-2">{row.account_name}</td>
+                        <td className="px-3 py-2">{row.side}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.amount)}</td>
+                        <td className="px-3 py-2">{row.remarks || '-'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'close' && (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="text-sm text-slate-600">Close selected FY and auto-roll opening balances to next FY.</div>
+            <div className="mt-2 text-sm">Current FY: <span className="font-semibold">{fyFilter === 'all' ? 'Select FY' : fyFilter}</span></div>
+            <div className="text-sm">Next FY: <span className="font-semibold">{fyFilter === 'all' ? '-' : getNextFinancialYear(fyFilter)}</span></div>
+            <div className="text-sm">Net Profit/Loss to transfer: <span className="font-semibold">{formatCurrency(snapshot.profitAndLoss.netProfit)}</span></div>
+            <button
+              disabled={isSaving || fyFilter === 'all'}
+              onClick={closeFinancialYear}
+              className="mt-3 rounded bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+            >
+              Close FY And Rollover
+            </button>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">FY</th>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Status</th>
+                    <th className="px-3 py-2 text-left">Voucher</th>
+                    <th className="px-3 py-2 text-right">Net Profit</th>
+                    <th className="px-3 py-2 text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {fiscalYearClosings
+                    .slice()
+                    .sort((a, b) => (b.fy || '').localeCompare(a.fy || ''))
+                    .map((row) => (
+                      <tr key={row.id || row.fy}>
+                        <td className="px-3 py-2">{row.fy}</td>
+                        <td className="px-3 py-2">{row.date || '-'}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-semibold ${
+                            row.status === 'closed' ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-700'
+                          }`}>{row.status || '-'}</span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.voucher_no || '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.net_profit || 0)}</td>
+                        <td className="px-3 py-2 text-center">
+                          {row.status === 'closed' && role === 'admin' && (
+                            <button
+                              disabled={isSaving}
+                              onClick={() => undoFinancialYearClose(row)}
+                              className="rounded border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                            >
+                              Undo Close
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'pl' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
+            How much you earned, how much you spent, and what's left as profit.
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-green-200 bg-green-50/50 p-4">
+              <div className="text-sm font-semibold text-green-700">💰 Total Earnings (Revenue)</div>
+              <p className="text-xs text-green-600 mb-1">Money earned from all projects</p>
+              <div className="text-2xl font-bold text-green-800">{formatCurrency(snapshot.profitAndLoss.revenue)}</div>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-4">
+              <div className="text-sm font-semibold text-amber-700">📦 Direct Costs (COGS)</div>
+              <p className="text-xs text-amber-600 mb-1">Vendor payments, outsourcing, equipment</p>
+              <div className="text-2xl font-bold text-amber-800">{formatCurrency(snapshot.profitAndLoss.costOfGoodsSold)}</div>
+            </div>
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4">
+              <div className="text-sm font-semibold text-indigo-700">📊 Gross Profit</div>
+              <p className="text-xs text-indigo-600 mb-1">Earnings minus direct costs</p>
+              <div className="text-2xl font-bold text-indigo-800">{formatCurrency(snapshot.profitAndLoss.grossProfit)}</div>
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-rose-50/50 p-4">
+              <div className="text-sm font-semibold text-rose-700">🏢 Running Costs (Expenses)</div>
+              <p className="text-xs text-rose-600 mb-1">Salaries, office, travel, misc</p>
+              <div className="text-2xl font-bold text-rose-800">{formatCurrency(snapshot.profitAndLoss.operatingExpenses)}</div>
+            </div>
+            <div className={`rounded-xl border-2 p-5 sm:col-span-2 ${snapshot.profitAndLoss.netProfit >= 0 ? 'border-green-300 bg-green-50' : 'border-red-300 bg-red-50'}`}>
+              <div className={`text-sm font-semibold ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                {snapshot.profitAndLoss.netProfit >= 0 ? '🎉 Net Profit' : '⚠️ Net Loss'}
+              </div>
+              <p className={`text-xs mb-1 ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                What you actually keep after everything is paid
+              </p>
+              <div className={`text-3xl font-bold ${snapshot.profitAndLoss.netProfit >= 0 ? 'text-green-800' : 'text-red-800'}`}>
+                {formatCurrency(Math.abs(snapshot.profitAndLoss.netProfit))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'bs' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
+            A snapshot of what your business owns, owes, and is worth right now.
+          </div>
+          <div className="grid gap-3 lg:grid-cols-3">
+            <div className="rounded-xl border-2 border-green-200 bg-white p-4">
+              <div className="mb-3 text-sm font-bold text-green-700">🏦 What You Own (Assets)</div>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-slate-600">Cash & Bank Balance</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.cashAndBank)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">Money Owed by Clients</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.accountsReceivable)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">Advances to Staff</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.employeeAdvances)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">GST Refund Due</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.inputGstCredit)}</span></div>
+              </div>
+              <div className="mt-3 border-t border-green-200 pt-2 flex justify-between text-sm font-bold text-green-800">
+                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.assets.total)}</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border-2 border-rose-200 bg-white p-4">
+              <div className="mb-3 text-sm font-bold text-rose-700">📋 What You Owe (Liabilities)</div>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-slate-600">Vendor Bills Pending</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.accountsPayable)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">GST Due to Govt</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.gstPayable)}</span></div>
+              </div>
+              <div className="mt-3 border-t border-rose-200 pt-2 flex justify-between text-sm font-bold text-rose-800">
+                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.liabilities.total)}</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border-2 border-indigo-200 bg-white p-4">
+              <div className="mb-3 text-sm font-bold text-indigo-700">💎 Business Net Worth (Equity)</div>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-slate-600">Previous Years' Profits</span><span className="font-semibold text-indigo-800">{formatCurrency(snapshot.balanceSheet.equity.retainedEarnings)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">This Year's Profit</span><span className="font-semibold text-indigo-800">{formatCurrency(snapshot.balanceSheet.equity.currentYearProfit || 0)}</span></div>
+              </div>
+              <div className="mt-3 border-t border-indigo-200 pt-2 flex justify-between text-sm font-bold text-indigo-800">
+                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.equity.total)}</span>
+              </div>
+            </div>
+          </div>
+          <div className={`rounded-xl border-2 p-4 text-center ${
+            Math.abs(snapshot.balanceSheet.assets.total - snapshot.balanceSheet.totalLiabilitiesAndEquity) < 1
+              ? 'border-green-200 bg-green-50'
+              : 'border-red-200 bg-red-50'
+          }`}>
+            <p className="text-sm font-semibold text-slate-700">Assets = Liabilities + Equity</p>
+            <p className="text-lg font-bold text-slate-800">{formatCurrency(snapshot.balanceSheet.assets.total)} = {formatCurrency(snapshot.balanceSheet.totalLiabilitiesAndEquity)}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ AGEING REPORT TAB ══════ */}
+      {activeTab === 'ageing' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800 flex-1">
+              <strong>Receivable & Payable Ageing</strong>: FIFO-based ageing of outstanding party balances by 0-30, 31-60, 61-90, and 90+ day buckets.
+            </div>
+            <button onClick={() => exportReport('ageing')} className="ml-3 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Download size={12} /> Export</button>
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-emerald-700 mb-2">💰 Receivable Ageing (Clients who owe you)</h3>
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-emerald-50 text-xs uppercase text-emerald-700">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Party</th>
+                      <th className="px-3 py-2 text-right">0-30 Days</th>
+                      <th className="px-3 py-2 text-right">31-60 Days</th>
+                      <th className="px-3 py-2 text-right">61-90 Days</th>
+                      <th className="px-3 py-2 text-right text-red-700">90+ Days</th>
+                      <th className="px-3 py-2 text-right font-bold">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {ageingData.receivable.map(r => (
+                      <tr key={r.account} className="hover:bg-slate-50 cursor-pointer" onClick={() => drillToLedger(r.account)}>
+                        <td className="px-3 py-2 font-semibold text-slate-800">{r.name}</td>
+                        <td className="px-3 py-2 text-right font-mono">{r['0_30'] > 0.01 ? formatCurrency(r['0_30']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono text-yellow-700">{r['31_60'] > 0.01 ? formatCurrency(r['31_60']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono text-orange-700">{r['61_90'] > 0.01 ? formatCurrency(r['61_90']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-red-700">{r['90_plus'] > 0.01 ? formatCurrency(r['90_plus']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(r.total)}</td>
+                      </tr>
+                    ))}
+                    {ageingData.receivable.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400">No outstanding receivables</td></tr>}
+                  </tbody>
+                  {ageingData.receivable.length > 0 && (
+                    <tfoot className="bg-emerald-50 font-semibold text-sm">
+                      <tr>
+                        <td className="px-3 py-2">Total</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.receivableTotals['0_30'])}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.receivableTotals['31_60'])}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.receivableTotals['61_90'])}</td>
+                        <td className="px-3 py-2 text-right font-mono text-red-700">{formatCurrency(ageingData.receivableTotals['90_plus'])}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(ageingData.receivableTotals.total)}</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </div>
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-rose-700 mb-2">📤 Payable Ageing (What you owe vendors)</h3>
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-rose-50 text-xs uppercase text-rose-700">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Party</th>
+                      <th className="px-3 py-2 text-right">0-30 Days</th>
+                      <th className="px-3 py-2 text-right">31-60 Days</th>
+                      <th className="px-3 py-2 text-right">61-90 Days</th>
+                      <th className="px-3 py-2 text-right text-red-700">90+ Days</th>
+                      <th className="px-3 py-2 text-right font-bold">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {ageingData.payable.map(r => (
+                      <tr key={r.account} className="hover:bg-slate-50 cursor-pointer" onClick={() => drillToLedger(r.account)}>
+                        <td className="px-3 py-2 font-semibold text-slate-800">{r.name}</td>
+                        <td className="px-3 py-2 text-right font-mono">{r['0_30'] > 0.01 ? formatCurrency(r['0_30']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono text-yellow-700">{r['31_60'] > 0.01 ? formatCurrency(r['31_60']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono text-orange-700">{r['61_90'] > 0.01 ? formatCurrency(r['61_90']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-red-700">{r['90_plus'] > 0.01 ? formatCurrency(r['90_plus']) : '-'}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(r.total)}</td>
+                      </tr>
+                    ))}
+                    {ageingData.payable.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400">No outstanding payables</td></tr>}
+                  </tbody>
+                  {ageingData.payable.length > 0 && (
+                    <tfoot className="bg-rose-50 font-semibold text-sm">
+                      <tr>
+                        <td className="px-3 py-2">Total</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.payableTotals['0_30'])}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.payableTotals['31_60'])}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatCurrency(ageingData.payableTotals['61_90'])}</td>
+                        <td className="px-3 py-2 text-right font-mono text-red-700">{formatCurrency(ageingData.payableTotals['90_plus'])}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">{formatCurrency(ageingData.payableTotals.total)}</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ TDS TRACKER TAB ══════ */}
+      {activeTab === 'tds' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800">
+            <strong>TDS Tracker</strong>: Record TDS deducted by clients on your income (receivable) or TDS you deduct on vendor payments (payable). Common sections: 194J (Professional 10%), 194C (Contractor 1%/2%), 194H (Commission 5%).
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+              <p className="text-sm font-semibold text-green-700">TDS Receivable (Deducted by Clients)</p>
+              <p className="mt-1 text-2xl font-bold text-green-800">{formatCurrency(Math.max(snapshot.ledger.find(r => r.account === 'TDS Receivable')?.balance || 0, 0))}</p>
+              <p className="text-xs text-green-600">Claim as credit when filing ITR</p>
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+              <p className="text-sm font-semibold text-rose-700">TDS Payable (Deducted by You)</p>
+              <p className="mt-1 text-2xl font-bold text-rose-800">{formatCurrency(Math.abs(Math.min(snapshot.ledger.find(r => r.account === 'TDS Payable')?.balance || 0, 0)))}</p>
+              <p className="text-xs text-rose-600">Deposit to govt before due date</p>
+            </div>
+          </div>
+          {canEditFinance && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+              <p className="text-sm font-bold text-slate-700">Record TDS Entry</p>
+              <div className="grid gap-2 sm:grid-cols-4">
+                <select value={tdsForm.type} onChange={e => setTdsForm(f => ({ ...f, type: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  <option value="tds_receivable">TDS Deducted by Client</option>
+                  <option value="tds_payable">TDS Deducted by You</option>
+                </select>
+                <input type="date" value={tdsForm.date} onChange={e => setTdsForm(f => ({ ...f, date: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <select value={tdsForm.party_name} onChange={e => setTdsForm(f => ({ ...f, party_name: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2">
+                  <option value="">-- Select Party --</option>
+                  {snapshot.ledger.filter(r => r.account.startsWith('Party:')).map(r => (
+                    <option key={r.account} value={r.account.replace('Party: ', '')}>{r.account.replace('Party: ', '')}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-5">
+                <select value={tdsForm.section} onChange={e => setTdsForm(f => ({ ...f, section: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  <option value="194J">194J - Professional (10%)</option>
+                  <option value="194C">194C - Contractor (1%/2%)</option>
+                  <option value="194H">194H - Commission (5%)</option>
+                  <option value="194I">194I - Rent (10%)</option>
+                  <option value="194A">194A - Interest (10%)</option>
+                  <option value="other">Other</option>
+                </select>
+                <input type="number" step="0.01" placeholder="TDS Rate %" value={tdsForm.rate} onChange={e => setTdsForm(f => ({ ...f, rate: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <input type="number" step="0.01" placeholder="Base Amount" value={tdsForm.base_amount} onChange={e => { const b = parseFloat(e.target.value || 0); setTdsForm(f => ({ ...f, base_amount: e.target.value, tds_amount: String(Math.round(b * parseFloat(f.rate || 0)) / 100) })); }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <input type="number" step="0.01" placeholder="TDS Amount" value={tdsForm.tds_amount} onChange={e => setTdsForm(f => ({ ...f, tds_amount: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <button disabled={isSaving} onClick={saveTdsEntry} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">Post TDS</button>
+              </div>
+              <input placeholder="Remarks (optional)" value={tdsForm.remarks} onChange={e => setTdsForm(f => ({ ...f, remarks: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            </div>
+          )}
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Voucher</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-left">Narration</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {manualJournalEntries.filter(r => r.source === 'tds_entry').filter(r => fyFilter === 'all' || r.fy === fyFilter).sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(r => (
+                    <tr key={r.id}>
+                      <td className="px-3 py-2">{r.date}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{r.voucher_no}</td>
+                      <td className="px-3 py-2"><span className={`rounded px-1.5 py-0.5 text-xs font-semibold ${(r.entries || [])[0]?.debitAccount === 'TDS Receivable' ? 'bg-green-100 text-green-800' : 'bg-rose-100 text-rose-800'}`}>{(r.entries || [])[0]?.debitAccount === 'TDS Receivable' ? 'Receivable' : 'Payable'}</span></td>
+                      <td className="px-3 py-2 text-xs">{r.narration}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold">{formatCurrency((r.entries || [])[0]?.amount || 0)}</td>
+                    </tr>
+                  ))}
+                  {manualJournalEntries.filter(r => r.source === 'tds_entry').length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-400">No TDS entries recorded</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ CREDIT/DEBIT NOTES TAB ══════ */}
+      {activeTab === 'cn_dn' && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800">
+            <strong>Credit & Debit Notes</strong>: Issue a <strong>Credit Note</strong> to reduce what a client owes (returns, discounts, corrections). Issue a <strong>Debit Note</strong> to reduce what you owe a vendor.
+          </div>
+          {canEditFinance && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+              <div className="grid gap-2 sm:grid-cols-3">
+                <select value={cnDnForm.type} onChange={e => setCnDnForm(f => ({ ...f, type: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  <option value="credit_note">Credit Note (to Client)</option>
+                  <option value="debit_note">Debit Note (to Vendor)</option>
+                </select>
+                <input type="date" value={cnDnForm.date} onChange={e => setCnDnForm(f => ({ ...f, date: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <select value={cnDnForm.party_name} onChange={e => setCnDnForm(f => ({ ...f, party_name: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  <option value="">-- Select Party --</option>
+                  {snapshot.ledger.filter(r => r.account.startsWith('Party:')).map(r => (
+                    <option key={r.account} value={r.account.replace('Party: ', '')}>{r.account.replace('Party: ', '')}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-4">
+                <input placeholder="Original Invoice Ref" value={cnDnForm.original_invoice} onChange={e => setCnDnForm(f => ({ ...f, original_invoice: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <input type="number" step="0.01" placeholder="Taxable Amount" value={cnDnForm.taxable} onChange={e => setCnDnForm(f => ({ ...f, taxable: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <input type="number" step="0.01" placeholder="GST Amount" value={cnDnForm.gst} onChange={e => setCnDnForm(f => ({ ...f, gst: e.target.value }))} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm font-semibold text-right">Total: {formatCurrency((parseFloat(cnDnForm.taxable) || 0) + (parseFloat(cnDnForm.gst) || 0))}</div>
+              </div>
+              <div className="flex gap-2">
+                <input placeholder="Reason (discount, return, correction, etc.)" value={cnDnForm.reason} onChange={e => setCnDnForm(f => ({ ...f, reason: e.target.value }))} className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                {cnDnEditingId && (
+                  <button onClick={cancelCreditDebitNoteEdit} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+                )}
+                <button disabled={isSaving} onClick={saveCreditDebitNote} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{isSaving ? 'Saving...' : cnDnEditingId ? `Update ${cnDnForm.type === 'credit_note' ? 'Credit Note' : 'Debit Note'}` : `Post ${cnDnForm.type === 'credit_note' ? 'Credit Note' : 'Debit Note'}`}</button>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                <p className="font-semibold mb-1">Journal Entry Preview:</p>
+                {cnDnForm.type === 'credit_note' ? (
+                  <>
+                    {parseFloat(cnDnForm.taxable || 0) > 0 && <p>Dr Sales Revenue — {formatCurrency(parseFloat(cnDnForm.taxable || 0))}</p>}
+                    {parseFloat(cnDnForm.gst || 0) > 0 && <p>Dr Output GST Payable — {formatCurrency(parseFloat(cnDnForm.gst || 0))}</p>}
+                    <p>Cr Party: {cnDnForm.party_name || '___'} — {formatCurrency((parseFloat(cnDnForm.taxable || 0)) + (parseFloat(cnDnForm.gst || 0)))}</p>
+                  </>
+                ) : (
+                  <>
+                    <p>Dr Party: {cnDnForm.party_name || '___'} — {formatCurrency((parseFloat(cnDnForm.taxable || 0)) + (parseFloat(cnDnForm.gst || 0)))}</p>
+                    {parseFloat(cnDnForm.taxable || 0) > 0 && <p>Cr Purchase Expense — {formatCurrency(parseFloat(cnDnForm.taxable || 0))}</p>}
+                    {parseFloat(cnDnForm.gst || 0) > 0 && <p>Cr Input GST Credit — {formatCurrency(parseFloat(cnDnForm.gst || 0))}</p>}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Voucher</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-left">Narration</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                    {canEditFinance && <th className="px-3 py-2 text-center">Actions</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {manualJournalEntries.filter(r => r.source === 'credit_note' || r.source === 'debit_note').filter(r => fyFilter === 'all' || r.fy === fyFilter).sort((a, b) => (b.date || '').localeCompare(a.date || '')).map(r => (
+                    <tr key={r.id} className={cnDnEditingId === r.id ? 'bg-indigo-50' : ''}>
+                      <td className="px-3 py-2">{r.date}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{r.voucher_no}</td>
+                      <td className="px-3 py-2"><span className={`rounded px-1.5 py-0.5 text-xs font-semibold ${r.source === 'credit_note' ? 'bg-blue-100 text-blue-800' : 'bg-amber-100 text-amber-800'}`}>{r.source === 'credit_note' ? 'Credit Note' : 'Debit Note'}</span></td>
+                      <td className="px-3 py-2 text-xs">{r.narration}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold">{formatCurrency((r.entries || []).reduce((s, e) => s + e.amount, 0))}</td>
+                      {canEditFinance && (
+                        <td className="px-3 py-2">
+                          <div className="flex items-center justify-center gap-1">
+                            <button onClick={() => editCreditDebitNote(r)} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-indigo-600" title="Edit"><Edit size={14} /></button>
+                            <button onClick={() => setCnDnDeleteModal({ isOpen: true, entry: r })} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-red-600" title="Delete"><Trash2 size={14} /></button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                  {manualJournalEntries.filter(r => r.source === 'credit_note' || r.source === 'debit_note').length === 0 && <tr><td colSpan={canEditFinance ? 6 : 5} className="px-3 py-6 text-center text-slate-400">No credit/debit notes issued yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <VirtualAccountant
+        isOpen={isAssistantOpen}
+        onClose={() => setIsAssistantOpen(false)}
+        allAccounts={allAccounts}
+        onApplyTemplate={handleApplyTemplate}
+        currentEntry={journalForm}
+        onPostEntry={handleChatPostEntry}
+        onReverse={handleChatReverse}
+        onQuery={handleChatQuery}
+        onParkEntry={handleChatParkEntry}
+        partyNames={partyNames}
+        closedFYs={fiscalYearClosings.filter((r) => r.status === 'closed').map((r) => r.fy)}
+        recentJournalEntries={manualJournalEntries}
+        getFY={getFYFromDate}
+      />
+
+      <ConfirmDeleteModal
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal({ isOpen: false, entry: null })}
+        onConfirm={confirmDeleteJournalEntry}
+        title="Delete Journal Entry"
+        message={`Are you sure you want to delete journal entry "${deleteModal.entry?.voucher_no || 'this entry'}"? This action cannot be undone and will affect your accounting records. Please ensure this is a wrong entry that needs correction.`}
+        requireTyped={true}
+      />
+
+      {/* Posted-JV attachments viewer */}
+      <Modal isOpen={!!attachmentsModal} onClose={() => setAttachmentsModal(null)} title={`Attachments — ${attachmentsModal?.voucher || ''}`}>
+        {attachmentsModal && (
+          <ul className="space-y-2">
+            {attachmentsModal.attachments.map((att) => (
+              <li key={att.path || att.url} className="flex items-center justify-between gap-3 rounded border border-slate-200 bg-white p-2 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-slate-700">{att.name}</div>
+                  <div className="text-[11px] text-slate-500">
+                    {att.type || 'file'} · {Math.round((att.size || 0) / 1024)} KB
+                    {att.uploadedAt ? ` · ${att.uploadedAt.slice(0, 10)}` : ''}
+                  </div>
+                </div>
+                <a href={att.url} target="_blank" rel="noreferrer" className="shrink-0 rounded bg-indigo-600 px-3 py-1 text-xs font-semibold text-white hover:bg-indigo-700">View</a>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Modal>      {/* Purchase Invoice Modal */}
+      <Modal isOpen={!!recurringFromTpl} onClose={() => setRecurringFromTpl(null)} title={`Schedule recurring · ${recurringFromTpl?.tpl?.name || ''}`}>
+        {recurringFromTpl && (
+          <div className="space-y-3 text-sm">
+            <p className="text-xs text-slate-500">Drafts will be auto-generated by the cloud scheduler on each run date and require manual posting (or approval).</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Frequency</label>
+                <select
+                  value={recurringFromTpl.frequency}
+                  onChange={(e) => setRecurringFromTpl((r) => ({ ...r, frequency: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="quarterly">Quarterly</option>
+                  <option value="yearly">Yearly</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Every (interval)</label>
+                <input type="number" min="1" max="12" value={recurringFromTpl.interval || 1}
+                  onChange={(e) => setRecurringFromTpl((r) => ({ ...r, interval: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              </div>
+            </div>
+            {['monthly', 'quarterly', 'yearly'].includes(recurringFromTpl.frequency) && (
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Day of month (1–31)</label>
+                <input type="number" min="1" max="31" value={recurringFromTpl.dayOfMonth || ''}
+                  onChange={(e) => setRecurringFromTpl((r) => ({ ...r, dayOfMonth: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Start date *</label>
+                <input type="date" value={recurringFromTpl.startDate}
+                  onChange={(e) => setRecurringFromTpl((r) => ({ ...r, startDate: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">End date <span className="text-slate-400">(optional)</span></label>
+                <input type="date" value={recurringFromTpl.endDate || ''}
+                  onChange={(e) => setRecurringFromTpl((r) => ({ ...r, endDate: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={recurringFromTpl.active !== false}
+                onChange={(e) => setRecurringFromTpl((r) => ({ ...r, active: e.target.checked }))} />
+              Active immediately
+            </label>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setRecurringFromTpl(null)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleSaveRecurringFromTemplate} className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700">Save schedule</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+      {/* Purchase Invoice Modal */}
+      <Modal isOpen={isPiModalOpen} onClose={() => setIsPiModalOpen(false)} title={piEditingId ? 'Edit Purchase Invoice' : 'New Purchase Invoice'}>
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Invoice Date *</label>
+              <input type="date" value={piForm.invoice_date} onChange={e => setPiForm(f => ({ ...f, invoice_date: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Mode</label>
+              <select value={piForm.purchase_mode} onChange={e => setPiForm(f => ({ ...f, purchase_mode: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                <option value="Credit">Credit</option>
+                <option value="Cash">Cash</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-600">Vendor *</label>
+            <select
+              value={piForm.vendor_id}
+              onChange={e => {
+                const v = vendorOptions.find(c => c.id === e.target.value);
+                setPiForm(f => ({ ...f, vendor_id: e.target.value, vendor_name: v?.name || '' }));
+              }}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            >
+              <option value="">-- Select Vendor --</option>
+              {vendorOptions.map(v => (
+                <option key={v.id} value={v.id}>{v.name}</option>
+              ))}
+            </select>
+            {!piForm.vendor_id && (
+              <input type="text" placeholder="Or type vendor name" value={piForm.vendor_name} onChange={e => setPiForm(f => ({ ...f, vendor_name: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            )}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-600">Description</label>
+            <input type="text" value={piForm.description} onChange={e => setPiForm(f => ({ ...f, description: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Equipment rental, services, etc." />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Taxable Amount *</label>
+              <input type="number" step="0.01" value={piForm.amount} onChange={e => setPiForm(f => ({ ...f, amount: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="0.00" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">GST Amount</label>
+              <input type="number" step="0.01" value={piForm.gst_amount} onChange={e => setPiForm(f => ({ ...f, gst_amount: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="0.00" />
+            </div>
+          </div>
+          <div className="rounded-lg bg-slate-50 px-3 py-2 text-right text-sm font-semibold text-slate-700">
+            Total: {formatCurrency((parseFloat(piForm.amount) || 0) + (parseFloat(piForm.gst_amount) || 0))}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-600">Status</label>
+            <select value={piForm.status} onChange={e => setPiForm(f => ({ ...f, status: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+              <option value="Pending">Pending</option>
+              <option value="Verified">Verified</option>
+              <option value="Rejected">Rejected</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-600">Remarks</label>
+            <textarea value={piForm.remarks} onChange={e => setPiForm(f => ({ ...f, remarks: e.target.value }))} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" rows={2} placeholder="Optional notes" />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button onClick={() => setIsPiModalOpen(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+            <button disabled={isSaving} onClick={handlePiSave} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{isSaving ? 'Saving...' : piEditingId ? 'Update' : 'Create'}</button>
+          </div>
+        </div>
+      </Modal>
+
+      <ConfirmDeleteModal
+        isOpen={piDeleteModal.isOpen}
+        onClose={() => setPiDeleteModal({ isOpen: false, entry: null })}
+        onConfirm={() => piDeleteModal.entry && handlePiDelete(piDeleteModal.entry)}
+        title="Delete Purchase Invoice"
+        message={`Delete purchase invoice "${piDeleteModal.entry?.pi_no || ''}" from ${piDeleteModal.entry?.vendor_name || 'vendor'}? This will remove it from the purchase book and all accounting entries.`}
+      />
+
+      <ConfirmDeleteModal
+        isOpen={cnDnDeleteModal.isOpen}
+        onClose={() => setCnDnDeleteModal({ isOpen: false, entry: null })}
+        onConfirm={() => cnDnDeleteModal.entry && deleteCreditDebitNote(cnDnDeleteModal.entry)}
+        title={`Delete ${cnDnDeleteModal.entry?.source === 'credit_note' ? 'Credit Note' : 'Debit Note'}`}
+        message={`Delete ${cnDnDeleteModal.entry?.source === 'credit_note' ? 'credit note' : 'debit note'} "${cnDnDeleteModal.entry?.voucher_no || ''}" dated ${cnDnDeleteModal.entry?.date || ''}? The journal entry will be removed and ledger balances will recompute.`}
+      />
+
+      <Modal isOpen={!!editingDraft} onClose={() => setEditingDraft(null)} title="Edit Parked Draft">
+        {editingDraft && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Date *</label>
+                <input
+                  type="date"
+                  value={editingDraft.date}
+                  onChange={(e) => setEditingDraft((d) => ({ ...d, date: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600" title="Leave blank for manual post. Set to auto-post on this date.">
+                  Auto-post on <span className="text-slate-400">(optional)</span>
+                </label>
+                <input
+                  type="date"
+                  value={editingDraft.schedule_post_on || ''}
+                  onChange={(e) => setEditingDraft((d) => ({ ...d, schedule_post_on: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Party Name</label>
+              <input
+                type="text"
+                value={editingDraft.party_name || ''}
+                onChange={(e) => setEditingDraft((d) => ({ ...d, party_name: e.target.value }))}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                placeholder="Vendor / Customer / Employee"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Narration</label>
+              <input
+                type="text"
+                value={editingDraft.narration}
+                onChange={(e) => setEditingDraft((d) => ({ ...d, narration: e.target.value }))}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-600">
+                  Attachments {(editingDraft.attachments || []).length > 0 && <span className="text-slate-400">({(editingDraft.attachments || []).length})</span>}
+                </span>
+                <label className={`cursor-pointer rounded px-2 py-1 text-[11px] font-semibold text-white ${uploadingAttachment ? 'bg-slate-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                  {uploadingAttachment ? 'Uploading…' : '+ Upload'}
+                  <input
+                    type="file"
+                    accept="image/*,application/pdf"
+                    className="hidden"
+                    disabled={uploadingAttachment}
+                    onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleAttachFile(f); }}
+                  />
+                </label>
+              </div>
+              {(editingDraft.attachments || []).length === 0 ? (
+                <div className="text-[11px] text-slate-400">Receipts / bills (10 MB max — image or PDF)</div>
+              ) : (
+                <ul className="space-y-1">
+                  {(editingDraft.attachments || []).map((att) => (
+                    <li key={att.path} className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
+                      <a href={att.url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline truncate">
+                        {att.name} <span className="text-slate-400">({Math.round((att.size || 0) / 1024)} KB)</span>
+                      </a>
+                      <button onClick={() => handleRemoveAttachment(att)} className="text-red-500 hover:text-red-700 px-1">×</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-600">Journal lines</span>
+                <button type="button" onClick={addDraftLine} className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700">+ Add line</button>
+              </div>
+              {(editingDraft.entries || []).map((ent, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <select
+                    className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
+                    value={ent.debitAccount}
+                    onChange={(e) => updateDraftLine(idx, 'debitAccount', e.target.value)}
+                  >
+                    <option value="">Debit Account</option>
+                    {allAccounts.map((a) => <option key={`ded-${idx}-${a}`} value={a}>{a}</option>)}
+                  </select>
+                  <select
+                    className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
+                    value={ent.creditAccount}
+                    onChange={(e) => updateDraftLine(idx, 'creditAccount', e.target.value)}
+                  >
+                    <option value="">Credit Account</option>
+                    {allAccounts.map((a) => <option key={`dec-${idx}-${a}`} value={a}>{a}</option>)}
+                  </select>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="col-span-3 rounded border border-slate-300 px-2 py-1.5 text-right font-mono text-xs"
+                    value={ent.amount}
+                    onChange={(e) => updateDraftLine(idx, 'amount', e.target.value)}
+                    placeholder="0.00"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeDraftLine(idx)}
+                    disabled={(editingDraft.entries || []).length <= 1}
+                    className="col-span-1 rounded border border-slate-300 bg-white px-1.5 py-1 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-40"
+                    title="Remove line"
+                  >×</button>
+                </div>
+              ))}
+              <div className="text-right text-xs font-semibold text-slate-700">
+                Total: {formatCurrency((editingDraft.entries || []).reduce((s, e) => s + (Number(e.amount) || 0), 0))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setEditingDraft(null)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleSaveDraftEdit} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700">Save Draft</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={!!templatePrompt}
+        onClose={() => setTemplatePrompt(null)}
+        title={templatePrompt ? `Use template: ${templatePrompt.tpl.name || 'Template'}` : ''}
+      >
+        {templatePrompt && (
+          <div className="space-y-3">
+            <div className="text-xs text-slate-500">
+              Fill in the variables below. Built-in placeholders like <code>{`{{month}}`}</code>, <code>{`{{today}}`}</code>, <code>{`{{fy}}`}</code> resolve automatically.
+            </div>
+            {templatePrompt.vars.map((v) => (
+              <div key={v.name}>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">
+                  {v.name}
+                  {v.type === 'amount' && <span className="ml-1 text-[10px] uppercase text-purple-600">amount</span>}
+                  {v.default && <span className="ml-1 text-[10px] text-slate-400">default: {v.default}</span>}
+                </label>
+                <input
+                  type={v.type === 'amount' ? 'number' : 'text'}
+                  step={v.type === 'amount' ? '0.01' : undefined}
+                  value={templatePrompt.values[v.name] ?? ''}
+                  onChange={(e) => setTemplatePrompt((p) => p && ({
+                    ...p,
+                    values: { ...p.values, [v.name]: e.target.value },
+                  }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  placeholder={v.default || `Enter ${v.name}`}
+                  autoFocus={v === templatePrompt.vars[0]}
+                />
+              </div>
+            ))}
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setTemplatePrompt(null)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleConfirmTemplatePrompt} className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700">Create Draft</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={!!editingTemplate}
+        onClose={() => setEditingTemplate(null)}
+        title={editingTemplate?.id ? 'Edit Template' : 'New Template'}
+      >
+        {editingTemplate && (
+          <div className="space-y-3">
+            <div className="rounded bg-purple-50 border border-purple-200 px-3 py-2 text-[11px] text-purple-800">
+              <strong>Variable syntax:</strong> <code>{`{{name}}`}</code> prompts the user, <code>{`{{name:default}}`}</code> falls back, <code>{`{{rent|amount}}`}</code> renders a numeric input. Built-ins: <code>{`{{today}} {{month}} {{year}} {{fy}}`}</code>.
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Name *</label>
+                <input
+                  type="text"
+                  value={editingTemplate.name}
+                  onChange={(e) => setEditingTemplate((t) => ({ ...t, name: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  placeholder="e.g. Monthly Office Rent"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-600">Category <span className="text-slate-400">(optional)</span></label>
+                <input
+                  type="text"
+                  list="template-category-options"
+                  value={editingTemplate.category || ''}
+                  onChange={(e) => setEditingTemplate((t) => ({ ...t, category: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  placeholder="Rent / Salary / Utilities"
+                />
+                <datalist id="template-category-options">
+                  {Array.from(new Set(journalTemplates.map((t) => t.category).filter(Boolean))).sort().map((c) => (
+                    <option key={c} value={c} />
+                  ))}
+                </datalist>
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Narration</label>
+              <input
+                type="text"
+                value={editingTemplate.narration || ''}
+                onChange={(e) => setEditingTemplate((t) => ({ ...t, narration: e.target.value }))}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                placeholder="Office rent for {{month}} ({{property:Main}})"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-600">Party Name</label>
+              <input
+                type="text"
+                value={editingTemplate.party_name || ''}
+                onChange={(e) => setEditingTemplate((t) => ({ ...t, party_name: e.target.value }))}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                placeholder="Optional — supports {{vars}}"
+              />
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-600">Journal lines</span>
+                <button type="button" onClick={addTemplateLine} className="rounded bg-purple-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-purple-700">+ Add line</button>
+              </div>
+              {(editingTemplate.entries || []).map((ent, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <select
+                    className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
+                    value={ent.debitAccount}
+                    onChange={(e) => updateTemplateLine(idx, 'debitAccount', e.target.value)}
+                  >
+                    <option value="">Debit Account</option>
+                    {allAccounts.map((a) => <option key={`ted-${idx}-${a}`} value={a}>{a}</option>)}
+                  </select>
+                  <select
+                    className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
+                    value={ent.creditAccount}
+                    onChange={(e) => updateTemplateLine(idx, 'creditAccount', e.target.value)}
+                  >
+                    <option value="">Credit Account</option>
+                    {allAccounts.map((a) => <option key={`tec-${idx}-${a}`} value={a}>{a}</option>)}
+                  </select>
+                  <input
+                    type="text"
+                    className="col-span-3 rounded border border-slate-300 px-2 py-1.5 text-right font-mono text-xs"
+                    value={ent.amount === 0 ? '0' : String(ent.amount ?? '')}
+                    onChange={(e) => updateTemplateLine(idx, 'amount', e.target.value)}
+                    placeholder="{{amount}} or 0"
+                    title="Number or {{var}} placeholder"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeTemplateLine(idx)}
+                    disabled={(editingTemplate.entries || []).length <= 1}
+                    className="col-span-1 rounded border border-slate-300 bg-white px-1.5 py-1 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-40"
+                    title="Remove line"
+                  >×</button>
+                </div>
+              ))}
+              {(() => {
+                const detected = extractVariables({
+                  narration: editingTemplate.narration,
+                  party_name: editingTemplate.party_name,
+                  entries: editingTemplate.entries,
+                });
+                return detected.length > 0 ? (
+                  <div className="text-[10px] text-purple-700 pt-1">
+                    Will prompt for: <strong>{detected.map((v) => v.name).join(', ')}</strong>
+                  </div>
+                ) : null;
+              })()}
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setEditingTemplate(null)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleSaveTemplateEdit} className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700">{editingTemplate.id ? 'Save Template' : 'Create Template'}</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+export default Accounting;

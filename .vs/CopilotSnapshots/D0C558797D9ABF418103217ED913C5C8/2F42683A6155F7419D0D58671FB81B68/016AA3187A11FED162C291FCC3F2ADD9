@@ -1,0 +1,628 @@
+﻿import { doc, runTransaction } from 'firebase/firestore';
+import { getFYFromDate } from './helpers';
+
+const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
+
+const normalizeMode = (mode) => {
+  const raw = String(mode || '').trim().toLowerCase();
+  if (raw === 'cash') return 'Cash';
+  if (raw === 'credit') return 'Credit';
+  return 'Credit';
+};
+
+const pickAccountByMode = (mode, cashAccount, creditAccount) => {
+  return normalizeMode(mode) === 'Cash' ? cashAccount : creditAccount;
+};
+
+const applyFYToken = (value, fy) => String(value || '').replace(/\{FY\}/g, fy);
+
+const defaultConfig = {
+  sales: {
+    prefix: 'SI-',
+    suffix: '-{FY}',
+    padLength: 4,
+  },
+  purchase: {
+    prefix: 'PI-',
+    suffix: '-{FY}',
+    padLength: 4,
+  },
+};
+
+export const DEFAULT_CHART_OF_ACCOUNTS = [
+  { code: '1000', name: 'Cash In Hand', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '1010', name: 'Bank', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '1100', name: 'Accounts Receivable', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '1200', name: 'Employee Advances', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '1300', name: 'Input GST Credit', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '2000', name: 'Accounts Payable', type: 'Liability', subType: 'Current Liability', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '2100', name: 'Output GST Payable', type: 'Liability', subType: 'Current Liability', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '3000', name: 'Retained Earnings', type: 'Equity', subType: 'Equity', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '3010', name: 'Opening Balance Equity', type: 'Equity', subType: 'Equity', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '4000', name: 'Sales Revenue', type: 'Income', subType: 'Operating Income', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '4010', name: 'Non-Invoiced Sales Revenue', type: 'Income', subType: 'Operating Income', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '5000', name: 'Purchase Expense', type: 'Expense', subType: 'Cost Of Goods Sold', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '5100', name: 'Salary Expense', type: 'Expense', subType: 'Operating Expense', normalSide: 'Dr', isSystem: true, isActive: true },
+  { code: '5200', name: 'Expense:General', type: 'Expense', subType: 'Operating Expense', normalSide: 'Dr', isSystem: true, isActive: true },
+];
+
+export const getDefaultChartOfAccounts = () => DEFAULT_CHART_OF_ACCOUNTS.map((row) => ({ ...row }));
+
+const guessAccountType = (accountName, coaByName) => {
+  const direct = coaByName[accountName];
+  if (direct?.type) return direct.type;
+
+  if (accountName.startsWith('Accounts Receivable:')) return 'Asset';
+  if (accountName.startsWith('Accounts Payable:')) return 'Liability';
+  if (accountName.startsWith('Expense:')) return 'Expense';
+
+  if (accountName.includes('Revenue')) return 'Income';
+  if (accountName.includes('Expense') || accountName.includes('Purchase')) return 'Expense';
+  if (accountName.includes('GST Payable')) return 'Liability';
+  if (accountName.includes('GST Credit')) return 'Asset';
+  if (accountName.includes('Advance')) return 'Asset';
+  if (accountName.includes('Cash') || accountName.includes('Bank')) return 'Asset';
+
+  return 'Equity';
+};
+
+const fiscalYearStartDate = (fy) => {
+  const startYear = parseInt(String(fy).slice(0, 4), 10);
+  return `${startYear}-04-01`;
+};
+
+export const getNextFinancialYear = (fy) => {
+  const startYear = parseInt(String(fy).slice(0, 4), 10);
+  const nextStart = startYear + 1;
+  const nextEnd = String(nextStart + 1).slice(-2);
+  return `${nextStart}-${nextEnd}`;
+};
+
+const resolveBookConfig = (orgSettings = {}, bookType = 'sales', fy) => {
+  const base = defaultConfig[bookType] || defaultConfig.sales;
+
+  if (bookType === 'sales') {
+    return {
+      prefix: applyFYToken(orgSettings.sales_invoice_prefix || orgSettings.sales_prefix || base.prefix, fy),
+      suffix: applyFYToken(orgSettings.sales_invoice_suffix || orgSettings.sales_suffix || base.suffix, fy),
+      padLength: parseInt(orgSettings.sales_invoice_pad || orgSettings.sales_pad || base.padLength, 10) || 4,
+    };
+  }
+
+  return {
+    prefix: applyFYToken(orgSettings.purchase_invoice_prefix || orgSettings.purchase_prefix || base.prefix, fy),
+    suffix: applyFYToken(orgSettings.purchase_invoice_suffix || orgSettings.purchase_suffix || base.suffix, fy),
+    padLength: parseInt(orgSettings.purchase_invoice_pad || orgSettings.purchase_pad || base.padLength, 10) || 4,
+  };
+};
+
+export const generateBookInvoiceNumber = async ({
+  db,
+  appId,
+  dateStr,
+  bookType = 'sales',
+  orgSettings = {},
+}) => {
+  const fy = getFYFromDate(dateStr);
+  const config = resolveBookConfig(orgSettings, bookType, fy);
+  const counterKey = `${bookType}_${fy.replace('-', '_')}`;
+  const counterRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'accounting_books');
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(counterRef);
+    const current = snap.exists() ? parseInt(snap.data()[counterKey] || 0, 10) : 0;
+    const next = current + 1;
+
+    tx.set(counterRef, { [counterKey]: next }, { merge: true });
+
+    const serial = String(next).padStart(config.padLength, '0');
+    return `${config.prefix}${serial}${config.suffix}`;
+  });
+};
+
+export const generateJournalVoucherNumber = async ({ db, appId, dateStr }) => {
+  const fy = getFYFromDate(dateStr);
+  const counterKey = `je_${fy.replace('-', '_')}`;
+  const counterRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'accounting_vouchers');
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(counterRef);
+    const current = snap.exists() ? parseInt(snap.data()[counterKey] || 0, 10) : 0;
+    const next = current + 1;
+    tx.set(counterRef, { [counterKey]: next }, { merge: true });
+    return `JV-${String(next).padStart(4, '0')}-${fy}`;
+  });
+};
+
+const pushDoubleEntry = (rows, common, lines) => {
+  lines.forEach((line) => {
+    rows.push({
+      date: common.date,
+      fy: common.fy,
+      source: common.source,
+      refNo: common.refNo,
+      remarks: common.remarks || '',
+      debitAccount: line.debitAccount,
+      creditAccount: line.creditAccount,
+      amount: round2(line.amount),
+      entityId: common.entityId || '',
+      entityName: common.entityName || '',
+    });
+  });
+};
+
+const toLedger = (journalRows) => {
+  const map = {};
+
+  journalRows.forEach((row) => {
+    if (!map[row.debitAccount]) {
+      map[row.debitAccount] = { account: row.debitAccount, debit: 0, credit: 0, entries: [] };
+    }
+    if (!map[row.creditAccount]) {
+      map[row.creditAccount] = { account: row.creditAccount, debit: 0, credit: 0, entries: [] };
+    }
+
+    map[row.debitAccount].debit += row.amount;
+    map[row.debitAccount].entries.push({ ...row, side: 'Dr' });
+
+    map[row.creditAccount].credit += row.amount;
+    map[row.creditAccount].entries.push({ ...row, side: 'Cr' });
+  });
+
+  return Object.values(map)
+    .map((row) => {
+      const debit = round2(row.debit);
+      const credit = round2(row.credit);
+      const balance = round2(debit - credit);
+      return {
+        ...row,
+        debit,
+        credit,
+        balance,
+        balanceType: balance >= 0 ? 'Dr' : 'Cr',
+      };
+    })
+    .sort((a, b) => a.account.localeCompare(b.account));
+};
+
+const getLedgerBalance = (ledgerRows, accountName) => {
+  const row = ledgerRows.find((item) => item.account === accountName);
+  return row ? row.balance : 0;
+};
+
+export const buildAccountingSnapshot = ({
+  clients = [],
+  taxInvoices = [],
+  purchaseInvoices = [],
+  payments = [],
+  vendorPayments = [],
+  payouts = [],
+  expenses = [],
+  advances = [],
+  chartOfAccounts = [],
+  openingBalances = [],
+  manualJournalEntries = [],
+  fiscalYearClosings = [],
+  fyFilter = 'all',
+}) => {
+  const inFY = (dateStr) => (fyFilter === 'all' ? true : getFYFromDate(dateStr) === fyFilter);
+  const coaByName = (chartOfAccounts || []).reduce((acc, item) => {
+    acc[item.name] = item;
+    return acc;
+  }, {});
+
+  const salesBook = taxInvoices
+    .filter((row) => inFY(row.invoice_date))
+    .map((row) => {
+      const taxable = round2(row.taxable || 0);
+      const gst = round2(row.gst_amount || 0);
+      const total = round2(row.final_amount != null ? row.final_amount : row.computed_total || taxable + gst);
+      return {
+        id: row.id,
+        date: row.invoice_date,
+        fy: getFYFromDate(row.invoice_date),
+        invoiceNo: row.invoice_no,
+        clientId: row.client_id,
+        clientName: row.client_name,
+        taxable,
+        gst,
+        total,
+        mode: normalizeMode(row.sale_mode),
+        remarks: row.remarks || '',
+      };
+    })
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+  const purchaseBook = purchaseInvoices
+    .filter((row) => row.status !== 'Rejected')
+    .filter((row) => inFY(row.invoice_date))
+    .map((row) => {
+      const taxable = round2(row.amount || 0);
+      const gst = round2(row.gst_amount || 0);
+      const total = round2(taxable + gst);
+      return {
+        id: row.id,
+        date: row.invoice_date,
+        fy: getFYFromDate(row.invoice_date),
+        invoiceNo: row.pi_no,
+        vendorId: row.vendor_id,
+        vendorName: row.vendor_name,
+        type: row.type || 'Service',
+        taxable,
+        gst,
+        total,
+        status: row.status || 'Pending',
+        mode: normalizeMode(row.purchase_mode),
+        remarks: row.remarks || '',
+      };
+    })
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+  const journal = [];
+
+  salesBook.forEach((row) => {
+    const arAccount = `Accounts Receivable:${row.clientName || row.clientId || 'Client'}`;
+    const collectionAccount = pickAccountByMode(row.mode, 'Cash In Hand', arAccount);
+
+    pushDoubleEntry(
+      journal,
+      {
+        date: row.date,
+        fy: row.fy,
+        source: 'sales_invoice',
+        refNo: row.invoiceNo,
+        remarks: row.remarks,
+        entityId: row.clientId,
+        entityName: row.clientName,
+      },
+      [
+        {
+          debitAccount: collectionAccount,
+          creditAccount: 'Sales Revenue',
+          amount: row.taxable,
+        },
+        {
+          debitAccount: collectionAccount,
+          creditAccount: 'Output GST Payable',
+          amount: row.gst,
+        },
+      ]
+    );
+  });
+
+  purchaseBook.forEach((row) => {
+    const apAccount = `Accounts Payable:${row.vendorName || row.vendorId || 'Vendor'}`;
+    const settlementAccount = pickAccountByMode(row.mode, 'Cash In Hand', apAccount);
+
+    pushDoubleEntry(
+      journal,
+      {
+        date: row.date,
+        fy: row.fy,
+        source: 'purchase_invoice',
+        refNo: row.invoiceNo,
+        remarks: row.remarks,
+        entityId: row.vendorId,
+        entityName: row.vendorName,
+      },
+      [
+        {
+          debitAccount: 'Purchase Expense',
+          creditAccount: settlementAccount,
+          amount: row.taxable,
+        },
+        {
+          debitAccount: 'Input GST Credit',
+          creditAccount: settlementAccount,
+          amount: row.gst,
+        },
+      ]
+    );
+  });
+
+  payments
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date,
+          fy: getFYFromDate(row.date),
+          source: 'receipt',
+          refNo: row.reference || row.id,
+          remarks: row.remarks,
+          entityId: row.client_id,
+          entityName: row.client_name,
+        },
+        [
+          {
+            debitAccount: 'Bank',
+            creditAccount: `Accounts Receivable:${row.client_name || row.client_id || 'Client'}`,
+            amount: round2(row.amount),
+          },
+        ]
+      );
+    });
+
+  vendorPayments
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date,
+          fy: getFYFromDate(row.date),
+          source: 'vendor_payment',
+          refNo: row.reference || row.id,
+          remarks: row.remarks,
+          entityId: row.vendor_id,
+          entityName: row.vendor_name,
+        },
+        [
+          {
+            debitAccount: `Accounts Payable:${row.vendor_name || row.vendor_id || 'Vendor'}`,
+            creditAccount: 'Bank',
+            amount: round2(row.amount),
+          },
+        ]
+      );
+    });
+
+  expenses
+    .filter((row) => row.status !== 'Rejected' && row.status !== 'Disapproved')
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date,
+          fy: getFYFromDate(row.date),
+          source: 'expense',
+          refNo: row.id,
+          remarks: row.remarks,
+          entityId: row.employee_id,
+          entityName: row.employee_name,
+        },
+        [
+          {
+            debitAccount: `Expense:${row.category || 'General'}`,
+            creditAccount: 'Bank',
+            amount: round2(row.amount),
+          },
+        ]
+      );
+    });
+
+  payouts
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date,
+          fy: getFYFromDate(row.date),
+          source: 'employee_payout',
+          refNo: row.reference || row.id,
+          remarks: row.remarks,
+          entityId: row.employee_id,
+          entityName: row.employee_name,
+        },
+        [
+          {
+            debitAccount: 'Salary Expense',
+            creditAccount: 'Bank',
+            amount: round2(row.amount),
+          },
+        ]
+      );
+    });
+
+  advances
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date,
+          fy: getFYFromDate(row.date),
+          source: 'employee_advance',
+          refNo: row.id,
+          remarks: row.remarks,
+          entityId: row.employee_id,
+          entityName: row.employee_name,
+        },
+        [
+          {
+            debitAccount: 'Employee Advances',
+            creditAccount: 'Bank',
+            amount: round2(row.amount),
+          },
+        ]
+      );
+    });
+
+  openingBalances
+    .filter((row) => {
+      // CRITICAL FIX: Filter by FY, not by date (prevents double counting after rollover)
+      if (fyFilter === 'all') {
+        // When viewing all FYs, include all opening balances
+        return true;
+      }
+      // When viewing specific FY, ONLY include opening balances FOR THAT FY
+      return row.fy === fyFilter;
+    })
+    .forEach((row) => {
+      const amount = round2(row.amount);
+      if (amount <= 0) return;
+      const side = String(row.side || 'Dr').toUpperCase();
+      const date = row.date || fiscalYearStartDate(row.fy || getFYFromDate(new Date().toISOString().slice(0, 10)));
+      const accountName = row.account_name || row.account || 'Opening Balance Account';
+
+      if (side === 'CR') {
+        pushDoubleEntry(
+          journal,
+          {
+            date,
+            fy: getFYFromDate(date),
+            source: 'opening_balance',
+            refNo: row.ref_no || row.id || 'OB',
+            remarks: row.remarks || 'Opening balance',
+          },
+          [{ debitAccount: 'Opening Balance Equity', creditAccount: accountName, amount }]
+        );
+      } else {
+        pushDoubleEntry(
+          journal,
+          {
+            date,
+            fy: getFYFromDate(date),
+            source: 'opening_balance',
+            refNo: row.ref_no || row.id || 'OB',
+            remarks: row.remarks || 'Opening balance',
+          },
+          [{ debitAccount: accountName, creditAccount: 'Opening Balance Equity', amount }]
+        );
+      }
+    });
+
+  manualJournalEntries
+    .filter((row) => row.status !== 'cancelled')
+    .filter((row) => inFY(row.date))
+    .forEach((row) => {
+      (row.entries || []).forEach((entry) => {
+        const amount = round2(entry.amount);
+        if (amount <= 0 || !entry.debitAccount || !entry.creditAccount) return;
+        pushDoubleEntry(
+          journal,
+          {
+            date: row.date,
+            fy: getFYFromDate(row.date),
+            source: row.source || 'manual_journal',
+            refNo: row.voucher_no || row.id,
+            remarks: row.narration || row.remarks || '',
+          },
+          [{ debitAccount: entry.debitAccount, creditAccount: entry.creditAccount, amount }]
+        );
+      });
+    });
+
+  fiscalYearClosings
+    .filter((row) => row.status === 'closed')
+    .filter((row) => inFY(row.date || fiscalYearStartDate(row.fy)))
+    .forEach((row) => {
+      const entry = row.transferEntry;
+      if (!entry || !entry.debitAccount || !entry.creditAccount || !entry.amount) return;
+      pushDoubleEntry(
+        journal,
+        {
+          date: row.date || fiscalYearStartDate(row.fy),
+          fy: row.fy || getFYFromDate(row.date),
+          source: 'fy_closing',
+          refNo: row.voucher_no || `CLOSE-${row.fy}`,
+          remarks: row.remarks || `Year closing transfer for ${row.fy}`,
+        },
+        [{ debitAccount: entry.debitAccount, creditAccount: entry.creditAccount, amount: entry.amount }]
+      );
+    });
+
+  journal.sort((a, b) => {
+    if ((a.date || '') === (b.date || '')) return String(a.refNo || '').localeCompare(String(b.refNo || ''));
+    return (a.date || '').localeCompare(b.date || '');
+  });
+
+  const ledger = toLedger(journal);
+
+  const trialRows = ledger.map((row) => ({
+    account: row.account,
+    debit: row.debit,
+    credit: row.credit,
+    balance: row.balance,
+    balanceType: row.balanceType,
+  }));
+  const trialDebitTotal = round2(trialRows.reduce((sum, row) => sum + row.debit, 0));
+  const trialCreditTotal = round2(trialRows.reduce((sum, row) => sum + row.credit, 0));
+  const trialDifference = round2(trialDebitTotal - trialCreditTotal);
+  const isTrialBalanced = Math.abs(trialDifference) < 0.01;
+
+  const incomeByLedger = round2(
+    ledger
+      .filter((row) => guessAccountType(row.account, coaByName) === 'Income')
+      .reduce((sum, row) => sum + Math.max(-row.balance, 0), 0)
+  );
+  const expenseRows = ledger.filter((row) => guessAccountType(row.account, coaByName) === 'Expense');
+  const cogsRows = expenseRows.filter((row) => /purchase|cogs|cost of goods/i.test(row.account));
+  const opexRows = expenseRows.filter((row) => !/purchase|cogs|cost of goods/i.test(row.account));
+
+  const totalPurchaseTaxable = round2(cogsRows.reduce((sum, row) => sum + Math.max(row.balance, 0), 0));
+  const totalOperatingExpenses = round2(opexRows.reduce((sum, row) => sum + Math.max(row.balance, 0), 0));
+  const totalSalesTaxable = incomeByLedger;
+
+  const grossProfit = round2(totalSalesTaxable - totalPurchaseTaxable);
+  const netProfit = round2(grossProfit - totalOperatingExpenses);
+
+  const cashBalance = round2(getLedgerBalance(ledger, 'Cash In Hand') + getLedgerBalance(ledger, 'Bank'));
+  const receivableTotal = round2(
+    ledger
+      .filter((row) => row.account.startsWith('Accounts Receivable:'))
+      .reduce((sum, row) => sum + (row.balance > 0 ? row.balance : 0), 0)
+  );
+  const advanceAsset = round2(Math.max(getLedgerBalance(ledger, 'Employee Advances'), 0));
+
+  const payableTotal = round2(
+    ledger
+      .filter((row) => row.account.startsWith('Accounts Payable:'))
+      .reduce((sum, row) => sum + (row.balance < 0 ? Math.abs(row.balance) : 0), 0)
+  );
+
+  const outputGst = round2(Math.abs(Math.min(getLedgerBalance(ledger, 'Output GST Payable'), 0)));
+  const inputGst = round2(Math.max(getLedgerBalance(ledger, 'Input GST Credit'), 0));
+  const gstPayable = round2(Math.max(outputGst - inputGst, 0));
+
+  const assetsTotal = round2(cashBalance + receivableTotal + advanceAsset + inputGst);
+  const liabilitiesTotal = round2(payableTotal + gstPayable);
+  const retainedEarningsLedger = round2(Math.abs(Math.min(getLedgerBalance(ledger, 'Retained Earnings'), 0)));
+  const equityTotal = round2(retainedEarningsLedger + netProfit);
+
+  return {
+    clients,
+    fyFilter,
+    salesBook,
+    purchaseBook,
+    journal,
+    ledger,
+    profitAndLoss: {
+      revenue: totalSalesTaxable,
+      costOfGoodsSold: totalPurchaseTaxable,
+      grossProfit,
+      operatingExpenses: totalOperatingExpenses,
+      netProfit,
+    },
+    trialBalance: {
+      rows: trialRows,
+      totalDebit: trialDebitTotal,
+      totalCredit: trialCreditTotal,
+      difference: trialDifference,
+      isBalanced: isTrialBalanced,
+    },
+    balanceSheet: {
+      assets: {
+        cashAndBank: cashBalance,
+        accountsReceivable: receivableTotal,
+        employeeAdvances: advanceAsset,
+        inputGstCredit: inputGst,
+        total: assetsTotal,
+      },
+      liabilities: {
+        accountsPayable: payableTotal,
+        gstPayable,
+        total: liabilitiesTotal,
+      },
+      equity: {
+        retainedEarnings: retainedEarningsLedger,
+        currentYearProfit: netProfit,
+        total: equityTotal,
+      },
+      totalLiabilitiesAndEquity: round2(liabilitiesTotal + equityTotal),
+    },
+  };
+};

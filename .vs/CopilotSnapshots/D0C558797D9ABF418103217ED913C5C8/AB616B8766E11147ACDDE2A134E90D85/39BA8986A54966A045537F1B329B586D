@@ -1,0 +1,347 @@
+﻿# 🚨 EMERGENCY: Ledger Still Not Showing - DEBUG NOW
+
+## ⚡ **IMMEDIATE ACTIONS (Do this RIGHT NOW)**
+
+### **Step 1: Make Sure Server is Running**
+
+```powershell
+# In your terminal, make sure you see this:
+# > rental-ops@x.x.x dev
+# > vite
+# 
+#   ➜  Local:   http://localhost:5173/
+
+# If NOT running, start it:
+npm run dev
+```
+
+---
+
+### **Step 2: Clear Everything and Hard Refresh**
+
+**In Browser**:
+1. Press `Ctrl + Shift + Delete`
+2. Check **ALL boxes**:
+   - [ ] Browsing history
+   - [ ] Cookies and other site data
+   - [ ] Cached images and files
+3. Time range: **All time**
+4. Click **Clear data**
+5. **Close browser completely** (not just the tab!)
+6. Reopen browser
+7. Go to `http://localhost:5173`
+
+---
+
+### **Step 3: Run Debug Script**
+
+1. Press `F12` to open Developer Tools
+2. Go to **Console** tab
+3. **Copy the ENTIRE contents** of `debug-accounting.js` file
+4. **Paste into console**
+5. Press **Enter**
+
+**Expected Output**:
+```
+═══════════════════════════════════════════════════════════
+🔍 ACCOUNTING DEBUG SCRIPT
+═══════════════════════════════════════════════════════════
+
+📊 DATA LOADED:
+Projects: 5
+Clients: 10
+Tax Invoices: 3
+...
+
+📈 ACCOUNTING SNAPSHOT:
+✅ Snapshot exists
+Journal entries: 25
+Ledger accounts: 12
+...
+
+📗 LEDGER ACCOUNTS:
+Total accounts: 12
+
+✅ Party Accounts (NEW): 3
+  - Party: ABC Company
+  - Party: XYZ Supplies
+  - Party: Johnson Corp
+
+❌ Old A/R Accounts (Should be 0): 0
+❌ Old A/P Accounts (Should be 0): 0
+...
+```
+
+---
+
+## 📊 **What The Debug Output Tells You**
+
+### **Scenario 1: ✅ Party Accounts Found**
+
+```
+✅ Party Accounts (NEW): 3
+  - Party: ABC Company
+  - Party: XYZ Supplies
+
+❌ Old A/R Accounts (Should be 0): 0
+❌ Old A/P Accounts (Should be 0): 0
+
+🎯 DIAGNOSIS:
+✅ UNIFIED PARTY ACCOUNTS ARE WORKING!
+```
+
+**This means**: Everything is working!
+
+**Action**: 
+1. Go to Accounting → Ledger tab
+2. Select "Party: ABC Company" from dropdown
+3. You should see combined sales, purchases, and payments
+
+**If dropdown is empty**: UI issue - see Scenario 4
+
+---
+
+### **Scenario 2: ❌ Old Accounts Still Exist**
+
+```
+✅ Party Accounts (NEW): 0
+
+❌ Old A/R Accounts (Should be 0): 5
+  - Accounts Receivable: ABC Company
+  - Accounts Receivable: XYZ Corp
+
+❌ Old A/P Accounts (Should be 0): 3
+  - Accounts Payable: ABC Company
+
+🎯 DIAGNOSIS:
+❌ Old A/R or A/P accounts still exist - new code not running
+```
+
+**This means**: Changes didn't take effect!
+
+**Actions**:
+1. ✅ **Save all files** in VS Code (`Ctrl+K S`)
+2. ✅ **Stop dev server** (Ctrl+C in terminal)
+3. ✅ **Start dev server** (`npm run dev`)
+4. ✅ **Clear browser cache** (Ctrl+Shift+Delete)
+5. ✅ **Hard refresh** (Ctrl+F5)
+6. ✅ **Run debug script again**
+
+---
+
+### **Scenario 3: ❌ No Journal Entries**
+
+```
+📈 ACCOUNTING SNAPSHOT:
+✅ Snapshot exists
+Journal entries: 0  ← PROBLEM!
+Ledger accounts: 0
+
+🎯 DIAGNOSIS:
+❌ No journal entries - check if you have data
+```
+
+**This means**: No transactions in system!
+
+**Checklist**:
+- [ ] Do you have any completed projects?
+- [ ] Do you have any tax invoices?
+- [ ] Do you have any purchase invoices?
+- [ ] Do you have any payments?
+
+**If NO to all**: Create test data first!
+
+**If YES**: Check FY Filter (set to "All FY")
+
+---
+
+### **Scenario 4: ✅ Party Accounts Exist BUT Dropdown Empty**
+
+```
+✅ Party Accounts (NEW): 3
+  - Party: ABC Company
+  - Party: XYZ Supplies
+
+But ledger dropdown shows: (empty)
+```
+
+**This means**: UI not updating!
+
+**Actions**:
+1. Check console for errors (red text)
+2. Try selecting a different tab (Journal, then back to Ledger)
+3. Refresh page
+4. Check if `selectedLedger` state is set:
+```javascript
+console.log('Selected ledger:', selectedLedger);
+console.log('Ledger row:', selectedLedgerRow);
+```
+
+---
+
+## 🔍 **Advanced Debugging**
+
+### **Check Specific Party Account**
+
+Run in console:
+```javascript
+// Find specific party account
+const partyAccount = snapshot.ledger.find(a => a.account.includes('ABC Company'));
+console.log('Party Account:', partyAccount);
+
+if (partyAccount) {
+  console.log('Balance:', partyAccount.balance);
+  console.log('Entries:', partyAccount.entries);
+  partyAccount.entries.forEach(e => {
+    console.log(`${e.date} ${e.side} ${e.amount} - ${e.refNo}`);
+  });
+}
+```
+
+**Expected**:
+```
+Party Account: {
+  account: "Party: ABC Company",
+  debit: 150000,
+  credit: 100000,
+  balance: 50000,
+  balanceType: "Dr",
+  entries: [
+    { date: "2024-01-10", side: "Dr", amount: 100000, ... },
+    { date: "2024-01-15", side: "Cr", amount: 50000, ... },
+    ...
+  ]
+}
+```
+
+---
+
+### **Check Journal Entries Using Party Accounts**
+
+```javascript
+// Check if Party accounts are in journal
+const partyJournal = snapshot.journal.filter(e => 
+  e.debitAccount?.startsWith('Party:') || 
+  e.creditAccount?.startsWith('Party:')
+);
+
+console.log('Journal entries with Party accounts:', partyJournal.length);
+console.log('Sample:', partyJournal.slice(0, 3));
+```
+
+**Expected**: Should be > 0
+
+**If 0**: New code is NOT running!
+
+---
+
+## 🎯 **Most Likely Issues**
+
+### **Issue 1: Files Not Saved**
+
+**Check**: Look at VS Code - do you see white dots on tabs?
+
+**Fix**: 
+- Press `Ctrl+K S` to save all files
+- Or: File → Save All
+
+---
+
+### **Issue 2: Server Not Restarted**
+
+**Check**: When did you last restart?
+
+**Fix**:
+```powershell
+# In terminal:
+# Press Ctrl+C
+npm run dev
+```
+
+---
+
+### **Issue 3: Browser Cache**
+
+**Check**: Have you cleared cache after code changes?
+
+**Fix**:
+- Close browser completely
+- Reopen
+- Go to site
+- Press Ctrl+F5
+
+---
+
+### **Issue 4: Wrong Firestore Data**
+
+**Check**: Is your data structure correct?
+
+```javascript
+// Check invoice structure
+console.log('Sample invoice:', taxInvoices[0]);
+// Should have: invoice_no, client_id, client_name, taxable, gst_amount
+```
+
+**If missing fields**: Data structure issue
+
+---
+
+## 📋 **Complete Checklist**
+
+Run through this in order:
+
+- [ ] All files saved in VS Code
+- [ ] Dev server stopped (Ctrl+C)
+- [ ] Dev server started (`npm run dev`)
+- [ ] Browser closed completely
+- [ ] Browser reopened
+- [ ] Site loaded (`http://localhost:5173`)
+- [ ] Cache cleared (Ctrl+Shift+Delete, All time, All boxes)
+- [ ] Hard refresh (Ctrl+F5)
+- [ ] Console opened (F12)
+- [ ] Debug script run (paste from debug-accounting.js)
+- [ ] Debug output shows Party accounts
+- [ ] Ledger tab opened
+- [ ] Dropdown shows Party accounts
+- [ ] Account selected
+- [ ] Entries visible
+
+**If ALL checked**: ✅ System is working!
+
+---
+
+## 📸 **What To Share If Still Broken**
+
+**Copy this info and share**:
+
+1. **Debug script output** (the entire console log)
+2. **Screenshot of Ledger tab** (showing dropdown)
+3. **Screenshot of Journal tab** (first 10 entries)
+4. **Console errors** (any red text)
+5. **File modification times**:
+```powershell
+Get-ChildItem src/utils/accounting.js | Select-Object Name, LastWriteTime
+Get-ChildItem src/pages/Accounting.jsx | Select-Object Name, LastWriteTime
+```
+
+---
+
+## 🚀 **Quick Verification**
+
+**Run this to verify unified accounts are working**:
+
+```javascript
+// This should return > 0 if working
+snapshot.ledger.filter(a => a.account.startsWith('Party:')).length
+```
+
+**Expected**: A number greater than 0
+
+**If 0**: New code not running - restart everything!
+
+---
+
+**Status**: 🔍 **ACTIVE DEBUGGING**  
+**Action**: Run debug script and share output  
+**Time**: 5 minutes to complete all steps
+

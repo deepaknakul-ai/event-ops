@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
 import { getFinancialYear } from '../utils/helpers';
+import { CATEGORIES, EXPENSE_CATS } from '../utils/constants';
 import RBACManager from './RBACManager';
 
 const DEFAULT_CALENDAR_STATUS_BG = {
@@ -36,7 +37,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [backupStatus, setBackupStatus] = useState('idle');
   const [restoreStatus, setRestoreStatus] = useState('idle');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
-  const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2 });
+  const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2 });
   const [bankAccounts, setBankAccounts] = useState([]);
   const [defaultBankId, setDefaultBankId] = useState('');
   const [bankForm, setBankForm] = useState({ bank_name: '', account_name: '', account_no: '', ifsc: '', branch: '', upi_id: '' });
@@ -51,6 +52,12 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [isSavingFYLock, setIsSavingFYLock] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [activeTab, setActiveTab] = useState('system');
+  // Categories state
+  const [customInventoryCats, setCustomInventoryCats] = useState([]);
+  const [customExpenseCats, setCustomExpenseCats] = useState([]);
+  const [newInventoryCat, setNewInventoryCat] = useState('');
+  const [newExpenseCat, setNewExpenseCat] = useState('');
+  const [isSavingCats, setIsSavingCats] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -62,7 +69,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             const orgSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
             if (orgSnap.exists()) {
                 const orgData = orgSnap.data();
-                setOrgForm({ name: orgData.name||'', address: orgData.address||'', pan: orgData.pan||'', gstin: orgData.gstin||'', logo: orgData.logo||'', currency: orgData.currency||'INR', email: orgData.email||'', phone: orgData.phone||'', po_terms: orgData.po_terms||'', challan_terms: orgData.challan_terms||'', payment_terms: orgData.payment_terms||'', gst_api_key: orgData.gst_api_key||'', expense_proof_threshold: orgData.expense_proof_threshold || 0, expense_proof_max_size_mb: orgData.expense_proof_max_size_mb || 2 });
+                setOrgForm({ name: orgData.name||'', address: orgData.address||'', pan: orgData.pan||'', gstin: orgData.gstin||'', logo: orgData.logo||'', currency: orgData.currency||'INR', email: orgData.email||'', phone: orgData.phone||'', po_terms: orgData.po_terms||'', challan_terms: orgData.challan_terms||'', payment_terms: orgData.payment_terms||'', invoice_terms: orgData.invoice_terms||'', gst_api_key: orgData.gst_api_key||'', expense_proof_threshold: orgData.expense_proof_threshold || 0, expense_proof_max_size_mb: orgData.expense_proof_max_size_mb || 2 });
                 setBankAccounts(orgData.bank_accounts || []);
                 setDefaultBankId(orgData.default_bank_id || '');
                 const storedColors = orgData?.calendar_color_settings || {};
@@ -71,6 +78,11 @@ const AdminTools = ({ db, appId, logAction, role }) => {
                   invoiceTextColors: { ...DEFAULT_CALENDAR_INVOICE_TEXT, ...(storedColors.invoiceTextColors || {}) }
                 });
                 setLockedFYs(orgData.locked_fys || []);
+            }
+            const catsSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'));
+            if (catsSnap.exists()) {
+                setCustomInventoryCats(catsSnap.data().inventory_categories || []);
+                setCustomExpenseCats(catsSnap.data().expense_categories || []);
             }
         } catch (e) { console.error(e); }
     };
@@ -274,6 +286,23 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     }
   };
 
+  const handleSaveCategories = async () => {
+    try {
+      setIsSavingCats(true);
+      await setDoc(
+        doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'),
+        { inventory_categories: customInventoryCats, expense_categories: customExpenseCats }
+      );
+      logAction('admin', 'update_categories', 'settings', {}, 'Updated custom categories');
+      alert('Categories saved. Reload the app to see them everywhere.');
+    } catch (error) {
+      console.error(error);
+      alert('Failed to save categories.');
+    } finally {
+      setIsSavingCats(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
        <h2 className="text-2xl font-bold text-slate-800">Admin Tools</h2>
@@ -300,12 +329,118 @@ const AdminTools = ({ db, appId, logAction, role }) => {
          >
            <Users size={15} /> Roles &amp; Permissions
          </button>
+         <button
+           onClick={() => setActiveTab('categories')}
+           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+             activeTab === 'categories'
+               ? 'bg-white text-slate-800 shadow-sm'
+               : 'text-slate-500 hover:text-slate-700'
+           }`}
+         >
+           <Tag size={15} /> Categories
+         </button>
        </div>
 
        {/* ── Roles & Permissions Matrix tab ── */}
        {activeTab === 'rbac' && (
          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
            <RBACManager db={db} appId={appId} logAction={logAction} />
+         </div>
+       )}
+
+       {/* ── Categories tab ── */}
+       {activeTab === 'categories' && (
+         <div className="space-y-6">
+           <div className="grid md:grid-cols-2 gap-6">
+             {/* Inventory Categories */}
+             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+               <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Tag size={18} /> Inventory Categories</h3>
+               <p className="text-xs text-slate-500 mb-4">Default categories are always present. Add custom categories for your specific equipment types.</p>
+               <div className="space-y-2 mb-4">
+                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Defaults (read-only)</p>
+                 <div className="flex flex-wrap gap-1.5">
+                   {CATEGORIES.map(c => (
+                     <span key={c} className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded text-xs">{c}</span>
+                   ))}
+                 </div>
+               </div>
+               <div className="space-y-2 mb-4">
+                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Custom Categories</p>
+                 {customInventoryCats.length === 0 && <p className="text-xs text-slate-400 italic">No custom categories yet.</p>}
+                 <div className="flex flex-wrap gap-1.5">
+                   {customInventoryCats.map(c => (
+                     <span key={c} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded text-xs font-medium">
+                       {c}
+                       <button type="button" onClick={() => setCustomInventoryCats(prev => prev.filter(x => x !== c))} className="text-indigo-400 hover:text-red-500 ml-1"><X size={11} /></button>
+                     </span>
+                   ))}
+                 </div>
+               </div>
+               <div className="flex gap-2">
+                 <input
+                   type="text"
+                   className="flex-1 rounded border border-slate-300 p-2 text-sm text-black bg-white"
+                   placeholder="e.g. Drones, Rigging..."
+                   value={newInventoryCat}
+                   onChange={e => setNewInventoryCat(e.target.value)}
+                   onKeyDown={e => { if (e.key === 'Enter' && newInventoryCat.trim()) { const v = newInventoryCat.trim(); if (!CATEGORIES.includes(v) && !customInventoryCats.includes(v)) setCustomInventoryCats(prev => [...prev, v]); setNewInventoryCat(''); } }}
+                 />
+                 <button
+                   type="button"
+                   onClick={() => { const v = newInventoryCat.trim(); if (v && !CATEGORIES.includes(v) && !customInventoryCats.includes(v)) { setCustomInventoryCats(prev => [...prev, v]); setNewInventoryCat(''); } }}
+                   className="flex items-center gap-1 px-3 py-2 rounded bg-indigo-600 text-white text-sm hover:bg-indigo-700"
+                 ><Plus size={14} /> Add</button>
+               </div>
+             </div>
+
+             {/* Expense Categories */}
+             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+               <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Tag size={18} /> Expense Categories</h3>
+               <p className="text-xs text-slate-500 mb-4">Default expense types are always present. Add custom categories to match your finance workflow.</p>
+               <div className="space-y-2 mb-4">
+                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Defaults (read-only)</p>
+                 <div className="flex flex-wrap gap-1.5">
+                   {EXPENSE_CATS.map(c => (
+                     <span key={c} className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded text-xs">{c}</span>
+                   ))}
+                 </div>
+               </div>
+               <div className="space-y-2 mb-4">
+                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Custom Categories</p>
+                 {customExpenseCats.length === 0 && <p className="text-xs text-slate-400 italic">No custom categories yet.</p>}
+                 <div className="flex flex-wrap gap-1.5">
+                   {customExpenseCats.map(c => (
+                     <span key={c} className="flex items-center gap-1 px-2 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded text-xs font-medium">
+                       {c}
+                       <button type="button" onClick={() => setCustomExpenseCats(prev => prev.filter(x => x !== c))} className="text-green-400 hover:text-red-500 ml-1"><X size={11} /></button>
+                     </span>
+                   ))}
+                 </div>
+               </div>
+               <div className="flex gap-2">
+                 <input
+                   type="text"
+                   className="flex-1 rounded border border-slate-300 p-2 text-sm text-black bg-white"
+                   placeholder="e.g. Equipment Hire, Insurance..."
+                   value={newExpenseCat}
+                   onChange={e => setNewExpenseCat(e.target.value)}
+                   onKeyDown={e => { if (e.key === 'Enter' && newExpenseCat.trim()) { const v = newExpenseCat.trim(); if (!EXPENSE_CATS.includes(v) && !customExpenseCats.includes(v)) setCustomExpenseCats(prev => [...prev, v]); setNewExpenseCat(''); } }}
+                 />
+                 <button
+                   type="button"
+                   onClick={() => { const v = newExpenseCat.trim(); if (v && !EXPENSE_CATS.includes(v) && !customExpenseCats.includes(v)) { setCustomExpenseCats(prev => [...prev, v]); setNewExpenseCat(''); } }}
+                   className="flex items-center gap-1 px-3 py-2 rounded bg-green-600 text-white text-sm hover:bg-green-700"
+                 ><Plus size={14} /> Add</button>
+               </div>
+             </div>
+           </div>
+           <button
+             onClick={handleSaveCategories}
+             disabled={isSavingCats}
+             className="bg-indigo-600 text-white px-8 py-2.5 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 font-medium"
+           >
+             {isSavingCats ? 'Saving...' : 'Save All Categories'}
+           </button>
          </div>
        )}
 
@@ -342,6 +477,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">PO Standard Terms</label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={3} value={orgForm.po_terms || ''} onChange={e => setOrgForm({...orgForm, po_terms: e.target.value})} placeholder="Default terms for Purchase Orders..." /></div>
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Challan Standard Terms</label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={3} value={orgForm.challan_terms || ''} onChange={e => setOrgForm({...orgForm, challan_terms: e.target.value})} placeholder="Default terms for Challans..." /></div>
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Default Payment Terms <span className="text-indigo-500 font-normal">(used in Proforma Invoices)</span></label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={3} value={orgForm.payment_terms || ''} onChange={e => setOrgForm({...orgForm, payment_terms: e.target.value})} placeholder="e.g. 50% advance on confirmation, balance before delivery..." /></div>
+                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Invoice Terms &amp; Conditions <span className="text-indigo-500 font-normal">(printed on every Tax Invoice)</span></label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={4} value={orgForm.invoice_terms || ''} onChange={e => setOrgForm({...orgForm, invoice_terms: e.target.value})} placeholder="e.g. Payment due within 30 days. Goods once sold are not returnable. Subject to local jurisdiction..." /></div>
                 <div className="md:col-span-2">
                   <label className="block text-sm font-bold text-slate-700 mb-1">
                     GST Portal API Key

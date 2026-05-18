@@ -216,13 +216,13 @@ export const GSTINField = ({ value = '', onChange, onAutofill, db, appId, id = '
 export const Modal = ({ isOpen, onClose, title, children }) => {
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl flex flex-col animate-slide-up border border-slate-200/60">
+    <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center sm:p-4 bg-black/40 backdrop-blur-sm">
+      <div className="w-full sm:max-w-2xl h-[92dvh] sm:h-auto sm:max-h-[90vh] rounded-t-2xl sm:rounded-2xl bg-white shadow-xl flex flex-col animate-slide-up border border-slate-200/60">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 shrink-0">
           <h3 className="text-base font-bold text-slate-800">{title}</h3>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-slate-100 text-slate-400 transition"><X size={18} /></button>
+          <button onClick={onClose} className="rounded-lg p-2 hover:bg-slate-100 text-slate-400 transition"><X size={20} /></button>
         </div>
-        <div className="px-5 py-4 overflow-y-auto text-slate-700">{children}</div>
+        <div className="px-5 py-4 overflow-y-auto text-slate-700 flex-1">{children}</div>
       </div>
     </div>
   );

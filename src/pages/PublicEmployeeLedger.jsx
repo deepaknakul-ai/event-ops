@@ -8,7 +8,7 @@ import { LoadingSpinner } from '../components/Shared';
 import { FileText, Wallet, TrendingUp, IndianRupee } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 
 const PublicEmployeeLedger = () => {
   const { token } = useParams();

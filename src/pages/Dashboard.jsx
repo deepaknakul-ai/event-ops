@@ -1,13 +1,13 @@
 // c:\APP\temp\rental-ops\src\pages\Dashboard.jsx
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend
 } from 'recharts';
-import { AlertTriangle, AlertCircle, ChevronRight, Truck, CalendarDays, TrendingUp, Clock, FileText, DollarSign } from 'lucide-react';
-import { doc, getDoc } from 'firebase/firestore';
-import { STATUS_COLORS } from '../utils/constants';
-import { formatCurrency, getProjectGrandTotal, getProjectNetTotal, getProjectGST } from '../utils/helpers';
+import { AlertTriangle, AlertCircle, ChevronRight, Truck, CalendarDays, TrendingUp, Clock, FileText, DollarSign, MapPin, Shield } from 'lucide-react';
+import { doc, getDoc, addDoc, updateDoc, collection } from 'firebase/firestore';
+import { STATUS_COLORS, LOCATION_TYPES } from '../utils/constants';
+import { formatCurrency, getProjectGrandTotal, getProjectNetTotal, getProjectGST, getLogHours, getDistance, fmtDate, getFinancialYear, getFYFromDate } from '../utils/helpers';
 import { can } from '../utils/permissions';
 
 const DEFAULT_STATUS_BG = {
@@ -24,17 +24,37 @@ const DEFAULT_INVOICE_TEXT = {
   'Not Invoiced': ''
 };
 
-const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employees = [], payments = [], db, appId }) => {
+const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employees = [], payments = [], db, appId, timeLogs = [], hqSettings = {}, currentEmpId, logAction, addToast, payouts = [], vendorPayments = [], taxInvoices = [], purchaseInvoices = [], inventory = [], journalEntries = [], hrLeaves = [], currentUserId }) => {
   const navigate = useNavigate();
   const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [checkInLocation, setCheckInLocation] = useState('HQ');
+  const [checkInProject, setCheckInProject] = useState('');
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsError, setGpsError] = useState('');
+  const [lateCheckoutModal, setLateCheckoutModal] = useState(false);
+  const [lateCheckoutReason, setLateCheckoutReason] = useState('');
+  const [pendingCheckoutPayload, setPendingCheckoutPayload] = useState(null);
   const [calendarColors, setCalendarColors] = useState({
     statusColors: { ...DEFAULT_STATUS_BG },
     invoiceTextColors: { ...DEFAULT_INVOICE_TEXT }
   });
+  const [selectedFY, setSelectedFY] = useState(getFinancialYear());
+
+  // Build list of available FYs from all completed/closed projects
+  const availableFYs = useMemo(() => {
+    const fySet = new Set();
+    fySet.add(getFinancialYear());
+    projects.forEach(p => {
+      if (['Completed', 'Closed'].includes(p.status) && p.end_date) {
+        fySet.add(getFYFromDate(p.end_date));
+      }
+    });
+    return [...fySet].sort().reverse();
+  }, [projects]);
 
   const activeProjects = projects.filter(p => ['Confirmed', 'Ongoing'].includes(p.status)).length;
   const pendingQuotes = projects.filter(p => p.status === 'Quoted').length;
-  const revenue = projects.filter(p => p.status === 'Completed' || p.status === 'Closed').reduce((sum, p) => sum + getProjectGrandTotal(p), 0);
+  const revenue = projects.filter(p => (p.status === 'Completed' || p.status === 'Closed') && getFYFromDate(p.end_date) === selectedFY).reduce((sum, p) => sum + getProjectGrandTotal(p), 0);
   
   const overdueProjects = projects.filter(p => {
     const end = new Date(p.end_date); end.setHours(23,59,59);
@@ -42,6 +62,145 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
   }).length;
 
   const lockedEmployees = employees.filter(e => e.is_locked);
+
+  // ── Attendance check-in/out state ─────────────────────────────────────────
+  const myLogs = useMemo(() => currentEmpId ? timeLogs.filter(l => l.employeeId === currentEmpId).sort((a, b) => new Date(b.checkIn || 0) - new Date(a.checkIn || 0)) : [], [timeLogs, currentEmpId]);
+  const activeShift = useMemo(() => myLogs.find(l => l.checkIn && !l.checkOut), [myLogs]);
+  const myActiveProjects = useMemo(() => {
+    if (!currentEmpId) return [];
+    const today = new Date().toISOString().slice(0, 10);
+    const dayKey = (d) => (d ? String(d).slice(0, 10) : '');
+    return projects.filter(p => {
+      if (!['Confirmed', 'Ongoing'].includes(p.status)) return false;
+      if (!(p.assigned_employees || []).includes(currentEmpId)) return false;
+      // Window spans from setup_date (if any) or start_date through end_date.
+      // Allow a 1-day grace on either side so staff can check in on travel/teardown days.
+      const startKey = dayKey(p.setup_date || p.start_date);
+      const endKey = dayKey(p.end_date || p.start_date);
+      if (!startKey || !endKey) return true; // undated project — don't exclude
+      const addDays = (k, n) => {
+        const d = new Date(k); d.setDate(d.getDate() + n);
+        return d.toISOString().slice(0, 10);
+      };
+      return addDays(startKey, -1) <= today && today <= addDays(endKey, 1);
+    });
+  }, [projects, currentEmpId]);
+
+  const getGPS = () => new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('Geolocation not supported'));
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      err => reject(err),
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  });
+
+  const subtractMinutes = (timeStr, mins) => {
+    const [h, m] = timeStr.split(':').map(Number);
+    const total = h * 60 + m - mins;
+    const nh = Math.floor(((total % 1440) + 1440) % 1440 / 60);
+    const nm = ((total % 1440) + 1440) % 1440 % 60;
+    return `${String(nh).padStart(2, '0')}:${String(nm).padStart(2, '0')}`;
+  };
+
+  const handleDashCheckIn = useCallback(async () => {
+    if (!currentEmpId) return addToast?.('No employee linked to your account', 'error');
+    if (activeShift) return addToast?.('You already have an active shift. Check out first.', 'error');
+    if (checkInLocation === 'Site' && !checkInProject) return addToast?.('Please select a project for site attendance.', 'error');
+    setGpsLoading(true); setGpsError('');
+    try {
+      const gps = await getGPS();
+      const now = new Date().toISOString();
+      let geofenceVerified = true, geoPenaltyMinutes = 0;
+      if (checkInLocation === 'HQ' && hqSettings.lat && hqSettings.lng) {
+        const dist = getDistance(gps.lat, gps.lng, hqSettings.lat, hqSettings.lng);
+        if (dist > (hqSettings.geoRadiusMeters || 400)) {
+          if (hqSettings.strictMode) { setGpsLoading(false); return addToast?.(`You are ${Math.round(dist)}m from HQ. Check-in blocked.`, 'error'); }
+          geofenceVerified = false; geoPenaltyMinutes = hqSettings.geoPenaltyMinutes || 0;
+        }
+      }
+      if (hqSettings.enforceTime && checkInLocation === 'HQ') {
+        const hm = now.slice(11, 16);
+        const winStart = hqSettings.windowStart || '08:00', winEnd = hqSettings.windowEnd || '11:00';
+        const adjustedStart = subtractMinutes(winStart, hqSettings.graceMinutes || 0);
+        if (hm < adjustedStart || hm > winEnd) { setGpsLoading(false); return addToast?.(`Check-in allowed only between ${winStart} and ${winEnd}.`, 'error'); }
+      }
+      const selectedProj = checkInProject ? myActiveProjects.find(p => p.id === checkInProject) : null;
+      const logData = {
+        employeeId: currentEmpId, checkIn: now, checkOut: null, location: checkInLocation,
+        project_id: checkInLocation === 'Site' ? checkInProject : null,
+        project_name: checkInLocation === 'Site' ? (selectedProj?.project_name || '') : null,
+        geofenceVerified, geoPenaltyMinutes, autoClosed: false,
+        lateMinutes: 0, gpsCheckIn: gps, gpsCheckOut: null, created_at: now,
+      };
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'timeLogs'), logData);
+      logAction?.('timeLogs', 'check_in', null, logData, `Dashboard check-in at ${checkInLocation}`);
+      addToast?.(`Checked in at ${checkInLocation}${selectedProj ? ` — ${selectedProj.project_name}` : ''}`, 'success');
+      setCheckInProject(''); setCheckInLocation('HQ');
+    } catch (e) { console.error(e); setGpsError(e.message || 'GPS error'); addToast?.('Check-in failed', 'error'); }
+    finally { setGpsLoading(false); }
+  }, [currentEmpId, activeShift, checkInLocation, checkInProject, hqSettings, myActiveProjects, db, appId, logAction, addToast]);
+
+  const handleDashCheckOut = useCallback(async () => {
+    if (!activeShift) return;
+    setGpsLoading(true); setGpsError('');
+    try {
+      const gps = await getGPS();
+      const now = new Date().toISOString();
+      const hrs = getLogHours({ ...activeShift, checkOut: now });
+      const maxHrs = hqSettings.maxShiftHours || 0;
+      const suspiciousHour = hqSettings.suspiciousCheckoutHour ?? 22;
+      const checkoutHour = new Date(now).getHours();
+      const isOverMax = maxHrs > 0 && hrs > maxHrs;
+      const isNightCheckout = checkoutHour >= suspiciousHour;
+
+      // Hard block: admin must force-close instead
+      if (isOverMax && hqSettings.enforceMaxShift) {
+        setGpsLoading(false);
+        return addToast?.(`Checkout blocked — shift exceeds ${maxHrs}h limit. Contact your administrator to close this shift.`, 'error');
+      }
+
+      const flags = {
+        lateCheckout: isOverMax,
+        lateCheckoutHours: isOverMax ? Math.round(hrs * 10) / 10 : null,
+        suspiciousNightCheckout: isNightCheckout,
+        checkoutHour,
+      };
+
+      // Soft block: require reason
+      if ((isOverMax && hqSettings.requireLateReason) || isNightCheckout) {
+        setGpsLoading(false);
+        setPendingCheckoutPayload({ now, gps, flags, hrs });
+        setLateCheckoutReason('');
+        setLateCheckoutModal(true);
+        return;
+      }
+
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', activeShift.id), { checkOut: now, gpsCheckOut: gps, ...flags });
+      logAction?.('timeLogs', 'check_out', activeShift.id, { checkOut: now, ...flags }, `Dashboard check-out (${hrs.toFixed(1)}h)`);
+      addToast?.(`Checked out — ${hrs.toFixed(1)} hours`, 'success');
+    } catch (e) { console.error(e); setGpsError(e.message || 'GPS error'); addToast?.('Check-out failed', 'error'); }
+    finally { setGpsLoading(false); }
+  }, [activeShift, db, appId, logAction, addToast, hqSettings]);
+
+  const handleConfirmLateCheckout = useCallback(async () => {
+    if (!pendingCheckoutPayload || !lateCheckoutReason.trim()) return;
+    setGpsLoading(true);
+    try {
+      const { now, gps, flags, hrs } = pendingCheckoutPayload;
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', activeShift.id), {
+        checkOut: now, gpsCheckOut: gps, ...flags,
+        lateCheckoutReason: lateCheckoutReason.trim(),
+      });
+      logAction?.('timeLogs', 'check_out', activeShift.id, { checkOut: now, ...flags, lateCheckoutReason: lateCheckoutReason.trim() }, `Late checkout with reason (${hrs.toFixed(1)}h)`);
+      addToast?.(`Checked out — ${hrs.toFixed(1)} hours (flagged for review)`, 'warning');
+      setLateCheckoutModal(false); setPendingCheckoutPayload(null); setLateCheckoutReason('');
+    } catch (e) { console.error(e); addToast?.('Check-out failed', 'error'); }
+    finally { setGpsLoading(false); }
+  }, [pendingCheckoutPayload, lateCheckoutReason, activeShift, db, appId, logAction, addToast]);
+
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '-';
+  // ── End attendance ────────────────────────────────────────────────────────
 
   useEffect(() => {
     const loadCalendarColors = async () => {
@@ -268,6 +427,125 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
         </div>
       )}
 
+      {/* ── Quick Attendance Check-in / Check-out ─────────────────────────── */}
+      {currentEmpId && (
+        <div className={`rounded-2xl shadow-lg border-2 overflow-hidden ${activeShift ? 'border-green-400 bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50' : 'border-indigo-300 bg-gradient-to-br from-indigo-50 via-blue-50 to-slate-50'}`}>
+          {/* Header Banner */}
+          <div className={`px-6 py-3 flex items-center justify-between ${activeShift ? 'bg-green-600' : 'bg-indigo-600'}`}>
+            <div className="flex items-center gap-2">
+              <Clock size={18} className={`text-white ${activeShift ? 'animate-pulse' : ''}`} />
+              <span className="text-white text-sm font-bold uppercase tracking-widest">Attendance</span>
+            </div>
+            <span className="text-white/80 text-xs font-medium">{new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>
+          </div>
+
+          <div className="p-6">
+            {activeShift ? (
+              <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                {/* Status */}
+                <div className="flex items-center gap-4">
+                  <div className="relative">
+                    <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center shadow-md">
+                      <Clock size={32} className="text-green-600 animate-pulse" />
+                    </div>
+                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white animate-pulse" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-extrabold text-green-700">Shift Active</p>
+                    <p className="text-base font-semibold text-slate-700 mt-0.5">{activeShift.location}{activeShift.project_name ? ` — ${activeShift.project_name}` : ''}</p>
+                    <p className="text-sm text-slate-500 mt-0.5">Checked in at <span className="font-bold text-slate-700">{fmtTime(activeShift.checkIn)}</span></p>
+                  </div>
+                </div>
+                {/* Checkout button */}
+                <button
+                  onClick={handleDashCheckOut}
+                  disabled={gpsLoading}
+                  className="w-full md:w-auto rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 disabled:opacity-50 transition-all shadow-lg shadow-red-200 px-10 py-5 flex flex-col items-center gap-1"
+                >
+                  <span className="text-4xl leading-none">🔴</span>
+                  <span className="text-white text-lg font-extrabold mt-1">{gpsLoading ? 'Getting GPS…' : 'Check Out'}</span>
+                  <span className="text-red-200 text-xs">Tap to end your shift</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                {/* Location picker */}
+                <div className="flex-1 space-y-3 w-full">
+                  <div>
+                    <p className="text-base font-bold text-slate-700 mb-1">📍 Select Location</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {LOCATION_TYPES.map(loc => (
+                        <button key={loc} onClick={() => { setCheckInLocation(loc); if (loc !== 'Site') setCheckInProject(''); }}
+                          className={`px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all ${checkInLocation === loc ? 'border-indigo-600 bg-indigo-600 text-white shadow-md shadow-indigo-200' : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-300'}`}>
+                          {loc}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {checkInLocation === 'Site' && (
+                    <div>
+                      <p className="text-sm font-bold text-slate-700 mb-1">🏗 Select Project</p>
+                      <select value={checkInProject} onChange={e => setCheckInProject(e.target.value)}
+                        className="border-2 border-indigo-200 rounded-xl px-3 py-2 text-sm font-semibold bg-white w-full max-w-xs focus:outline-none focus:border-indigo-500">
+                        <option value="">— Select a project —</option>
+                        {myActiveProjects.map(p => <option key={p.id} value={p.id}>{p.project_name}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                {/* Check-in button */}
+                <button
+                  onClick={handleDashCheckIn}
+                  disabled={gpsLoading}
+                  className="w-full md:w-auto rounded-2xl bg-green-600 hover:bg-green-700 active:scale-95 disabled:opacity-50 transition-all shadow-lg shadow-green-200 px-10 py-5 flex flex-col items-center gap-1"
+                >
+                  <span className="text-4xl leading-none">🟢</span>
+                  <span className="text-white text-lg font-extrabold mt-1">{gpsLoading ? 'Getting GPS…' : 'Check In'}</span>
+                  <span className="text-green-200 text-xs">Mark your attendance</span>
+                </button>
+              </div>
+            )}
+            {gpsError && <p className="text-sm text-red-600 font-semibold mt-3 text-center bg-red-50 rounded-xl py-2">{gpsError}</p>}
+          </div>
+        </div>
+      )}
+
+      {/* Late / Night Checkout Reason Modal */}
+      {lateCheckoutModal && pendingCheckoutPayload && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-full bg-red-100 shrink-0"><Shield size={22} className="text-red-600" /></div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Late Checkout Detected</h3>
+                <p className="text-sm text-slate-600 mt-1">
+                  {pendingCheckoutPayload.flags.suspiciousNightCheckout && (
+                    <span className="block text-red-600 font-medium">⚠ You are checking out after {hqSettings.suspiciousCheckoutHour ?? 22}:00 — this will be flagged for management review.</span>
+                  )}
+                  {pendingCheckoutPayload.flags.lateCheckout && (
+                    <span className="block text-amber-700 font-medium mt-1">Shift duration: <strong>{pendingCheckoutPayload.hrs.toFixed(1)} hours</strong> (exceeds {hqSettings.maxShiftHours}h limit).</span>
+                  )}
+                  <span className="block mt-2 text-slate-600">Please provide a reason to proceed.</span>
+                </p>
+              </div>
+            </div>
+            <textarea
+              className="w-full rounded-lg border border-slate-300 p-3 text-sm text-slate-800 resize-none focus:ring-2 focus:ring-red-400 focus:outline-none"
+              rows={3}
+              placeholder="Reason for late checkout (e.g. post-event cleanup, equipment packing, transport delay...)"
+              value={lateCheckoutReason}
+              onChange={e => setLateCheckoutReason(e.target.value)}
+            />
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => { setLateCheckoutModal(false); setPendingCheckoutPayload(null); }} className="rounded-lg border px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+              <button onClick={handleConfirmLateCheckout} disabled={!lateCheckoutReason.trim() || gpsLoading} className="rounded-lg bg-red-600 px-5 py-2 text-sm text-white font-bold hover:bg-red-700 disabled:opacity-50">
+                {gpsLoading ? 'Saving...' : 'Submit & Check Out'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-200 flex items-start gap-3">
           <div className="p-2 rounded-lg bg-blue-50 text-blue-600"><CalendarDays size={18} /></div>
@@ -307,7 +585,16 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
           <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-200 flex items-start gap-3">
             <div className="p-2 rounded-lg bg-emerald-50 text-emerald-600"><TrendingUp size={18} /></div>
             <div>
-              <div className="text-xs text-slate-500 font-semibold uppercase tracking-wide">Gross Revenue</div>
+              <div className="text-xs text-slate-500 font-semibold uppercase tracking-wide flex items-center gap-2">
+                Gross Revenue
+                <select
+                  value={selectedFY}
+                  onChange={e => setSelectedFY(e.target.value)}
+                  className="text-xs font-semibold bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-emerald-700 cursor-pointer"
+                >
+                  {availableFYs.map(fy => <option key={fy} value={fy}>FY {fy}</option>)}
+                </select>
+              </div>
               <div className="mt-0.5 text-xl font-bold text-slate-800">{formatCurrency(revenue)}</div>
             </div>
           </div>
@@ -392,7 +679,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                 {todaysBrief.ongoingNoChallan.map(p => (
                   <div key={p.id} className="text-sm text-slate-700 mb-1">
                     <span className="font-medium">{p.project_name}</span>
-                    <span className="text-slate-400 text-xs ml-1">({p.start_date} → {p.end_date})</span>
+                    <span className="text-slate-400 text-xs ml-1">({fmtDate(p.start_date)} → {fmtDate(p.end_date)})</span>
                   </div>
                 ))}
               </div>
@@ -496,7 +783,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                     <span className="font-medium text-indigo-600">{clients.find(c=>c.id===project.client_id)?.name}</span> • {project.venue}
                 </div>
                 <div className="text-xs text-slate-400 mt-1">
-                    Start: {project.start_date} {project.setup_date && `| Setup: ${project.setup_date}`}
+                    Start: {fmtDate(project.start_date)} {project.setup_date && `| Setup: ${fmtDate(project.setup_date)}`}
                 </div>
               </div>
               <span className={`rounded-full px-2 py-1 text-xs font-medium border ${STATUS_COLORS[project.status]}`}>

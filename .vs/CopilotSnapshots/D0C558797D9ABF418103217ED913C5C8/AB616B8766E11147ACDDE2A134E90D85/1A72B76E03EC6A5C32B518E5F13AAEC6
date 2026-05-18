@@ -1,0 +1,152 @@
+﻿// 🔧 DEBUG SCRIPT - Run this in browser console
+// Copy and paste this entire script into the browser console (F12)
+
+console.clear();
+console.log('═══════════════════════════════════════════════════════════');
+console.log('🔍 ACCOUNTING DEBUG SCRIPT');
+console.log('═══════════════════════════════════════════════════════════');
+
+// 1. Check if data is loaded
+console.log('\n📊 DATA LOADED:');
+console.log('Projects:', typeof projects !== 'undefined' ? projects?.length : '❌ NOT LOADED');
+console.log('Clients:', typeof clients !== 'undefined' ? clients?.length : '❌ NOT LOADED');
+console.log('Tax Invoices:', typeof taxInvoices !== 'undefined' ? taxInvoices?.length : '❌ NOT LOADED');
+console.log('Purchase Invoices:', typeof purchaseInvoices !== 'undefined' ? purchaseInvoices?.length : '❌ NOT LOADED');
+console.log('Payments:', typeof payments !== 'undefined' ? payments?.length : '❌ NOT LOADED');
+console.log('Vendor Payments:', typeof vendorPayments !== 'undefined' ? vendorPayments?.length : '❌ NOT LOADED');
+
+// 2. Check snapshot
+console.log('\n📈 ACCOUNTING SNAPSHOT:');
+if (typeof snapshot !== 'undefined') {
+  console.log('✅ Snapshot exists');
+  console.log('Journal entries:', snapshot.journal?.length || 0);
+  console.log('Ledger accounts:', snapshot.ledger?.length || 0);
+  console.log('Sales Book:', snapshot.salesBook?.length || 0);
+  console.log('Non-Invoiced Sales:', snapshot.nonInvoicedSalesBook?.length || 0);
+  console.log('Purchase Book:', snapshot.purchaseBook?.length || 0);
+} else {
+  console.log('❌ Snapshot not found');
+}
+
+// 3. Check ledger accounts
+console.log('\n📗 LEDGER ACCOUNTS:');
+if (typeof snapshot !== 'undefined' && snapshot.ledger) {
+  const allAccounts = snapshot.ledger.map(row => row.account).sort();
+  console.log('Total accounts:', allAccounts.length);
+  
+  const partyAccounts = allAccounts.filter(a => a.startsWith('Party:'));
+  const arAccounts = allAccounts.filter(a => a.startsWith('Accounts Receivable:'));
+  const apAccounts = allAccounts.filter(a => a.startsWith('Accounts Payable:'));
+  
+  console.log('\n✅ Party Accounts (NEW):', partyAccounts.length);
+  partyAccounts.forEach(a => console.log('  -', a));
+  
+  console.log('\n❌ Old A/R Accounts (Should be 0):', arAccounts.length);
+  arAccounts.forEach(a => console.log('  -', a));
+  
+  console.log('\n❌ Old A/P Accounts (Should be 0):', apAccounts.length);
+  apAccounts.forEach(a => console.log('  -', a));
+  
+  console.log('\n📋 All Accounts:');
+  allAccounts.forEach(a => console.log('  -', a));
+} else {
+  console.log('❌ No ledger data');
+}
+
+// 4. Check first few journal entries
+console.log('\n📝 SAMPLE JOURNAL ENTRIES (First 5):');
+if (typeof snapshot !== 'undefined' && snapshot.journal) {
+  snapshot.journal.slice(0, 5).forEach((entry, idx) => {
+    console.log(`\n${idx + 1}. ${entry.source} (${entry.date})`);
+    console.log(`   Ref: ${entry.refNo}`);
+    console.log(`   Dr: ${entry.debitAccount}`);
+    console.log(`   Cr: ${entry.creditAccount}`);
+    console.log(`   Amt: ₹${entry.amount?.toLocaleString('en-IN')}`);
+  });
+} else {
+  console.log('❌ No journal entries');
+}
+
+// 5. Check if Party accounts are being used
+console.log('\n🔍 PARTY ACCOUNT USAGE:');
+if (typeof snapshot !== 'undefined' && snapshot.journal) {
+  const journalWithParty = snapshot.journal.filter(e => 
+    e.debitAccount?.startsWith('Party:') || e.creditAccount?.startsWith('Party:')
+  );
+  console.log('Journal entries using Party accounts:', journalWithParty.length);
+  console.log('Total journal entries:', snapshot.journal.length);
+  console.log('Percentage:', ((journalWithParty.length / snapshot.journal.length) * 100).toFixed(1) + '%');
+  
+  if (journalWithParty.length > 0) {
+    console.log('\n✅ PARTY ACCOUNTS ARE BEING USED!');
+    console.log('Sample entries:');
+    journalWithParty.slice(0, 3).forEach((entry, idx) => {
+      console.log(`\n${idx + 1}. ${entry.source}`);
+      console.log(`   Dr: ${entry.debitAccount}`);
+      console.log(`   Cr: ${entry.creditAccount}`);
+    });
+  } else {
+    console.log('\n❌ NO PARTY ACCOUNTS IN JOURNAL!');
+    console.log('This means the new code is NOT being used.');
+  }
+} else {
+  console.log('❌ No journal data');
+}
+
+// 6. Check FY Filter
+console.log('\n📅 FISCAL YEAR FILTER:');
+if (typeof fyFilter !== 'undefined') {
+  console.log('Current FY Filter:', fyFilter);
+  if (fyFilter !== 'all') {
+    console.log('⚠️  WARNING: FY filter is not "all" - some data may be hidden');
+  }
+} else {
+  console.log('❌ FY filter not found');
+}
+
+console.log('\n═══════════════════════════════════════════════════════════');
+console.log('🎯 DIAGNOSIS:');
+
+let issues = [];
+
+if (typeof snapshot === 'undefined') {
+  issues.push('❌ Snapshot not loaded - refresh the page');
+}
+if (snapshot && snapshot.journal?.length === 0) {
+  issues.push('❌ No journal entries - check if you have data (invoices, payments, etc.)');
+}
+if (snapshot && snapshot.ledger?.length === 0) {
+  issues.push('❌ No ledger accounts - journal is empty or not processing');
+}
+
+const partyCount = snapshot?.ledger?.filter(a => a.account.startsWith('Party:'))?.length || 0;
+const arCount = snapshot?.ledger?.filter(a => a.account.startsWith('Accounts Receivable:'))?.length || 0;
+const apCount = snapshot?.ledger?.filter(a => a.account.startsWith('Accounts Payable:'))?.length || 0;
+
+if (partyCount > 0 && arCount === 0 && apCount === 0) {
+  console.log('✅ UNIFIED PARTY ACCOUNTS ARE WORKING!');
+  console.log(`   Found ${partyCount} Party accounts`);
+  console.log('   No old A/R or A/P accounts');
+  console.log('\n✅ YOUR SYSTEM IS CORRECTLY CONFIGURED!');
+  console.log('\n📋 NEXT STEPS:');
+  console.log('1. Go to Accounting → Ledger tab');
+  console.log('2. Select a "Party:" account from dropdown');
+  console.log('3. View the combined ledger with sales, purchases, and payments');
+} else if (arCount > 0 || apCount > 0) {
+  issues.push('❌ Old A/R or A/P accounts still exist - new code not running');
+  issues.push('   → Clear browser cache and hard refresh (Ctrl+Shift+R)');
+  issues.push('   → Restart dev server: npm run dev');
+} else if (partyCount === 0) {
+  issues.push('⚠️  No Party accounts found - check if you have any clients/vendors with transactions');
+}
+
+if (issues.length > 0) {
+  console.log('\n⚠️  ISSUES FOUND:');
+  issues.forEach(issue => console.log(issue));
+} else {
+  console.log('\n✅ NO ISSUES FOUND - System is working!');
+}
+
+console.log('\n═══════════════════════════════════════════════════════════');
+console.log('📸 SHARE THIS OUTPUT if you need help debugging');
+console.log('═══════════════════════════════════════════════════════════\n');

@@ -6,12 +6,14 @@ import {
 } from 'lucide-react';
 import {
   collection, addDoc, updateDoc, doc, deleteDoc,
-  runTransaction, getDoc, setDoc, getDocs
+  getDoc, getDocs
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { formatCurrency, getFinancialYear } from '../utils/helpers';
+import { assertFYNotLocked } from '../utils/fyLock';
+import { generateBookInvoiceNumber } from '../utils/accounting';
 import { can } from '../utils/permissions';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -38,7 +40,7 @@ const TYPE_STYLES = {
 
 // ─── component ──────────────────────────────────────────────────────────────
 
-const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], role }) => {
+const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], projects = [], role, purchaseInvoicesExternal, setPurchaseInvoicesExternal, lockedFYs = [] }) => {
   const [records, setRecords]           = useState([]);
   const [loading, setLoading]           = useState(false);
   const [isModalOpen, setIsModalOpen]   = useState(false);
@@ -60,15 +62,66 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
     invoice_ref: '',
     vendor_name: '',
     vendor_id: '',
+    vendor_company_id: 'primary',
+    vendor_company_name: '',
+    vendor_company_gstin: '',
+    vendor_company_address: '',
     description: '',
     amount: '',
     gst_amount: '',
     linked_inventory_id: '',
+    linked_po_id: '',    // PO id (format: projectId::po_no) that this PI supersedes
+    linked_po_no: '',    // human-readable PO number
+    include_in_ledger: false, // show in vendor public ledger
+    purchase_mode: 'Credit',
     status: 'Pending',
     images: [],   // [{ url, name, path, uploaded_at }]
     remarks: '',
   };
   const [form, setForm] = useState(initialForm);
+
+  const getPartyCompanies = (party) => {
+    if (!party) return [];
+    const primary = {
+      id: 'primary',
+      name: party.name || 'Primary Company',
+      gstin: party.gstin || '',
+      address: party.address || '',
+    };
+    const extras = (party.companies || []).map(c => ({
+      id: c.id,
+      name: c.name || 'Branch',
+      gstin: c.gstin || '',
+      address: c.address || '',
+    }));
+    return [primary, ...extras];
+  };
+
+  const makeVendorEntityValue = (vendorId, companyId = 'primary') => (
+    companyId && companyId !== 'primary' ? `${vendorId}::${companyId}` : vendorId
+  );
+
+  const vendorEntityOptions = useMemo(() => {
+    const options = [];
+    clients
+      .filter(c => c.type === 'Vendor' || c.type === 'Both' || c.type === 'Supplier')
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+      .forEach(v => {
+        const companies = getPartyCompanies(v);
+        companies.forEach(co => {
+          options.push({
+            value: makeVendorEntityValue(v.id, co.id),
+            vendor_id: v.id,
+            company_id: co.id,
+            company_name: co.name,
+            company_gstin: co.gstin,
+            company_address: co.address,
+            label: co.id === 'primary' ? v.name : `${v.name} — ${co.name}`,
+          });
+        });
+      });
+    return options;
+  }, [clients]);
 
   // ── Firestore listener: load purchase_invoices ──
   useEffect(() => {
@@ -80,6 +133,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
         const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         data.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
         setRecords(data);
+        setPurchaseInvoicesExternal?.(data);
       } catch (e) { console.error(e); }
       setLoading(false);
     };
@@ -87,24 +141,16 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
   }, [db, appId]);
 
   // ── Auto-number generation ──
-  const generatePINumber = async (type, dateStr) => {
-    const fy = getFYFromDate(dateStr);
-    const prefix = type === 'Asset' ? 'A' : 'S';
-    const counterKey = `${prefix}_${fy.replace('-', '_')}`;
-    const counterRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'purchase_invoices');
-
-    let newNum;
-    await runTransaction(db, async (tx) => {
-      const snap = await tx.get(counterRef);
-      const current = snap.exists() ? (snap.data()[counterKey] || 0) : 0;
-      newNum = current + 1;
-      if (snap.exists()) {
-        tx.update(counterRef, { [counterKey]: newNum });
-      } else {
-        tx.set(counterRef, { [counterKey]: newNum });
-      }
+  const generatePINumber = async (dateStr) => {
+    const orgSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
+    const orgSettings = orgSnap.exists() ? orgSnap.data() : {};
+    return generateBookInvoiceNumber({
+      db,
+      appId,
+      dateStr,
+      bookType: 'purchase',
+      orgSettings,
     });
-    return `${prefix}-${String(newNum).padStart(4, '0')}-${fy}`;
   };
 
   // ── Image upload ──
@@ -139,10 +185,18 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       invoice_ref: rec.invoice_ref || '',
       vendor_name: rec.vendor_name || '',
       vendor_id: rec.vendor_id || '',
+      vendor_company_id: rec.vendor_company_id || 'primary',
+      vendor_company_name: rec.vendor_company_name || '',
+      vendor_company_gstin: rec.vendor_company_gstin || '',
+      vendor_company_address: rec.vendor_company_address || '',
       description: rec.description || '',
       amount: rec.amount || '',
       gst_amount: rec.gst_amount || '',
       linked_inventory_id: rec.linked_inventory_id || '',
+      linked_po_id: rec.linked_po_id || '',
+      linked_po_no: rec.linked_po_no || '',
+      include_in_ledger: rec.include_in_ledger || false,
+      purchase_mode: rec.purchase_mode || 'Credit',
       status: rec.status || 'Pending',
       images: rec.images || [],
       remarks: rec.remarks || '',
@@ -155,11 +209,21 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
     if (editingId ? !can(role, 'purchase_invoices', 'edit') : !can(role, 'purchase_invoices', 'create')) return alert('Access denied: insufficient permissions.');
     if (!form.invoice_date) return alert('Invoice date is required.');
     if (!form.vendor_name && !form.vendor_id) return alert('Vendor / Supplier name is required.');
+    // C-2 fix: enforce FY lock on PI save (was Finance.jsx-only).
+    if (!assertFYNotLocked(form.invoice_date, lockedFYs)) return;
+    if (editingId) {
+      const prev = records.find(r => r.id === editingId);
+      if (prev?.invoice_date && !assertFYNotLocked(prev.invoice_date, lockedFYs)) return;
+    }
 
     setLoading(true);
     try {
       let piNo = editingId ? records.find(r => r.id === editingId)?.pi_no : null;
-      if (!piNo) piNo = await generatePINumber(form.type, form.invoice_date);
+      if (!piNo) piNo = await generatePINumber(form.invoice_date);
+
+      const selectedVendor = clients.find(c => c.id === form.vendor_id);
+      const companies = getPartyCompanies(selectedVendor);
+      const selectedCompany = companies.find(c => c.id === (form.vendor_company_id || 'primary')) || companies[0] || null;
 
       const data = {
         pi_no: piNo,
@@ -170,10 +234,18 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
           ? (clients.find(c => c.id === form.vendor_id)?.name || form.vendor_name)
           : form.vendor_name,
         vendor_id: form.vendor_id || '',
+        vendor_company_id: selectedCompany?.id || 'primary',
+        vendor_company_name: selectedCompany?.name || (selectedVendor?.name || ''),
+        vendor_company_gstin: selectedCompany?.gstin || (selectedVendor?.gstin || ''),
+        vendor_company_address: selectedCompany?.address || (selectedVendor?.address || ''),
         description: form.description,
         amount: parseFloat(form.amount) || 0,
         gst_amount: parseFloat(form.gst_amount) || 0,
         linked_inventory_id: form.linked_inventory_id || '',
+        linked_po_id: form.linked_po_id || '',
+        linked_po_no: form.linked_po_no || '',
+        include_in_ledger: form.include_in_ledger || false,
+        purchase_mode: form.purchase_mode || 'Credit',
         status: form.status,
         images: form.images || [],
         remarks: form.remarks,
@@ -183,12 +255,20 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
 
       if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', editingId), data);
-        setRecords(prev => prev.map(r => r.id === editingId ? { ...r, ...data } : r));
+        setRecords(prev => {
+          const next = prev.map(r => r.id === editingId ? { ...r, ...data } : r);
+          setPurchaseInvoicesExternal?.(next);
+          return next;
+        });
         logAction('purchase_invoices', 'update', editingId, data, piNo);
       } else {
         data.created_at = new Date().toISOString();
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'), data);
-        setRecords(prev => [{ id: docRef.id, ...data }, ...prev]);
+        setRecords(prev => {
+          const next = [{ id: docRef.id, ...data }, ...prev];
+          setPurchaseInvoicesExternal?.(next);
+          return next;
+        });
         logAction('purchase_invoices', 'create', docRef.id, data, piNo);
       }
       setIsModalOpen(false);
@@ -202,6 +282,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
   // ── Delete ──
   const handleDelete = (rec) => {
     if (!can(role, 'purchase_invoices', 'delete')) return alert('Access denied: insufficient permissions.');
+    if (!assertFYNotLocked(rec?.invoice_date, lockedFYs)) return;
     setDeleteConfirm({
       isOpen: true,
       title: `Delete ${rec.pi_no}`,
@@ -215,7 +296,11 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
             }
           }
           await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', rec.id));
-          setRecords(prev => prev.filter(r => r.id !== rec.id));
+          setRecords(prev => {
+            const next = prev.filter(r => r.id !== rec.id);
+            setPurchaseInvoicesExternal?.(next);
+            return next;
+          });
           logAction('purchase_invoices', 'delete', rec.id, {}, rec.pi_no);
         } catch (e) { alert('Delete failed: ' + e.message); }
       }
@@ -352,7 +437,9 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
                   <th className="p-3 font-medium text-slate-500">Type</th>
                   <th className="p-3 font-medium text-slate-500">Date</th>
                   <th className="p-3 font-medium text-slate-500">Vendor</th>
+                  <th className="p-3 font-medium text-slate-500">Company</th>
                   <th className="p-3 font-medium text-slate-500 hidden md:table-cell">Inv. Ref</th>
+                  <th className="p-3 font-medium text-slate-500 text-center">Mode</th>
                   <th className="p-3 font-medium text-slate-500 text-right">Amount</th>
                   <th className="p-3 font-medium text-slate-500 text-right hidden md:table-cell">GST</th>
                   <th className="p-3 font-medium text-slate-500 text-center">Status</th>
@@ -374,6 +461,12 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
                             {inventory.find(i => i.id === rec.linked_inventory_id)?.name || ''}
                           </div>
                         )}
+                        {rec.linked_po_no && (
+                          <div className="text-[10px] text-purple-500 truncate max-w-[100px]">PO: {rec.linked_po_no}</div>
+                        )}
+                        {rec.include_in_ledger && (
+                          <div className="text-[10px] text-green-600 font-semibold">📒 In Ledger</div>
+                        )}
                       </td>
                       <td className="p-3">
                         <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${tStyle.bg}`}>
@@ -384,7 +477,15 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
                       <td className="p-3 text-slate-700 font-medium text-xs">
                         <div className="truncate max-w-[140px]">{rec.vendor_name || '—'}</div>
                       </td>
+                      <td className="p-3 text-slate-500 text-xs">
+                        <div className="truncate max-w-[140px]">{rec.vendor_company_name || rec.vendor_name || '—'}</div>
+                      </td>
                       <td className="p-3 text-slate-500 text-xs hidden md:table-cell">{rec.invoice_ref || '—'}</td>
+                      <td className="p-3 text-center">
+                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${(rec.purchase_mode || 'Credit') === 'Cash' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-orange-100 text-orange-700 border-orange-200'}`}>
+                          {rec.purchase_mode || 'Credit'}
+                        </span>
+                      </td>
                       <td className="p-3 text-right font-mono text-slate-800 text-sm">{formatCurrency(rec.amount || 0)}</td>
                       <td className="p-3 text-right font-mono text-slate-500 text-xs hidden md:table-cell">{formatCurrency(rec.gst_amount || 0)}</td>
                       <td className="p-3 text-center">
@@ -454,7 +555,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
                     <div className="text-[10px] text-slate-500">{t === 'Asset' ? 'Equipment, tools, hardware' : 'Labour, maintenance, repair'}</div>
                   </div>
                   <span className={`ml-auto text-xs font-mono font-bold px-2 py-0.5 rounded ${t === 'Asset' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
-                    {t === 'Asset' ? 'A-XXXX' : 'S-XXXX'}-{getFYFromDate(form.invoice_date)}
+                    PI-0001-{getFYFromDate(form.invoice_date)}
                   </span>
                 </label>
               ))}
@@ -477,18 +578,48 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
             </div>
           </div>
 
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">Purchase Mode</label>
+            <select
+              className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
+              value={form.purchase_mode || 'Credit'}
+              onChange={e => setForm(f => ({ ...f, purchase_mode: e.target.value }))}
+            >
+              <option value="Credit">Credit</option>
+              <option value="Cash">Cash</option>
+            </select>
+            <div className="text-[10px] text-slate-400 mt-0.5">Purchase book can be tracked separately as cash or credit.</div>
+          </div>
+
           {/* Vendor */}
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1">Vendor / Supplier <span className="text-red-500">*</span></label>
             <div className="flex gap-2">
               <select
                 className="w-48 rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
-                value={form.vendor_id}
-                onChange={e => setForm(f => ({ ...f, vendor_id: e.target.value, vendor_name: '' }))}
+                value={makeVendorEntityValue(form.vendor_id, form.vendor_company_id || 'primary')}
+                onChange={e => {
+                  const selected = vendorEntityOptions.find(v => v.value === e.target.value);
+                  if (!selected) {
+                    setForm(f => ({ ...f, vendor_id: '', vendor_name: '', vendor_company_id: 'primary', vendor_company_name: '', vendor_company_gstin: '', vendor_company_address: '', linked_po_id: '', linked_po_no: '' }));
+                    return;
+                  }
+                  setForm(f => ({
+                    ...f,
+                    vendor_id: selected.vendor_id,
+                    vendor_name: '',
+                    vendor_company_id: selected.company_id,
+                    vendor_company_name: selected.company_name,
+                    vendor_company_gstin: selected.company_gstin,
+                    vendor_company_address: selected.company_address,
+                    linked_po_id: '',
+                    linked_po_no: '',
+                  }));
+                }}
               >
                 <option value="">— Type manually —</option>
-                {clients.filter(c => c.type === 'Vendor' || c.type === 'Both' || c.type === 'Supplier').map(v => (
-                  <option key={v.id} value={v.id}>{v.name}</option>
+                {vendorEntityOptions.map(v => (
+                  <option key={v.value} value={v.value}>{v.label}</option>
                 ))}
               </select>
               {!form.vendor_id && (
@@ -498,12 +629,63 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
               )}
               {form.vendor_id && (
                 <div className="flex-1 rounded-lg border border-indigo-200 bg-indigo-50 p-2 text-sm text-indigo-700 font-medium truncate">
-                  {clients.find(c => c.id === form.vendor_id)?.name}
-                  <button className="ml-2 text-xs text-slate-400 hover:text-red-500" onClick={() => setForm(f => ({ ...f, vendor_id: '' }))}>✕</button>
+                  {clients.find(c => c.id === form.vendor_id)?.name}{form.vendor_company_name ? ` — ${form.vendor_company_name}` : ''}
+                  <button className="ml-2 text-xs text-slate-400 hover:text-red-500" onClick={() => setForm(f => ({ ...f, vendor_id: '', vendor_company_id: 'primary', vendor_company_name: '', vendor_company_gstin: '', vendor_company_address: '', linked_po_id: '', linked_po_no: '' }))}>✕</button>
                 </div>
               )}
             </div>
           </div>
+
+          {/* Link to Purchase Order (Service type + vendor selected) */}
+          {form.type === 'Service' && form.vendor_id && (() => {
+            const vendorPOs = [];
+            projects.forEach(proj => {
+              (proj.purchase_orders || []).forEach(po => {
+                if (po.vendor_id === form.vendor_id && po.status !== 'Cancelled') {
+                  // H-5: prefer the stable po.id over the brittle composite key.
+                  // Fall back to composite for older POs that lack `id`.
+                  const stableKey = po.id || `${proj.id}::${po.po_no}`;
+                  vendorPOs.push({ key: stableKey, po_no: po.po_no, project_name: proj.project_name, date: po.date });
+                }
+              });
+            });
+            if (vendorPOs.length === 0) return null;
+            return (
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Link to Purchase Order <span className="text-slate-400">(optional — supersedes PO in ledger)</span></label>
+                <select
+                  className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
+                  value={form.linked_po_id}
+                  onChange={e => {
+                    const sel = vendorPOs.find(p => p.key === e.target.value);
+                    setForm(f => ({ ...f, linked_po_id: e.target.value, linked_po_no: sel ? sel.po_no : '' }));
+                  }}
+                >
+                  <option value="">— No PO linked (standalone entry) —</option>
+                  {vendorPOs.map(p => (
+                    <option key={p.key} value={p.key}>{p.po_no} · {p.project_name}{p.date ? ` (${p.date})` : ''}</option>
+                  ))}
+                </select>
+                {form.linked_po_id && (
+                  <p className="text-[10px] text-indigo-600 mt-1">This PI will replace the linked PO in the vendor ledger when "Take in Ledger" is on.</p>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Take in Ledger toggle */}
+          {form.vendor_id && (
+            <label className="flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors select-none"
+              style={{ background: form.include_in_ledger ? '#eef2ff' : '', borderColor: form.include_in_ledger ? '#6366f1' : '#e2e8f0' }}>
+              <input type="checkbox" className="accent-indigo-600 w-4 h-4"
+                checked={form.include_in_ledger}
+                onChange={e => setForm(f => ({ ...f, include_in_ledger: e.target.checked }))} />
+              <div>
+                <div className="text-sm font-bold text-slate-800">Take in Ledger</div>
+                <div className="text-[10px] text-slate-500">Include this purchase invoice in the vendor's public ledger balance. {form.linked_po_id ? 'Will replace the linked PO entry.' : 'Will appear as a standalone payable.'}</div>
+              </div>
+            </label>
+          )}
 
           {/* Description */}
           <div>

@@ -47,3 +47,20 @@ export const LED_WALL_TILE_MODELS = {
   }
   */
 };
+
+// ── HR Module Constants ───────────────────────────────────────────────────────
+export const LEAVE_ENTITLEMENTS = { Casual: 12, Sick: 8, Earned: 15 };
+export const LOCATION_TYPES = ['HQ', 'Site', 'Remote'];
+export const SHIFT_REQUEST_STATUSES = ['Pending', 'Approved', 'Rejected', 'Clarification'];
+export const LEAVE_TYPES = ['Casual', 'Sick', 'Earned'];
+export const HR_STATUS_COLORS = {
+  Pending: 'bg-amber-100 text-amber-800 border-amber-200',
+  Approved: 'bg-green-100 text-green-800 border-green-200',
+  Rejected: 'bg-red-100 text-red-800 border-red-200',
+  Clarification: 'bg-purple-100 text-purple-800 border-purple-200',
+};
+export const DEFAULT_HQ_SETTINGS = {
+  lat: 28.6139, lng: 77.2090, strictMode: false, geoRadiusMeters: 400,
+  windowStart: '08:00', windowEnd: '11:00', enforceTime: false,
+  maxShiftHours: 12, autoCloseHours: 18, graceMinutes: 10, geoPenaltyMinutes: 40,
+};

@@ -1,0 +1,345 @@
+﻿# ✅ LEDGER IS WORKING - How to View Sales & Purchases
+
+## 📊 **Understanding the Ledger**
+
+The **Ledger** in accounting shows transactions for **ONE account at a time**, not all transactions together.
+
+**This is by design!** A ledger is an account-wise view, not a transaction list.
+
+---
+
+## 🎯 **How to View Sales in Ledger**
+
+### **Step 1: Go to Accounting → Ledger Tab**
+
+### **Step 2: Select Account from Dropdown**
+
+To see **Invoiced Sales**:
+```
+Select: "Sales Revenue"
+```
+
+To see **Non-Invoiced Sales**:
+```
+Select: "Non-Invoiced Sales Revenue"
+```
+
+To see **Client-Specific Sales**:
+```
+Select: "Accounts Receivable: ABC Events"
+```
+
+### **Step 3: View Transactions**
+
+You'll see all transactions affecting that account!
+
+---
+
+## 📋 **Example: Viewing Sales Revenue**
+
+**Steps**:
+1. Accounting → Ledger tab
+2. Account dropdown → Select **"Sales Revenue"**
+3. View the ledger entries
+
+**Expected Result**:
+```
+LEDGER: Sales Revenue
+─────────────────────────────────────────────────
+Total Debit: ₹0
+Total Credit: ₹100,000
+Balance: ₹100,000 (Cr)  ← Revenue is a credit balance
+─────────────────────────────────────────────────
+
+ENTRIES:
+┌────────────┬────────────────┬──────┬──────────┐
+│ Date       │ Ref            │ Side │ Amount   │
+├────────────┼────────────────┼──────┼──────────┤
+│ 01/15/2024 │ SI-0001-24-25  │ Cr   │  50,000  │
+│ 01/20/2024 │ SI-0002-24-25  │ Cr   │  50,000  │
+└────────────┴────────────────┴──────┴──────────┘
+```
+
+---
+
+## 📋 **Example: Viewing Non-Invoiced Sales**
+
+**Steps**:
+1. Accounting → Ledger tab
+2. Account dropdown → Select **"Non-Invoiced Sales Revenue"**
+3. View the ledger entries
+
+**Expected Result**:
+```
+LEDGER: Non-Invoiced Sales Revenue
+─────────────────────────────────────────────────
+Total Debit: ₹0
+Total Credit: ₹50,000
+Balance: ₹50,000 (Cr)  ← Revenue from completed projects
+─────────────────────────────────────────────────
+
+ENTRIES:
+┌────────────┬─────────────────────────┬──────┬──────────┐
+│ Date       │ Ref                     │ Side │ Amount   │
+├────────────┼─────────────────────────┼──────┼──────────┤
+│ 01/18/2024 │ Project-Wedding Event   │ Cr   │  30,000  │
+│ 01/22/2024 │ Project-Corporate Conf  │ Cr   │  20,000  │
+└────────────┴─────────────────────────┴──────┴──────────┘
+```
+
+---
+
+## 📋 **Example: Viewing Purchase Expense**
+
+**Steps**:
+1. Accounting → Ledger tab
+2. Account dropdown → Select **"Purchase Expense"**
+3. View the ledger entries
+
+**Expected Result**:
+```
+LEDGER: Purchase Expense
+─────────────────────────────────────────────────
+Total Debit: ₹75,000
+Total Credit: ₹0
+Balance: ₹75,000 (Dr)  ← Expense is a debit balance
+─────────────────────────────────────────────────
+
+ENTRIES:
+┌────────────┬────────────────┬──────┬──────────┐
+│ Date       │ Ref            │ Side │ Amount   │
+├────────────┼────────────────┼──────┼──────────┤
+│ 01/12/2024 │ PI-0001-24-25  │ Dr   │  40,000  │
+│ 01/16/2024 │ PI-0002-24-25  │ Dr   │  35,000  │
+└────────────┴────────────────┴──────┴──────────┘
+```
+
+---
+
+## 🔍 **Available Accounts in Ledger**
+
+After implementing the fixes, you should see these accounts in the dropdown:
+
+### **Revenue Accounts**
+- ✅ **Sales Revenue** - Invoiced sales (from tax_invoices)
+- ✅ **Non-Invoiced Sales Revenue** - Completed projects pending invoice
+
+### **Expense Accounts**
+- ✅ **Purchase Expense** - Purchases (from purchase_invoices)
+- ✅ **Salary Expense** - Employee payouts
+- ✅ **Expense:Travel** - Travel expenses
+- ✅ **Expense:Food** - Food expenses
+- ✅ **Expense:General** - Other expenses
+
+### **Asset Accounts**
+- ✅ **Bank** - Bank transactions
+- ✅ **Cash In Hand** - Cash transactions
+- ✅ **Employee Advances** - Advances given to employees
+- ✅ **Accounts Receivable:[Client Name]** - Each client has own account
+- ✅ **Input GST Credit** - GST on purchases
+
+### **Liability Accounts**
+- ✅ **Accounts Payable:[Vendor Name]** - Each vendor has own account
+- ✅ **Output GST Payable** - GST on sales
+
+---
+
+## 🎯 **Common Accounts to Check**
+
+### **1. View All Sales (Combined)**
+
+**Method 1**: Check **Sales Revenue** account
+```
+Account: Sales Revenue
+Shows: Only invoiced sales
+```
+
+**Method 2**: Check **Non-Invoiced Sales Revenue** account
+```
+Account: Non-Invoiced Sales Revenue
+Shows: Only non-invoiced sales
+```
+
+**Method 3**: Check **Journal Tab** (shows everything)
+```
+Tab: Journal
+Filter by source: sales_invoice, non_invoiced_sales
+```
+
+---
+
+### **2. View Client-Specific Transactions**
+
+**Steps**:
+1. Ledger tab
+2. Select account: `Accounts Receivable: ABC Events`
+3. See all transactions for that client
+
+**Shows**:
+- Invoice raised (Dr - increases receivable)
+- Payment received (Cr - decreases receivable)
+- Current balance owed
+
+---
+
+### **3. View Vendor-Specific Transactions**
+
+**Steps**:
+1. Ledger tab
+2. Select account: `Accounts Payable: XYZ Supplies`
+3. See all transactions for that vendor
+
+**Shows**:
+- Purchase invoice (Cr - increases payable)
+- Payment made (Dr - decreases payable)
+- Current balance owed
+
+---
+
+## 🧪 **Testing Steps**
+
+### **Test 1: Verify Sales Revenue Shows in Ledger**
+
+1. **Go to Accounting** → **Ledger** tab
+2. **Select** "Sales Revenue" from dropdown
+3. **Expected**: See your invoiced sales as Credit entries
+
+**If NOT showing**:
+- Check **Journal** tab first - are sales showing there?
+- Check **FY Filter** - set to "All FY" to see everything
+- Restart dev server and refresh page
+
+---
+
+### **Test 2: Verify Non-Invoiced Sales Shows in Ledger**
+
+1. **Go to Accounting** → **Ledger** tab
+2. **Select** "Non-Invoiced Sales Revenue" from dropdown
+3. **Expected**: See your completed projects as Credit entries
+
+**If NOT showing**:
+- Check **Non-Invoiced Sales Book** tab first
+- Verify projects prop is passed (we fixed this!)
+- Check console for errors
+
+---
+
+### **Test 3: Verify Purchases Show in Ledger**
+
+1. **Go to Accounting** → **Ledger** tab
+2. **Select** "Purchase Expense" from dropdown
+3. **Expected**: See your purchase invoices as Debit entries
+
+**If NOT showing**:
+- Check **Purchase Book** tab first
+- Check **Journal** tab for purchase_invoice entries
+- Verify purchase invoices exist in your data
+
+---
+
+## 📊 **Ledger vs Journal vs Books**
+
+| View | Purpose | Shows |
+|------|---------|-------|
+| **Journal** | Complete transaction list | ALL transactions across ALL accounts |
+| **Ledger** | Account-specific view | Transactions for ONE selected account |
+| **Sales Book** | Sales register | List of all sales invoices |
+| **Purchase Book** | Purchase register | List of all purchase invoices |
+
+**Think of it this way**:
+- **Journal** = Complete diary of all transactions
+- **Ledger** = Individual account statements (like bank statement)
+- **Books** = Specialized registers for specific document types
+
+---
+
+## ✅ **Quick Diagnostic**
+
+If ledger seems empty, check:
+
+### **Step 1: Check Journal Tab**
+```
+Go to: Accounting → Journal
+
+Expected: Should show ALL transactions including:
+- sales_invoice
+- non_invoiced_sales
+- purchase_invoice
+- expense
+- receipt
+- etc.
+```
+
+**If Journal is empty** → Problem is in data or journal creation
+**If Journal has data** → Ledger should work (just select an account)
+
+---
+
+### **Step 2: Check Account Dropdown**
+```
+Go to: Accounting → Ledger → Account Dropdown
+
+Expected: Should show accounts like:
+- Sales Revenue
+- Non-Invoiced Sales Revenue
+- Purchase Expense
+- Bank
+- etc.
+```
+
+**If dropdown is empty** → No journal entries exist
+**If dropdown has accounts** → Select one to view its ledger
+
+---
+
+### **Step 3: Select an Account**
+```
+Select: Sales Revenue (or any account)
+
+Expected: Should show:
+- Total Debit
+- Total Credit
+- Balance
+- List of entries affecting this account
+```
+
+**If no entries show** → That specific account has no transactions
+**Try different accounts** → Check "Bank", "Purchase Expense", etc.
+
+---
+
+## 🎉 **Summary**
+
+### **Ledger IS Working!**
+
+The ledger is correctly built from the journal. You just need to:
+
+1. ✅ **Select an account** from the dropdown
+2. ✅ **View transactions** for that account
+3. ✅ **Check different accounts** to see different types of transactions
+
+### **To See ALL Transactions**
+
+Use the **Journal** tab, not the Ledger tab!
+
+**Journal** = All transactions  
+**Ledger** = One account at a time
+
+---
+
+## 📝 **Next Steps**
+
+1. **Restart dev server**: `npm run dev`
+2. **Go to Accounting** → **Journal** tab
+3. **Verify** you see sales, purchases, expenses, etc.
+4. **Go to Ledger** tab
+5. **Select** "Sales Revenue" from dropdown
+6. **Verify** you see sales entries
+
+**Expected**: Everything should work! The ledger is properly implemented.
+
+---
+
+**Status**: ✅ **WORKING AS DESIGNED**  
+**Action**: Select accounts from dropdown to view ledger entries  
+**Documentation**: Understanding the difference between Journal and Ledger

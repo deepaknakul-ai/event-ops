@@ -3,9 +3,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { TrendingUp, TrendingDown, Edit, Trash2, Download, Lock, Filter } from 'lucide-react';
 import { addDoc, updateDoc, deleteDoc, doc, collection } from 'firebase/firestore';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import { ConfirmDeleteModal } from '../components/Shared';
-import { formatCurrency, getEffectivePOCost, getFYFromDate } from '../utils/helpers';
+import { formatCurrency, getEffectivePOCost, getFYFromDate, fmtDate } from '../utils/helpers';
 import { can } from '../utils/permissions';
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
@@ -15,12 +15,46 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
     entity_id: '', amount: '', date: new Date().toISOString().split('T')[0],
-    mode: 'Bank Transfer', reference: '', remarks: '', project_id: ''
+    mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: ''
   });
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [fyFilter, setFyFilter] = useState('all');
+
+  const getEntityCompanies = (entity) => {
+    if (!entity) return [];
+    const primary = {
+      id: 'primary',
+      name: entity.name || 'Primary Company',
+      gstin: entity.gstin || '',
+      address: entity.address || '',
+    };
+    const extras = (entity.companies || []).map(c => ({
+      id: c.id,
+      name: c.name || 'Branch',
+      gstin: c.gstin || '',
+      address: c.address || '',
+    }));
+    return [primary, ...extras];
+  };
+
+  const financeEntityOptions = useMemo(() => {
+    const rows = [];
+    clients.forEach(c => {
+      const companies = getEntityCompanies(c);
+      companies.forEach(co => {
+        rows.push({
+          value: co.id === 'primary' ? c.id : `${c.id}::${co.id}`,
+          entity_id: c.id,
+          company_id: co.id,
+          label: co.id === 'primary' ? c.name : `${c.name} — ${co.name}`,
+          type: c.type,
+        });
+      });
+    });
+    return rows;
+  }, [clients]);
 
   const isFYLocked = (dateStr) => lockedFYs.includes(getFYFromDate(dateStr));
 
@@ -40,7 +74,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
         mode: item.mode,
         reference: item.reference,
         remarks: item.remarks,
-        project_id: item.project_id || ''
+      project_id: item.project_id || '',
+      party_company_id: item.party_company_id || 'primary'
     });
   };
 
@@ -67,7 +102,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     setEditingId(null);
     setForm({
         entity_id: '', amount: '', date: new Date().toISOString().split('T')[0],
-        mode: 'Bank Transfer', reference: '', remarks: '', project_id: ''
+      mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: ''
     });
   };
 
@@ -77,11 +112,17 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     if (!form.entity_id || !form.amount) return alert("Select Client and Amount");
     if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
     const client = clients.find(c => c.id === form.entity_id);
+    const companies = getEntityCompanies(client);
+    const selectedCompany = companies.find(c => c.id === (form.party_company_id || 'primary')) || companies[0] || null;
 
     const data = {
       client_id: client.id,
       client_name: client.name,
       project_id: form.project_id || 'general', // General or Specific Project
+      party_company_id: selectedCompany?.id || '',
+      party_company_name: selectedCompany?.name || '',
+      party_company_gstin: selectedCompany?.gstin || '',
+      party_company_address: selectedCompany?.address || '',
       amount: parseFloat(form.amount),
       date: form.date,
       mode: form.mode,
@@ -148,11 +189,17 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     if (!form.entity_id || !form.amount) return alert("Select Vendor and Amount");
     if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
     const vendor = clients.find(c => c.id === form.entity_id);
+    const companies = getEntityCompanies(vendor);
+    const selectedCompany = companies.find(c => c.id === (form.party_company_id || 'primary')) || companies[0] || null;
 
     const data = {
       vendor_id: vendor.id,
       vendor_name: vendor.name,
       project_id: form.project_id || 'general',
+      party_company_id: selectedCompany?.id || '',
+      party_company_name: selectedCompany?.name || '',
+      party_company_gstin: selectedCompany?.gstin || '',
+      party_company_address: selectedCompany?.address || '',
       amount: parseFloat(form.amount),
       date: form.date,
       mode: form.mode,
@@ -262,6 +309,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     const rows = filteredList.map(item => ({
       Date: item.date,
       Name: item.client_name || item.vendor_name || item.employee_name || '',
+      Company: item.party_company_name || '',
       Project: item.project_id === 'general' || !item.project_id
         ? 'General Account'
         : projects.find(p => p.id === item.project_id)?.project_name || item.project_id,
@@ -306,12 +354,23 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
             <div className="space-y-3">
               <div>
                 <label className="text-xs font-bold text-slate-700 uppercase">{activeTab === 'client_in' ? 'Received From Client' : activeTab === 'vendor_out' ? 'Pay To Vendor' : 'Pay To Employee'}</label>
-                <select className="w-full rounded border p-2 bg-slate-50 text-black" value={form.entity_id} onChange={e => setForm({...form, entity_id: e.target.value})}>
+                <select className="w-full rounded border p-2 bg-slate-50 text-black" value={form.entity_id ? (form.party_company_id && form.party_company_id !== 'primary' ? `${form.entity_id}::${form.party_company_id}` : form.entity_id) : ''} onChange={e => {
+                  if (activeTab === 'emp_out') {
+                    setForm({...form, entity_id: e.target.value, party_company_id: 'primary'});
+                    return;
+                  }
+                  const selected = financeEntityOptions.find(x => x.value === e.target.value);
+                  setForm({
+                    ...form,
+                    entity_id: selected?.entity_id || '',
+                    party_company_id: selected?.company_id || 'primary'
+                  });
+                }}>
                   <option value="">-- Select --</option>
                   {activeTab === 'client_in'
-                    ? clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)
+                    ? financeEntityOptions.filter(c => c.type !== 'Vendor').map(c => <option key={c.value} value={c.value}>{c.label}</option>)
                     : activeTab === 'vendor_out'
-                      ? clients.filter(c => c.type === 'Vendor' || c.type === 'Both').map(v => <option key={v.id} value={v.id}>{v.name}</option>)
+                      ? financeEntityOptions.filter(c => c.type === 'Vendor' || c.type === 'Both').map(v => <option key={v.value} value={v.value}>{v.label}</option>)
                       : employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)
                   }
                 </select>
@@ -335,7 +394,15 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
               {(activeTab === 'client_in' || activeTab === 'vendor_out') && (
                 <div>
                    <label className="text-xs font-bold text-slate-700 uppercase">Against Project (Optional)</label>
-                   <select className="w-full rounded border p-2 bg-slate-50 text-black" value={form.project_id} onChange={e => setForm({...form, project_id: e.target.value})}>
+                   <select className="w-full rounded border p-2 bg-slate-50 text-black" value={form.project_id} onChange={e => {
+                     const selectedProjectId = e.target.value;
+                     const selectedProject = projects.find(p => p.id === selectedProjectId);
+                     setForm({
+                       ...form,
+                       project_id: selectedProjectId,
+                       party_company_id: selectedProject?.party_company_id || form.party_company_id,
+                     });
+                   }}>
                       <option value="">General / On Account</option>
                       {projects.filter(p => p.client_id === form.entity_id).map(p => (
                         <option key={p.id} value={p.id}>{p.project_name} ({p.status})</option>
@@ -343,6 +410,25 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                    </select>
                 </div>
               )}
+
+              {(activeTab === 'client_in' || activeTab === 'vendor_out') && form.entity_id && (() => {
+                const selectedEntity = clients.find(c => c.id === form.entity_id);
+                const companies = getEntityCompanies(selectedEntity);
+                return (
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 uppercase">Company / Branch</label>
+                    <select
+                      className="w-full rounded border p-2 bg-slate-50 text-black"
+                      value={form.party_company_id || 'primary'}
+                      onChange={e => setForm({ ...form, party_company_id: e.target.value })}
+                    >
+                      {companies.map(c => (
+                        <option key={c.id} value={c.id}>{c.name}{c.gstin ? ` (${c.gstin})` : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -438,13 +524,16 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                    <div className="flex items-start justify-between gap-2">
                      <div className="flex-1 min-w-0">
                        <div className="font-semibold text-sm text-slate-800 truncate">{item.client_name || item.vendor_name || item.employee_name}</div>
+                       {(item.party_company_name && (activeTab === 'client_in' || activeTab === 'vendor_out')) && (
+                         <div className="text-[11px] text-indigo-600 mt-0.5">{item.party_company_name}</div>
+                       )}
                        <div className="text-xs text-slate-500 mt-0.5">
                          {activeTab === 'client_in' || activeTab === 'vendor_out'
                            ? (item.project_id === 'general' || !item.project_id ? 'General Account' : projects.find(p => p.id === item.project_id)?.project_name)
                            : item.mode}
                        </div>
                        <div className="flex gap-3 mt-1 text-xs text-slate-400">
-                         <span>{item.date}</span>
+                         <span>{fmtDate(item.date)}</span>
                          {item.reference && <span className="truncate max-w-[120px]">Ref: {item.reference}</span>}
                        </div>
                      </div>
@@ -473,6 +562,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                    <tr>
                      <th className="p-3">Date</th>
                      <th className="p-3">Name</th>
+                     <th className="p-3">Company</th>
                      <th className="p-3">{activeTab === 'client_in' ? 'Project' : 'Mode'}</th>
                      <th className="p-3">Reference</th>
                      <th className="p-3 text-right">Amount</th>
@@ -483,7 +573,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                    {paginatedList.map((item) => {
                     if (item._type === 'fy_header') return (
                       <tr key={`fh-${item.fy}`} className={item.isLocked ? 'bg-red-50' : 'bg-indigo-50'}>
-                        <td colSpan={5} className={`p-3 font-bold text-sm ${item.isLocked ? 'text-red-800' : 'text-indigo-800'}`}>
+                        <td colSpan={6} className={`p-3 font-bold text-sm ${item.isLocked ? 'text-red-800' : 'text-indigo-800'}`}>
                           <span className="flex items-center gap-2">{item.isLocked && <Lock size={13} />}FY {item.fy} — {item.count} records — Total: {formatCurrency(item.total)}</span>
                         </td>
                         <td className="p-3 text-center">
@@ -494,8 +584,9 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                     const rowLocked = isFYLocked(item.date);
                     return (
                     <tr key={item.id} className={`hover:bg-slate-50 ${rowLocked ? 'opacity-75' : ''}`}>
-                       <td className="p-3 text-slate-700">{item.date}</td>
+                       <td className="p-3 text-slate-700">{fmtDate(item.date)}</td>
                        <td className="p-3 font-medium text-slate-800">{item.client_name || item.vendor_name || item.employee_name}</td>
+                       <td className="p-3 text-slate-500 text-xs">{(activeTab === 'client_in' || activeTab === 'vendor_out') ? (item.party_company_name || '-') : '-'}</td>
                        <td className="p-3 text-slate-500">
                          {activeTab === 'client_in' || activeTab === 'vendor_out'
                            ? (item.project_id === 'general' || !item.project_id ? 'General Account' : projects.find(p=>p.id===item.project_id)?.project_name)

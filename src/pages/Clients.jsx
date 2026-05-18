@@ -5,12 +5,13 @@ import {
   Calendar, FileText, CreditCard, Briefcase, CheckCircle, Clock
 } from 'lucide-react';
 import {
-  doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc
+  doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
+import { upsertPartyAccount } from '../utils/partyAccounts';
 
 const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], role, db, appId, logAction }) => {
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -18,8 +19,9 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   const [searchTerm, setSearchTerm] = useState('');
   const [formData, setFormData] = useState({
     name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [],
-    billing_terms: 'Net 15', custom_terms: '', remarks: ''
+    billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: []
   });
+  const [newCompany, setNewCompany] = useState({ name: '', gstin: '', state: '', address: '' });
   const [newContact, setNewContact] = useState({ name: '', role: '', phone: '', email: '' });
   const [selectedVendorForAssets, setSelectedVendorForAssets] = useState(null);
   const [vendorAssetForm, setVendorAssetForm] = useState({ name: '', category: 'Sound', qty: 1, price: 0 });
@@ -34,18 +36,45 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
   const dashData = useMemo(() => {
     if (!dashboardClient) return null;
-    const cid = dashboardClient.id;
-    const clientProjects = projects.filter(p => p.client_id === cid);
-    const clientPayments = payments.filter(p => p.client_id === cid);
+    const rootClient = dashboardClient.rootClient || dashboardClient;
+    const cid = rootClient.id;
+    const branchId = dashboardClient.isBranch ? dashboardClient.branch_id : null;
+    const isBranchView = !!branchId;
+
+    const getProjectCompanyId = (p) => p.party_company_id || 'primary';
+    const getPaymentCompanyId = (pay) => {
+      if (pay.party_company_id) return pay.party_company_id;
+      const linkedProject = projects.find(pr => pr.id === pay.project_id);
+      return linkedProject?.party_company_id || 'primary';
+    };
+
+    const matchesBranchProject = (p) => !isBranchView || getProjectCompanyId(p) === branchId;
+    const matchesBranchPayment = (pay) => !isBranchView || getPaymentCompanyId(pay) === branchId;
+
+    const companyOptions = [
+      { id: 'primary', name: rootClient.name || 'Primary Company', gstin: rootClient.gstin || '' },
+      ...((rootClient.companies || []).map(c => ({ id: c.id, name: c.name || 'Branch', gstin: c.gstin || '' }))),
+    ];
+    // Deduplicate by id in case of Firestore listener edge cases
+    const seen = new Set();
+    const clientProjects = projects.filter(p => {
+      if (p.client_id !== cid) return false;
+      if (!matchesBranchProject(p)) return false;
+      if (seen.has(p.id)) return false;
+      seen.add(p.id);
+      return true;
+    });
+    const clientPayments = payments.filter(p => p.client_id === cid && matchesBranchPayment(p));
 
     // Revenue & billing
-    const invoicedProjects = clientProjects.filter(p => p.invoice_status === 'Invoiced');
+    // "Closed" status means project is fully done/invoiced per lifecycle (Closed = invoiced)
+    const invoicedProjects = clientProjects.filter(p => p.invoice_status === 'Invoiced' || p.status === 'Closed');
     const totalBilled = invoicedProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0);
     const totalReceived = clientPayments.reduce((s, p) => s + (p.amount || 0), 0);
     const outstanding = totalBilled - totalReceived;
 
     // Overdue: invoiced project whose invoice_date > credit term days ago and not fully paid
-    const termDays = parseInt((dashboardClient.billing_terms || 'Net 15').replace('Net ', ''), 10) || 15;
+    const termDays = parseInt((rootClient.billing_terms || 'Net 15').replace('Net ', ''), 10) || 15;
     const now = new Date();
     const overdueProjects = invoicedProjects.filter(p => {
       if (!p.invoice_date) return false;
@@ -58,7 +87,8 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     // Project pipeline
     const active = clientProjects.filter(p => ['Quoted', 'Confirmed', 'Ongoing'].includes(p.status));
     const completed = clientProjects.filter(p => ['Completed', 'Closed'].includes(p.status));
-    const notInvoiced = completed.filter(p => p.invoice_status !== 'Invoiced');
+    // "Not invoiced" = Completed status (not yet Closed) and not explicitly marked Invoiced
+    const notInvoiced = completed.filter(p => p.status !== 'Closed' && p.invoice_status !== 'Invoiced');
 
     // GST
     const totalGST = invoicedProjects.reduce((s, p) => {
@@ -67,9 +97,12 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       return s + (grand - net);
     }, 0);
 
-    // Lifetime revenue
-    const lifetimeRevenue = clientProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0);
-    const firstProject = clientProjects.sort((a, b) => new Date(a.start_date || a.created_at) - new Date(b.start_date || b.created_at))[0];
+    // Lifetime revenue: only delivered (Completed + Closed) to avoid inflating with quotes
+    const deliveredProjects = clientProjects.filter(p => ['Completed', 'Closed'].includes(p.status));
+    const lifetimeRevenue = deliveredProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0);
+    const pipelineRevenue = active.reduce((s, p) => s + getProjectGrandTotal(p), 0);
+    // Sort a copy to avoid mutating the filtered array
+    const firstProject = [...clientProjects].sort((a, b) => new Date(a.start_date || a.created_at) - new Date(b.start_date || b.created_at))[0];
     const clientSince = firstProject ? (firstProject.start_date || firstProject.created_at) : null;
 
     // Top categories
@@ -81,11 +114,11 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const topCategories = Object.entries(catMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
     // Vendor data (if applicable)
-    const isVendor = dashboardClient.type === 'Vendor' || dashboardClient.type === 'Both';
+    const isVendor = rootClient.type === 'Vendor' || rootClient.type === 'Both';
 
     // Jobs: all vendor_allocations across all projects for this vendor
     const vendorAllocations = isVendor ? projects.flatMap(p =>
-      (p.vendor_allocations || []).filter(a => a.vendor_id === cid).map(a => ({
+      (p.vendor_allocations || []).filter(a => a.vendor_id === cid && (!isBranchView || (a.party_company_id || p.party_company_id || 'primary') === branchId)).map(a => ({
         ...a,
         project_id: p.id,
         project_name: p.project_name,
@@ -96,7 +129,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
     // POs: all vendor_pos across all projects for this vendor
     const vendorPOs = isVendor ? projects.flatMap(p =>
-      (p.vendor_pos || []).filter(po => po.vendor_id === cid).map(po => ({
+      (p.vendor_pos || []).filter(po => po.vendor_id === cid && (!isBranchView || (po.party_company_id || p.party_company_id || 'primary') === branchId)).map(po => ({
         ...po,
         project_id: p.id,
         project_name: p.project_name,
@@ -108,7 +141,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const totalJobBase  = vendorAllocations.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
 
     // Payments made to this vendor
-    const vendorPmts = isVendor ? vendorPayments.filter(vp => vp.vendor_id === cid) : [];
+    const vendorPmts = isVendor ? vendorPayments.filter(vp => vp.vendor_id === cid && (!isBranchView || ((vp.party_company_id || projects.find(pr => pr.id === vp.project_id)?.party_company_id || 'primary') === branchId))) : [];
     const vendorPaid = vendorPmts.reduce((s, vp) => s + (parseFloat(vp.amount) || 0), 0);
     const vendorBalance = totalJobValue - vendorPaid;
 
@@ -122,32 +155,112 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     });
     const vendorByProject = Object.values(vendorProjectMap).sort((a, b) => new Date(b.project_start || 0) - new Date(a.project_start || 0));
 
+    const branchSummaries = companyOptions.map(company => {
+      const branchProjects = projects.filter(p => p.client_id === cid && getProjectCompanyId(p) === company.id);
+      const branchPayments = payments.filter(p => p.client_id === cid && getPaymentCompanyId(p) === company.id);
+      const branchInvoiced = branchProjects.filter(p => p.invoice_status === 'Invoiced' || p.status === 'Closed');
+      const branchBilled = branchInvoiced.reduce((s, p) => s + getProjectGrandTotal(p), 0);
+      const branchReceived = branchPayments.reduce((s, p) => s + (p.amount || 0), 0);
+      const branchCompletedNotInvoiced = branchProjects.filter(p => ['Completed'].includes(p.status) && p.invoice_status !== 'Invoiced');
+      return {
+        ...company,
+        projects: branchProjects.length,
+        billed: branchBilled,
+        received: branchReceived,
+        outstanding: branchBilled - branchReceived,
+        notInvoicedCount: branchCompletedNotInvoiced.length,
+        notInvoicedAmount: branchCompletedNotInvoiced.reduce((s, p) => s + getProjectGrandTotal(p), 0),
+      };
+    }).filter(b => b.projects > 0 || b.billed > 0 || b.received > 0 || b.notInvoicedCount > 0);
+
     return {
+      rootClient,
+      isBranchView,
+      selectedBranchId: branchId,
       clientProjects, clientPayments, invoicedProjects,
       totalBilled, totalReceived, outstanding,
       overdueProjects, overdueAmt,
       active, completed, notInvoiced, totalGST,
-      lifetimeRevenue, clientSince, topCategories,
+      lifetimeRevenue, pipelineRevenue, deliveredProjects, clientSince, topCategories,
       isVendor, vendorAllocations, vendorPOs, vendorPaid, vendorBalance,
       totalJobValue, totalJobBase, vendorPmts, vendorByProject,
+      branchSummaries,
     };
   }, [dashboardClient, projects, payments, vendorPayments]);
 
 
+  const todayFyStart = (() => {
+    const d = new Date();
+    const startYear = d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear();
+    return `${startYear}-04-01`;
+  })();
+
+  const blankOpening = { amount: '', side: 'Dr', date: todayFyStart, remarks: '' };
+
   const openAdd = () => {
     setEditingId(null);
-    setFormData({ name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [], billing_terms: 'Net 15', custom_terms: '', remarks: '' });
+    setFormData({ name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [], billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: [], opening_balance: { ...blankOpening } });
+    setNewCompany({ name: '', gstin: '', state: '', address: '' });
     setIsAddOpen(true);
   };
 
   const openEdit = (client) => {
     setEditingId(client.id);
+    const ob = client.opening_balance && typeof client.opening_balance === 'object' ? client.opening_balance : null;
     setFormData({
       name: client.name, type: client.type, gstin: client.gstin || '', state: client.state || '',
       address: client.address || '', contacts: client.contacts || [],
-      billing_terms: client.billing_terms || 'Net 15', custom_terms: client.custom_terms || '', remarks: client.remarks || ''
+      billing_terms: client.billing_terms || 'Net 15', custom_terms: client.custom_terms || '', remarks: client.remarks || '',
+      companies: client.companies || [],
+      opening_balance: ob
+        ? { amount: ob.amount != null ? String(ob.amount) : '', side: ob.side || 'Dr', date: ob.date || todayFyStart, remarks: ob.remarks || '' }
+        : { ...blankOpening },
     });
+    setNewCompany({ name: '', gstin: '', state: '', address: '' });
     setIsAddOpen(true);
+  };
+
+  const generateCompanyId = () => {
+    if (window.crypto && window.crypto.getRandomValues) {
+      const bytes = new Uint8Array(8);
+      window.crypto.getRandomValues(bytes);
+      return `co_${Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')}`;
+    }
+    return `co_${Math.random().toString(36).slice(2, 12)}`;
+  };
+
+  const handleAddCompany = () => {
+    const name = (newCompany.name || '').trim();
+    const gstin = (newCompany.gstin || '').trim().toUpperCase();
+    const address = (newCompany.address || '').trim();
+    if (!name || !gstin || !address) return alert('Company/Branch Name, GSTIN and Address are required.');
+
+    const dupInForm = (formData.companies || []).some(c => (c.gstin || '').trim().toUpperCase() === gstin);
+    if (dupInForm || (formData.gstin || '').trim().toUpperCase() === gstin) {
+      return alert('This GSTIN is already added in this client record.');
+    }
+
+    setFormData(prev => ({
+      ...prev,
+      companies: [
+        ...(prev.companies || []),
+        {
+          id: generateCompanyId(),
+          name,
+          gstin,
+          state: newCompany.state || '',
+          address,
+        },
+      ],
+    }));
+    setNewCompany({ name: '', gstin: '', state: '', address: '' });
+  };
+
+  const handleRemoveCompany = (companyId) => {
+    setFormData(prev => ({
+      ...prev,
+      companies: (prev.companies || []).filter(c => c.id !== companyId),
+    }));
   };
 
   const handleDelete = async (id) => {
@@ -160,6 +273,21 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       message: `Permanently delete "${clientName}"? All associated data will be lost and this cannot be undone.`,
       onConfirm: async () => {
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', id));
+        // Cleanup mirror docs so the ledger doesn't keep an orphaned
+        // "Party: <name>" row after the source client is gone.
+        try {
+          const obRef = doc(db, 'artifacts', appId, 'public', 'data', 'opening_balances', `clientob_${id}`);
+          const obSnap = await getDoc(obRef);
+          if (obSnap.exists()) {
+            await deleteDoc(obRef);
+            logAction('opening_balances', 'delete', `clientob_${id}`, null, `OB removed (client ${clientName} deleted)`);
+          }
+        } catch (e) { console.warn('Opening balance cleanup failed:', e?.message); }
+        try {
+          const paRef = doc(db, 'artifacts', appId, 'public', 'data', 'party_accounts', id);
+          const paSnap = await getDoc(paRef);
+          if (paSnap.exists()) await deleteDoc(paRef);
+        } catch (e) { console.warn('Party account cleanup failed:', e?.message); }
         logAction('clients', 'delete', id, { name: clientName }, clientName);
       }
     });
@@ -179,47 +307,153 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
   const handleSave = async () => {
     if (editingId ? !can(role, 'clients', 'edit') : !can(role, 'clients', 'create')) return alert('Access denied: insufficient permissions.');
-    if (formData.gstin) {
-      const val = validateGSTIN(formData.gstin, formData.state);
+    const normalizedPrimaryGST = (formData.gstin || '').trim().toUpperCase();
+    if (normalizedPrimaryGST) {
+      const val = validateGSTIN(normalizedPrimaryGST, formData.state);
       if (!val.valid) return alert(`GST Error: ${val.msg}`);
     }
 
+    const normalizedCompanies = (formData.companies || []).map(c => ({
+      id: c.id || generateCompanyId(),
+      name: (c.name || '').trim(),
+      gstin: (c.gstin || '').trim().toUpperCase(),
+      state: c.state || '',
+      address: (c.address || '').trim(),
+    })).filter(c => c.name && c.gstin && c.address);
+
+    for (const company of normalizedCompanies) {
+      const val = validateGSTIN(company.gstin, company.state);
+      if (!val.valid) return alert(`GST Error in company/branch "${company.name}": ${val.msg}`);
+    }
+
+    const ownGstSet = new Set();
+    if (normalizedPrimaryGST) ownGstSet.add(normalizedPrimaryGST);
+    for (const company of normalizedCompanies) {
+      if (ownGstSet.has(company.gstin)) {
+        return alert(`Duplicate GSTIN inside this client: ${company.gstin}`);
+      }
+      ownGstSet.add(company.gstin);
+    }
+
     const doSave = async () => {
-      const data = { ...formData, updated_at: serverTimestamp() };
+      const obAmount = parseFloat(formData.opening_balance?.amount || 0) || 0;
+      const obSide = (formData.opening_balance?.side || 'Dr').toUpperCase() === 'CR' ? 'Cr' : 'Dr';
+      const obDate = formData.opening_balance?.date || todayFyStart;
+      const obRemarks = (formData.opening_balance?.remarks || '').trim();
+      const opening_balance = obAmount > 0
+        ? { amount: obAmount, side: obSide, date: obDate, fy: getFYFromDate(obDate), remarks: obRemarks }
+        : null;
+
+      const data = {
+        ...formData,
+        gstin: normalizedPrimaryGST,
+        companies: normalizedCompanies,
+        opening_balance,
+        updated_at: serverTimestamp()
+      };
+      let clientId;
       if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', editingId), data);
         logAction('clients', 'update', editingId, data, formData.name);
+        clientId = editingId;
       } else {
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'clients'), { ...data, created_at: serverTimestamp() });
         logAction('clients', 'create', docRef.id, data, formData.name);
+        clientId = docRef.id;
       }
+
+      // M-5: ensure party_accounts/{clientId} exists so the ledger resolves
+      // this party's display name (and links opening-balance via accountId).
+      // 'Both' (client + vendor) is normalised to 'client' for the registry —
+      // toLedger only cares about the stable id; the dual nature is encoded
+      // by the journal rows that reference it.
+      const entityType = formData.type === 'Vendor' ? 'vendor' : 'client';
+      try {
+        await upsertPartyAccount(db, appId, clientId, entityType, formData.name);
+        // Also keep entity_type fresh in case the user toggled Client⇄Vendor.
+        const paRef = doc(db, 'artifacts', appId, 'public', 'data', 'party_accounts', clientId);
+        const paSnap = await getDoc(paRef);
+        if (paSnap.exists() && paSnap.data().entity_type !== entityType) {
+          await updateDoc(paRef, { entity_type: entityType, updated_at: serverTimestamp() });
+        }
+      } catch { /* non-fatal */ }
+
+      // Mirror opening balance into opening_balances collection so the
+      // accounting snapshot picks it up. Stable doc id: clientob_{clientId}.
+      const obRef = doc(db, 'artifacts', appId, 'public', 'data', 'opening_balances', `clientob_${clientId}`);
+      if (opening_balance) {
+        await setDoc(obRef, {
+          fy: opening_balance.fy,
+          date: opening_balance.date,
+          account_name: `Party: ${formData.name}`,
+          account_id: `party_${clientId}`,
+          side: opening_balance.side,
+          amount: opening_balance.amount,
+          remarks: opening_balance.remarks || `Opening balance for ${formData.name}`,
+          source: 'client_initial',
+          entity_id: clientId,
+          updated_at: serverTimestamp(),
+        }, { merge: true });
+        logAction('opening_balances', editingId ? 'update' : 'create', `clientob_${clientId}`, opening_balance, `OB ${formData.name}`);
+      } else {
+        // No opening balance — remove any prior mirror doc.
+        try {
+          const prior = await getDoc(obRef);
+          if (prior.exists()) {
+            await deleteDoc(obRef);
+            logAction('opening_balances', 'delete', `clientob_${clientId}`, null, `OB removed for ${formData.name}`);
+          }
+        } catch { /* ignore */ }
+      }
+
       setIsAddOpen(false);
     };
 
-    // Duplicate detection — check GSTIN and contact phone numbers
-    const newGstin = formData.gstin?.trim().toUpperCase();
+    // Duplicate detection — check GSTIN globally (client + branch GSTINs) and contact phones
+    const newGstin = normalizedPrimaryGST;
     const newPhones = (formData.contacts || []).map(c => c.phone?.trim()).filter(Boolean);
+    const newAllGstins = new Set([newGstin, ...normalizedCompanies.map(c => c.gstin)].filter(Boolean));
 
-    const duplicates = clients.filter(c => {
+    const gstCollisions = clients.filter(c => {
       if (editingId && c.id === editingId) return false; // skip self when editing
-      const gstinMatch = newGstin && c.gstin?.trim().toUpperCase() === newGstin;
-      const existingPhones = (c.contacts || []).map(x => x.phone?.trim()).filter(Boolean);
-      const phoneMatch = newPhones.some(p => existingPhones.includes(p));
-      return gstinMatch || phoneMatch;
+      const existingGstins = new Set([
+        (c.gstin || '').trim().toUpperCase(),
+        ...((c.companies || []).map(x => (x.gstin || '').trim().toUpperCase()))
+      ].filter(Boolean));
+      const gstinMatch = Array.from(newAllGstins).some(g => existingGstins.has(g));
+      return gstinMatch;
     });
 
-    if (duplicates.length > 0) {
-      const reasons = duplicates.map(d => {
+    if (gstCollisions.length > 0) {
+      const reasons = gstCollisions.map(d => {
         const parts = [];
-        if (newGstin && d.gstin?.trim().toUpperCase() === newGstin) parts.push('same GSTIN');
-        const existingPhones = (d.contacts || []).map(x => x.phone?.trim()).filter(Boolean);
-        if (newPhones.some(p => existingPhones.includes(p))) parts.push('matching phone');
+        const existingGstins = new Set([
+          (d.gstin || '').trim().toUpperCase(),
+          ...((d.companies || []).map(x => (x.gstin || '').trim().toUpperCase()))
+        ].filter(Boolean));
+        const collidingGst = Array.from(newAllGstins).filter(g => existingGstins.has(g));
+        if (collidingGst.length > 0) parts.push(`same GSTIN: ${collidingGst.join(', ')}`);
         return `"${d.name}" (${parts.join(' & ')})`;
+      }).join('; ');
+      return alert(`GSTIN must be unique across all clients and branches. Conflicts found: ${reasons}`);
+    }
+
+    const phoneDuplicates = clients.filter(c => {
+      if (editingId && c.id === editingId) return false;
+      const existingPhones = (c.contacts || []).map(x => x.phone?.trim()).filter(Boolean);
+      return newPhones.some(p => existingPhones.includes(p));
+    });
+
+    if (phoneDuplicates.length > 0) {
+      const reasons = phoneDuplicates.map(d => {
+        const existingPhones = (d.contacts || []).map(x => x.phone?.trim()).filter(Boolean);
+        const commonPhones = newPhones.filter(p => existingPhones.includes(p));
+        return `"${d.name}" (matching phone: ${commonPhones.join(', ')})`;
       }).join('; ');
       setConfirmModal({
         isOpen: true,
         title: '⚠️ Possible Duplicate Client',
-        message: `A similar client already exists: ${reasons}.\n\nAre you sure you want to save this as a separate entry?`,
+        message: `A similar client already exists: ${reasons}.\n\nDo you still want to save this as a separate entry?`,
         onConfirm: doSave,
       });
       return;
@@ -338,9 +572,106 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     alert('Ledger link copied to clipboard.');
   };
 
-  const filteredClients = clients.filter(client =>
-    client.name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const handleOpenLedgerPage = async (client) => {
+    const baseClient = client.rootClient || client;
+    let token = baseClient.ledger_link_token;
+
+    // Reuse existing token when available.
+    if (!token) {
+      if (!can(role, 'clients', 'edit')) {
+        alert('Ledger link is not generated yet. Please ask admin/manager to generate it first.');
+        return;
+      }
+      token = generateLedgerToken();
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', baseClient.id), {
+        ledger_link_token: token,
+        ledger_link_enabled: true,
+        ledger_link_created_at: new Date().toISOString()
+      });
+      logAction('clients', 'create_ledger_link', baseClient.id, { token }, baseClient.name);
+    }
+
+    const companyQuery = client.isBranch && client.branch_id ? `?company=${encodeURIComponent(client.branch_id)}` : '';
+    window.open(`${window.location.origin}/ledger/${token}${companyQuery}`, '_blank', 'noopener,noreferrer');
+  };
+
+  const generateReimbursableToken = () => {
+    if (window.crypto && window.crypto.getRandomValues) {
+      const bytes = new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  };
+
+  const handleOpenReimbursablePage = async (client) => {
+    // Public reimbursable view is project-token based.
+    const clientProjects = projects
+      .filter(p => p.client_id === client.id)
+      .filter(p => (p.reimbursable_expenses || []).length > 0)
+      .sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''));
+
+    if (clientProjects.length === 0) {
+      alert('No reimbursable entries found for this client.');
+      return;
+    }
+
+    const project = clientProjects[0];
+    let token = project.reimbursable_token;
+
+    if (!token) {
+      if (!can(role, 'projects', 'edit')) {
+        alert('Reimbursable link is not generated yet. Please ask admin/manager to generate it first.');
+        return;
+      }
+      token = generateReimbursableToken();
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', project.id), {
+        reimbursable_token: token,
+        reimbursable_token_enabled: true,
+        reimbursable_token_created_at: new Date().toISOString()
+      });
+      logAction('projects', 'create_reimbursable_link', project.id, { token }, project.project_name || project.id);
+    }
+
+    window.open(`${window.location.origin}/reimbursable/${token}`, '_blank', 'noopener,noreferrer');
+  };
+
+  const displayParties = useMemo(() => {
+    const rows = [];
+    clients.forEach(client => {
+      rows.push({
+        ...client,
+        entity_key: client.id,
+        isBranch: false,
+        rootClient: client,
+        display_name: client.name,
+      });
+      (client.companies || []).forEach(company => {
+        rows.push({
+          ...client,
+          id: `${client.id}::${company.id}`,
+          entity_key: `${client.id}::${company.id}`,
+          isBranch: true,
+          branch_id: company.id,
+          branch_name: company.name,
+          name: company.name || client.name,
+          gstin: company.gstin || client.gstin,
+          address: company.address || client.address,
+          rootClient: client,
+          display_name: `${client.name} — ${company.name || 'Branch'}`,
+        });
+      });
+    });
+    return rows;
+  }, [clients]);
+
+  const filteredClients = displayParties.filter(client => {
+    const q = searchTerm.toLowerCase();
+    return (
+      (client.display_name || '').toLowerCase().includes(q) ||
+      (client.gstin || '').toLowerCase().includes(q)
+    );
+  });
 
   const paginatedClients = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
@@ -381,23 +712,25 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
       {activeTab === 'list' && <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {paginatedClients.map(client => {
-          const ledgerLink = client.ledger_link_token
-            ? `${window.location.origin}/ledger/${client.ledger_link_token}`
+          const baseClient = client.rootClient || client;
+          const ledgerLink = baseClient.ledger_link_token
+            ? `${window.location.origin}/ledger/${baseClient.ledger_link_token}`
             : '';
           return (
-          <div key={client.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col justify-between group relative">
+          <div key={client.entity_key || client.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col justify-between group relative">
             {(role === 'admin' || role === 'manager') && (
               <div className="absolute top-2 right-2 flex gap-1 opacity-100">
-                <button onClick={(e) => {e.stopPropagation(); handleLedgerLink(client)}} className="p-1 text-slate-600 hover:bg-slate-50 rounded" title="Ledger Link"><Copy size={14}/></button>
-                <button onClick={(e) => {e.stopPropagation(); openEdit(client)}} className="p-1 text-blue-600 hover:bg-blue-50 rounded"><Edit size={14}/></button>
-                <button onClick={(e) => {e.stopPropagation(); handleDelete(client.id)}} className="p-1 text-red-600 hover:bg-red-50 rounded"><Trash2 size={14}/></button>
+                <button onClick={(e) => {e.stopPropagation(); handleLedgerLink(baseClient)}} className="p-1 text-slate-600 hover:bg-slate-50 rounded" title="Ledger Link"><Copy size={14}/></button>
+                <button onClick={(e) => {e.stopPropagation(); openEdit(baseClient)}} className="p-1 text-blue-600 hover:bg-blue-50 rounded"><Edit size={14}/></button>
+                <button onClick={(e) => {e.stopPropagation(); handleDelete(baseClient.id)}} className="p-1 text-red-600 hover:bg-red-50 rounded"><Trash2 size={14}/></button>
               </div>
             )}
             <div>
               <div className="flex justify-between items-start">
-                <h3 className="font-bold text-slate-800 text-lg">{client.name}</h3>
+                <h3 className="font-bold text-slate-800 text-lg">{client.display_name || client.name}</h3>
                 <div className="flex flex-col items-end gap-1 mt-6">
                   <span className={`px-2 py-0.5 text-xs rounded ${client.type === 'Vendor' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>{client.type}</span>
+                  {client.isBranch && <span className="px-2 py-0.5 text-xs rounded bg-cyan-100 text-cyan-700">Branch</span>}
                   {client.billing_terms && <span className="px-2 py-0.5 text-xs rounded bg-slate-100 text-slate-600 border border-slate-200">{client.billing_terms}</span>}
                 </div>
               </div>
@@ -432,15 +765,27 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                     <button onClick={(e) => {e.stopPropagation(); handleCopyLedgerLinkValue(ledgerLink)}} className="rounded bg-indigo-600 text-white px-2 py-2 text-xs hover:bg-indigo-700">Copy</button>
                   </div>
                 ) : (
-                  <button onClick={(e) => {e.stopPropagation(); handleLedgerLink(client)}} className="w-full rounded border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">Generate Link</button>
+                  <button onClick={(e) => {e.stopPropagation(); handleLedgerLink(baseClient)}} className="w-full rounded border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">Generate Link</button>
                 )}
               </div>
             )}
             {(client.type === 'Vendor' || client.type === 'Both') && (
-                <button onClick={(e) => {e.stopPropagation(); setSelectedVendorForAssets(client)}} className="mt-3 w-full flex items-center justify-center gap-2 rounded border border-indigo-200 bg-indigo-50 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100">
-                    <Box size={16} /> Manage Assets ({inventory ? inventory.filter(i => i.vendor_id === client.id).length : 0})
+                <button onClick={(e) => {e.stopPropagation(); setSelectedVendorForAssets(baseClient)}} className="mt-3 w-full flex items-center justify-center gap-2 rounded border border-indigo-200 bg-indigo-50 py-1.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100">
+                    <Box size={16} /> Manage Assets ({inventory ? inventory.filter(i => i.vendor_id === baseClient.id).length : 0})
                 </button>
             )}
+            <button
+              onClick={async (e) => { e.stopPropagation(); await handleOpenLedgerPage(baseClient); }}
+              className="mt-2 w-full flex items-center justify-center gap-2 rounded border border-emerald-200 bg-emerald-50 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-100 transition"
+            >
+              <FileText size={15} /> View Ledger
+            </button>
+            <button
+              onClick={async (e) => { e.stopPropagation(); await handleOpenReimbursablePage(baseClient); }}
+              className="mt-2 w-full flex items-center justify-center gap-2 rounded border border-cyan-200 bg-cyan-50 py-1.5 text-sm font-medium text-cyan-700 hover:bg-cyan-100 transition"
+            >
+              <FileText size={15} /> Reimbursable Ledger
+            </button>
             <button onClick={(e) => { e.stopPropagation(); setDashboardClient(client); setActiveTab('dashboard'); }} className="mt-2 w-full flex items-center justify-center gap-2 rounded border border-slate-200 bg-slate-50 py-1.5 text-sm font-medium text-slate-600 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-700 transition">
               <BarChart2 size={15} /> View Dashboard
             </button>
@@ -473,24 +818,33 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               />
             </div>
             <div className="divide-y divide-slate-100">
-              {clients
-                .filter(c => !dashSearch || c.name.toLowerCase().includes(dashSearch.toLowerCase()))
+              {displayParties
+                .filter(c => !dashSearch || (c.display_name || c.name || '').toLowerCase().includes(dashSearch.toLowerCase()))
                 .slice(0, 20)
                 .map(c => {
-                  const cp = projects.filter(p => p.client_id === c.id);
+                  const rootClientId = c.rootClient?.id || c.id;
+                  const branchId = c.isBranch ? c.branch_id : null;
+                  const cp = projects.filter(p => p.client_id === rootClientId && (!branchId || ((p.party_company_id || 'primary') === branchId)));
                   const totalRev = cp.reduce((s, p) => s + getProjectGrandTotal(p), 0);
-                  const clientPay = payments.filter(p => p.client_id === c.id).reduce((s, p) => s + (p.amount || 0), 0);
+                  const clientPay = payments
+                    .filter(p => p.client_id === rootClientId)
+                    .filter(p => {
+                      if (!branchId) return true;
+                      const linkedProject = projects.find(pr => pr.id === p.project_id);
+                      return (p.party_company_id || linkedProject?.party_company_id || 'primary') === branchId;
+                    })
+                    .reduce((s, p) => s + (p.amount || 0), 0);
                   const invoiced = cp.filter(p => p.invoice_status === 'Invoiced').reduce((s, p) => s + getProjectGrandTotal(p), 0);
                   const outstanding = invoiced - clientPay;
                   return (
-                    <button key={c.id} onClick={() => setDashboardClient(c)}
+                    <button key={c.entity_key || c.id} onClick={() => setDashboardClient(c)}
                       className="w-full flex items-center justify-between px-3 py-3 hover:bg-indigo-50 transition rounded-lg text-left group">
                       <div className="flex items-center gap-3">
                         <div className={`h-9 w-9 rounded-full flex items-center justify-center font-bold text-white shrink-0 ${
                           c.type === 'Vendor' ? 'bg-purple-500' : c.type === 'Both' ? 'bg-teal-500' : 'bg-indigo-500'
-                        }`}>{(c.name || '?')[0].toUpperCase()}</div>
+                        }`}>{(c.display_name || c.name || '?')[0].toUpperCase()}</div>
                         <div>
-                          <div className="font-semibold text-slate-800 group-hover:text-indigo-700">{c.name}</div>
+                          <div className="font-semibold text-slate-800 group-hover:text-indigo-700">{c.display_name || c.name}{c.isBranch ? ' (Branch)' : ''}</div>
                           <div className="text-xs text-slate-400">{c.type} · {GST_STATE_CODES[c.gstin?.substring(0,2)] || 'Unknown State'} · {cp.length} project{cp.length !== 1 ? 's' : ''}</div>
                         </div>
                       </div>
@@ -502,7 +856,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                     </button>
                   );
                 })}
-              {clients.filter(c => !dashSearch || c.name.toLowerCase().includes(dashSearch.toLowerCase())).length === 0 && (
+              {displayParties.filter(c => !dashSearch || (c.display_name || c.name || '').toLowerCase().includes(dashSearch.toLowerCase())).length === 0 && (
                 <div className="py-8 text-center text-slate-400 text-sm">No clients match your search.</div>
               )}
             </div>
@@ -518,7 +872,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               <ArrowLeft size={16} /> All Clients
             </button>
             {(role === 'admin' || role === 'manager') && (
-              <button onClick={() => openEdit(dashboardClient)} className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600"><Edit size={14}/> Edit Client</button>
+              <button onClick={() => openEdit(dashboardClient.rootClient || dashboardClient)} className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600"><Edit size={14}/> Edit Client</button>
             )}
           </div>
         </div>
@@ -565,6 +919,56 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Financial & Terms</h4>
             <div><label className="block text-sm font-bold text-slate-800">Credit Terms</label><select className="w-full rounded border p-2 bg-white text-slate-800" value={formData.billing_terms} onChange={e => setFormData({...formData, billing_terms: e.target.value})}><option value="Net 15">Net 15 Days</option><option value="Net 30">Net 30 Days</option><option value="Net 45">Net 45 Days</option><option value="Net 60">Net 60 Days</option><option value="Net 90">Net 90 Days</option></select></div>
+            <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-bold text-slate-800">Opening Balance <span className="text-xs font-normal text-slate-500">(for existing party with prior balance)</span></label>
+                {(parseFloat(formData.opening_balance?.amount || 0) > 0) && (
+                  <button type="button" onClick={() => setFormData({ ...formData, opening_balance: { ...blankOpening } })} className="text-xs text-rose-600 hover:underline">Clear</button>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600">Amount</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="0.00"
+                    className="w-full rounded border p-2 text-sm bg-white text-black"
+                    value={formData.opening_balance?.amount ?? ''}
+                    onChange={e => setFormData({ ...formData, opening_balance: { ...(formData.opening_balance || blankOpening), amount: e.target.value } })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600">Type</label>
+                  <select
+                    className="w-full rounded border p-2 text-sm bg-white text-slate-800"
+                    value={formData.opening_balance?.side || 'Dr'}
+                    onChange={e => setFormData({ ...formData, opening_balance: { ...(formData.opening_balance || blankOpening), side: e.target.value } })}
+                  >
+                    <option value="Dr">Receivable (they owe us)</option>
+                    <option value="Cr">Payable (we owe them)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600">As of</label>
+                  <input
+                    type="date"
+                    className="w-full rounded border p-2 text-sm bg-white text-black"
+                    value={formData.opening_balance?.date || todayFyStart}
+                    onChange={e => setFormData({ ...formData, opening_balance: { ...(formData.opening_balance || blankOpening), date: e.target.value } })}
+                  />
+                </div>
+              </div>
+              <input
+                type="text"
+                placeholder="Remarks (optional, e.g. 'Migrated from Tally on 01-Apr-2025')"
+                className="w-full rounded border p-2 text-sm bg-white text-black"
+                value={formData.opening_balance?.remarks || ''}
+                onChange={e => setFormData({ ...formData, opening_balance: { ...(formData.opening_balance || blankOpening), remarks: e.target.value } })}
+              />
+              <p className="text-[11px] text-slate-500">Posts to <span className="font-mono">Party: {formData.name || '<name>'}</span> as of the chosen date and reflects in the ledger immediately.</p>
+            </div>
           </div>
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Contact Persons</h4>
@@ -572,6 +976,31 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               <div className="space-y-2 mb-3">{formData.contacts.map((c, idx) => (<div key={idx} className="flex items-center justify-between bg-slate-50 p-2 rounded border border-slate-200"><div><div className="text-sm font-medium text-slate-800">{c.name}</div><div className="text-xs text-slate-500">{c.phone}</div></div><button onClick={() => handleRemoveContact(idx)} className="text-red-500 hover:text-red-700"><Trash2 size={14} /></button></div>))}</div>
             )}
             <div className="bg-slate-50 p-3 rounded border border-dashed border-slate-300"><div className="grid grid-cols-2 gap-2 mb-2"><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Name *" value={newContact.name} onChange={e => setNewContact({...newContact, name: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Role" value={newContact.role} onChange={e => setNewContact({...newContact, role: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Phone *" value={newContact.phone} onChange={e => setNewContact({...newContact, phone: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Email" value={newContact.email} onChange={e => setNewContact({...newContact, email: e.target.value})} /></div><button onClick={handleAddContact} className="w-full rounded border border-indigo-200 bg-white py-1 text-sm text-indigo-600 hover:bg-indigo-50">+ Add to List</button></div>
+          </div>
+          <div className="space-y-3">
+            <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Additional Companies / Branches (Unique GSTIN)</h4>
+            {(formData.companies || []).length > 0 && (
+              <div className="space-y-2">
+                {(formData.companies || []).map((c) => (
+                  <div key={c.id} className="flex items-start justify-between gap-2 rounded border border-slate-200 bg-slate-50 p-2">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-800">{c.name}</div>
+                      <div className="text-xs font-mono text-slate-600">{c.gstin}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">{c.address}</div>
+                    </div>
+                    <button onClick={() => handleRemoveCompany(c.id)} className="text-red-500 hover:text-red-700"><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="rounded border border-dashed border-slate-300 bg-slate-50 p-3">
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Company / Branch Name *" value={newCompany.name} onChange={e => setNewCompany({ ...newCompany, name: e.target.value })} />
+                <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="GSTIN *" value={newCompany.gstin} onChange={e => setNewCompany({ ...newCompany, gstin: e.target.value.toUpperCase() })} />
+                <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400 col-span-2" placeholder="Address *" value={newCompany.address} onChange={e => setNewCompany({ ...newCompany, address: e.target.value })} />
+              </div>
+              <button onClick={handleAddCompany} className="w-full rounded border border-indigo-200 bg-white py-1 text-sm text-indigo-600 hover:bg-indigo-50">+ Add Company / Branch</button>
+            </div>
           </div>
           <button onClick={handleSave} className="w-full rounded bg-indigo-600 py-3 text-white font-medium hover:bg-indigo-700 shadow-sm mt-4">Save Client / Vendor</button>
         </div>
@@ -657,11 +1086,30 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
             {/* Client info strip */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap gap-6 text-sm">
+              {dashData.isBranchView && (
+                <div><div className="text-xs text-slate-400 font-semibold mb-0.5">View Scope</div><div className="text-cyan-700 font-semibold">Branch-only dashboard</div></div>
+              )}
               {dashboardClient.gstin && <div><div className="text-xs text-slate-400 font-semibold mb-0.5">GSTIN</div><div className="font-mono font-bold text-slate-700">{dashboardClient.gstin}</div></div>}
               <div><div className="text-xs text-slate-400 font-semibold mb-0.5">State</div><div className="text-slate-700">{GST_STATE_CODES[dashboardClient.gstin?.substring(0,2)] || dashboardClient.state || '—'}</div></div>
               <div><div className="text-xs text-slate-400 font-semibold mb-0.5">Credit Terms</div><div className="text-slate-700">{dashboardClient.billing_terms || 'Net 15'}</div></div>
               {dashData.clientSince && <div><div className="text-xs text-slate-400 font-semibold mb-0.5">Client Since</div><div className="text-slate-700">{new Date(dashData.clientSince).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</div></div>}
-              <div><div className="text-xs text-slate-400 font-semibold mb-0.5">Total Projects</div><div className="font-bold text-slate-800">{dashData.clientProjects.length}</div></div>
+              <div>
+                <div className="text-xs text-slate-400 font-semibold mb-0.5">Total Projects</div>
+                <div className="font-bold text-slate-800">{dashData.clientProjects.length}</div>
+                <div className="text-xs text-slate-400 mt-0.5">
+                  {dashData.active.length > 0 && <span className="text-green-600">{dashData.active.length} active</span>}
+                  {dashData.active.length > 0 && dashData.completed.length > 0 && ' · '}
+                  {dashData.completed.length > 0 && <span>{dashData.completed.length} done</span>}
+                </div>
+                {dashData.active.length > 0 && (
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    {['Quoted','Confirmed','Ongoing'].map(st => {
+                      const cnt = dashData.active.filter(p => p.status === st).length;
+                      return cnt > 0 ? <span key={st} className="mr-1">{cnt} {st}</span> : null;
+                    })}
+                  </div>
+                )}
+              </div>
               {dashboardClient.contacts?.[0] && (
                 <div><div className="text-xs text-slate-400 font-semibold mb-0.5">Primary Contact</div><div className="text-slate-700">{dashboardClient.contacts[0].name} · {dashboardClient.contacts[0].phone}</div></div>
               )}
@@ -674,7 +1122,10 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                 <div className="rounded-xl bg-white border border-slate-200 p-4 shadow-sm">
                   <div className="text-xs text-slate-500 font-semibold mb-1">Lifetime Revenue</div>
                   <div className="text-2xl font-bold text-slate-800">{formatCurrency(dashData.lifetimeRevenue)}</div>
-                  <div className="text-xs text-slate-400">{dashData.clientProjects.length} project{dashData.clientProjects.length !== 1 ? 's' : ''}</div>
+                  <div className="text-xs text-slate-400">{dashData.deliveredProjects.length} delivered project{dashData.deliveredProjects.length !== 1 ? 's' : ''}</div>
+                  {dashData.pipelineRevenue > 0 && (
+                    <div className="text-xs text-indigo-500 mt-0.5">+ {formatCurrency(dashData.pipelineRevenue)} in pipeline ({dashData.active.length} active)</div>
+                  )}
                 </div>
                 <div className="rounded-xl bg-blue-50 border border-blue-100 p-4 shadow-sm">
                   <div className="text-xs text-blue-700 font-semibold mb-1 flex items-center gap-1"><FileText size={11}/> Total Invoiced</div>
@@ -708,6 +1159,46 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                   </div>
                 </div>
               )}
+
+              {!dashData.isBranchView && dashData.branchSummaries && dashData.branchSummaries.length > 1 && (
+                <div className="mt-3 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                  <div className="px-4 py-3 border-b border-slate-100 font-semibold text-slate-700 text-sm">Company / Branch-wise Summary</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                      <thead className="bg-slate-50 text-xs text-slate-500 font-semibold">
+                        <tr>
+                          <th className="p-3">Company / Branch</th>
+                          <th className="p-3">GSTIN</th>
+                          <th className="p-3 text-center">Projects</th>
+                          <th className="p-3 text-right">Billed</th>
+                          <th className="p-3 text-right">Received</th>
+                          <th className="p-3 text-right">Outstanding</th>
+                          <th className="p-3 text-right">Non-Invoiced</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {dashData.branchSummaries.map(b => (
+                          <tr key={b.id} className="hover:bg-slate-50">
+                            <td className="p-3 font-medium text-slate-800">{b.name}{b.id === 'primary' ? ' (Primary)' : ''}</td>
+                            <td className="p-3 text-xs font-mono text-slate-500">{b.gstin || '—'}</td>
+                            <td className="p-3 text-center text-slate-600">{b.projects}</td>
+                            <td className="p-3 text-right text-slate-700">{formatCurrency(b.billed)}</td>
+                            <td className="p-3 text-right text-green-700">{formatCurrency(b.received)}</td>
+                            <td className="p-3 text-right font-semibold">
+                              <span className={b.outstanding > 0 ? 'text-amber-700' : 'text-slate-600'}>{formatCurrency(Math.max(0, b.outstanding))}</span>
+                            </td>
+                            <td className="p-3 text-right">
+                              <span className={b.notInvoicedCount > 0 ? 'text-orange-700 font-semibold' : 'text-slate-500'}>
+                                {b.notInvoicedCount > 0 ? `${b.notInvoicedCount} (${formatCurrency(b.notInvoicedAmount)})` : '0'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Management: Project Pipeline + Category breakdown side by side */}
@@ -738,7 +1229,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                             <div className="text-right shrink-0">
                               <div className="font-bold text-slate-700 text-sm">{formatCurrency(grand)}</div>
                               <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusColor[p.status] || 'bg-slate-100 text-slate-600'}`}>{p.status}</span>
-                              {p.invoice_status === 'Invoiced' && <div className="text-xs text-green-600 mt-0.5">✓ Invoiced</div>}
+                              {(p.invoice_status === 'Invoiced' || p.status === 'Closed') && <div className="text-xs text-green-600 mt-0.5">✓ Invoiced</div>}
                             </div>
                           </div>
                         </div>
@@ -781,6 +1272,132 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                 </div>
               </div>
             </div>
+
+            {/* All Projects Details */}
+            {dashData.clientProjects.length > 0 && (
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-100 font-semibold text-slate-700 text-sm flex items-center justify-between">
+                  <span className="flex items-center gap-2"><Briefcase size={15} className="text-indigo-500"/> Projects Detail</span>
+                  <span className="text-xs text-slate-400">{dashData.clientProjects.length} total &middot; {dashData.active.length} active &middot; {dashData.completed.length} completed</span>
+                </div>
+
+                {/* Active Projects */}
+                {dashData.active.length > 0 && (
+                  <div>
+                    <div className="px-4 py-2 bg-green-50 border-b border-slate-100 text-xs font-bold text-green-700 uppercase tracking-wide">Active Projects ({dashData.active.length})</div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm text-left">
+                        <thead className="bg-slate-50 text-xs text-slate-500 font-semibold border-b border-slate-100">
+                          <tr>
+                            <th className="p-3">Project / Venue</th>
+                            <th className="p-3">Dates</th>
+                            <th className="p-3 text-center">Status</th>
+                            <th className="p-3 text-center">Items</th>
+                            <th className="p-3 text-right">Total</th>
+                            <th className="p-3 text-right">Received</th>
+                            <th className="p-3 text-right">Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {dashData.active.map(p => {
+                            const grand = getProjectGrandTotal(p);
+                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + (py.amount || 0), 0);
+                            const projBalance = grand - projPaid;
+                            const statusColor = { Quoted: 'bg-orange-100 text-orange-700', Confirmed: 'bg-green-100 text-green-700', Ongoing: 'bg-red-100 text-red-700', Completed: 'bg-blue-100 text-blue-700', Closed: 'bg-slate-200 text-slate-600' };
+                            const itemCount = (p.items || []).length;
+                            const venue = p.venue || p.location || '';
+                            return (
+                              <tr key={p.id} className="hover:bg-slate-50">
+                                <td className="p-3">
+                                  <div className="font-medium text-slate-800">{p.project_name}</div>
+                                  {venue && <div className="text-xs text-slate-400 mt-0.5">{venue}</div>}
+                                </td>
+                                <td className="p-3 text-xs text-slate-500 whitespace-nowrap">
+                                  {p.start_date ? new Date(p.start_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '—'}
+                                  {p.end_date && p.end_date !== p.start_date && <><br/>{new Date(p.end_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })}</>}
+                                </td>
+                                <td className="p-3 text-center">
+                                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusColor[p.status] || 'bg-slate-100 text-slate-600'}`}>{p.status}</span>
+                                </td>
+                                <td className="p-3 text-center text-slate-600 text-xs">{itemCount > 0 ? itemCount : '—'}</td>
+                                <td className="p-3 text-right font-bold text-slate-800">{formatCurrency(grand)}</td>
+                                <td className="p-3 text-right text-green-700">{projPaid > 0 ? formatCurrency(projPaid) : <span className="text-slate-400">—</span>}</td>
+                                <td className="p-3 text-right">
+                                  {projBalance > 0 ? <span className="font-semibold text-amber-700">{formatCurrency(projBalance)}</span> : <span className="text-green-600 text-xs font-medium">Settled</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Completed Projects */}
+                {dashData.completed.length > 0 && (
+                  <div className={dashData.active.length > 0 ? 'border-t border-slate-200' : ''}>
+                    <div className="px-4 py-2 bg-blue-50 border-b border-slate-100 text-xs font-bold text-blue-700 uppercase tracking-wide">Completed Projects ({dashData.completed.length})</div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm text-left">
+                        <thead className="bg-slate-50 text-xs text-slate-500 font-semibold border-b border-slate-100">
+                          <tr>
+                            <th className="p-3">Project / Venue</th>
+                            <th className="p-3">Dates</th>
+                            <th className="p-3 text-center">Status</th>
+                            <th className="p-3 text-center">Invoice</th>
+                            <th className="p-3 text-right">Total</th>
+                            <th className="p-3 text-right">Received</th>
+                            <th className="p-3 text-right">Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {dashData.completed.map(p => {
+                            const grand = getProjectGrandTotal(p);
+                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + (py.amount || 0), 0);
+                            const projBalance = grand - projPaid;
+                            const statusColor = { Quoted: 'bg-orange-100 text-orange-700', Confirmed: 'bg-green-100 text-green-700', Ongoing: 'bg-red-100 text-red-700', Completed: 'bg-blue-100 text-blue-700', Closed: 'bg-slate-200 text-slate-600' };
+                            const venue = p.venue || p.location || '';
+                            const itemCount = (p.items || []).length;
+                            return (
+                              <tr key={p.id} className="hover:bg-slate-50">
+                                <td className="p-3">
+                                  <div className="font-medium text-slate-800">{p.project_name}</div>
+                                  {venue && <div className="text-xs text-slate-400 mt-0.5">{venue}</div>}
+                                  {itemCount > 0 && <div className="text-xs text-slate-400">{itemCount} item{itemCount !== 1 ? 's' : ''}</div>}
+                                </td>
+                                <td className="p-3 text-xs text-slate-500 whitespace-nowrap">
+                                  {p.start_date ? new Date(p.start_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '—'}
+                                  {p.end_date && p.end_date !== p.start_date && <><br/>{new Date(p.end_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })}</>}
+                                </td>
+                                <td className="p-3 text-center">
+                                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusColor[p.status] || 'bg-slate-100 text-slate-600'}`}>{p.status}</span>
+                                </td>
+                                <td className="p-3 text-center">
+                                  {(p.invoice_status === 'Invoiced' || p.status === 'Closed') ? (
+                                    <div>
+                                      <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700">{p.status === 'Closed' && p.invoice_status !== 'Invoiced' ? 'Closed' : 'Invoiced'}</span>
+                                      {p.invoice_no && <div className="text-xs font-mono text-slate-500 mt-0.5">{p.invoice_no}</div>}
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-orange-100 text-orange-700">Pending</span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-right font-bold text-slate-800">{formatCurrency(grand)}</td>
+                                <td className="p-3 text-right text-green-700">{projPaid > 0 ? formatCurrency(projPaid) : <span className="text-slate-400">—</span>}</td>
+                                <td className="p-3 text-right">
+                                  {projBalance > 0 ? <span className="font-semibold text-amber-700">{formatCurrency(projBalance)}</span> : <span className="text-green-600 text-xs font-medium">Settled</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Invoice Register */}
             {dashData.invoicedProjects.length > 0 && (

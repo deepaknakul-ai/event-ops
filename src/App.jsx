@@ -3,7 +3,7 @@
 // version 3.5.0 challan manager search added
 
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   LayoutDashboard, Box, Users, Calendar, FileText, 
   DollarSign, CheckCircle, AlertTriangle, Menu, X, 
@@ -13,15 +13,17 @@ import {
   Utensils, Hotel, Hammer, Briefcase, AlertCircle, Wallet, CreditCard,
   TrendingUp, TrendingDown, ShoppingBag, Percent, Calculator, Camera, FileCheck, Download, Settings,
   Printer, Activity, RotateCcw, Copy, Layers, ListChecks, ClipboardList, Paperclip, Sun, Moon,
-  ArrowUpRight, ArrowDownRight, Monitor, Receipt, Package, FolderOpen, Eye, ReceiptText, WifiOff
+  ArrowUpRight, ArrowDownRight, Monitor, Receipt, Package, FolderOpen, Eye, ReceiptText, WifiOff,
+  Clock, CalendarDays, BarChart3, UserCheck, FileBarChart
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell 
 } from 'recharts';
 import { Routes, Route, Navigate, useLocation, Link, useNavigate, useParams } from 'react-router-dom';
 import { auth, db } from './firebase';
-import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS } from './utils/constants';
+import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
 import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword } from './utils/helpers';
+import { upsertPartyAccount } from './utils/partyAccounts';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
 import Dashboard from './pages/Dashboard';
@@ -33,16 +35,30 @@ import QuoteApproval from './pages/QuoteApproval';
 import PublicReimbursable from './pages/PublicReimbursable';
 import PublicEmployeeLedger from './pages/PublicEmployeeLedger';
 import Finance from './pages/Finance';
+import Accounting from './pages/Accounting';
+import { partitionRules } from './utils/aiAccountant';
 import ChallanManager from './pages/ChallanManager';
 import DocumentsHub from './pages/DocumentsHub';
 import PurchaseInvoices from './pages/PurchaseInvoices';
+import TaxInvoices from './pages/TaxInvoices';
 import Expenses from './pages/Expenses';
 import Employees from './pages/Employees';
 import Reports from './pages/Reports';
+import BusinessReport from './pages/BusinessReport';
 import Inventory from './pages/Inventory';
 import Projects from './pages/Projects';
 import Clients from './pages/Clients';
+import ConfigurationBuilder from './pages/ConfigurationBuilder';
+import HRDashboard from './pages/HRDashboard';
+import HRAttendance from './pages/HRAttendance';
+import HRLeaves from './pages/HRLeaves';
+import HRReports from './pages/HRReports';
+import HRSettings from './pages/HRSettings';
+import HRPortal from './pages/HRPortal';
+import HRPayroll from './pages/HRPayroll';
+import DataPortal from './pages/DataPortal';
 import GlobalSearch from './components/GlobalSearch';
+import AppAssistant, { AppAssistantLauncher } from './components/AppAssistant';
 import NotificationBell from './components/NotificationBell';
 import OfflineIndicator from './components/OfflineIndicator';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -51,11 +67,13 @@ import { can, ROLE_LABELS, ROLE_COLOR, setLiveConfig } from './utils/permissions
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 //import { saveAs } from 'file-saver';
 
 import { 
-  signInAnonymously, onAuthStateChanged, signOut, signInWithCustomToken 
+  signInAnonymously, onAuthStateChanged, signOut, signInWithCustomToken,
+  signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail,
+  fetchSignInMethodsForEmail
 } from 'firebase/auth';
 import { collection, addDoc, updateDoc, doc, 
   deleteDoc, onSnapshot, query, where, serverTimestamp, setDoc, getDoc, arrayUnion, arrayRemove, getDocs, runTransaction
@@ -189,12 +207,15 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
     }
     const data = { ...formData, updated_at: serverTimestamp() };
     
+    const entityType = formData.type === 'Vendor' ? 'vendor' : 'client';
     if (editingId) {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', editingId), data);
       logAction('clients', 'update', editingId, data, formData.name);
+      upsertPartyAccount(db, appId, editingId, entityType, formData.name);  // M-5
     } else {
       const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'clients'), { ...data, created_at: serverTimestamp() });
       logAction('clients', 'create', docRef.id, data, formData.name);
+      upsertPartyAccount(db, appId, docRef.id, entityType, formData.name);  // M-5
     }
     setIsAddOpen(false);
   };
@@ -2852,6 +2873,7 @@ export default function App() {
   const [showImpersonateModal, setShowImpersonateModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   const [currentEmpId, setCurrentEmpId] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [showForgotPass, setShowForgotPass] = useState(false);
@@ -2906,6 +2928,7 @@ export default function App() {
           case 'c': e.preventDefault(); navigate('/clients'); break;
           case 'i': e.preventDefault(); navigate('/inventory'); break;
           case 'f': if (can(role,'finance','view')) { e.preventDefault(); navigate('/finance'); } break;
+          case 'a': if (can(role,'finance','view')) { e.preventDefault(); navigate('/accounting'); } break;
           case 'r': if (can(role,'reports','view')) { e.preventDefault(); navigate('/reports'); } break;
           default: break;
         }
@@ -2928,12 +2951,28 @@ export default function App() {
   const [employees, setEmployees] = useState([]);
   const [advances, setAdvances] = useState([]);
   const [vendorPayments, setVendorPayments] = useState([]);
-// Inside App function, add these:
-//version 1.3.0 finance implementation enabled code
-const [payments, setPayments] = useState([]);
-const [payouts, setPayouts] = useState([]);
-const [lockedFYs, setLockedFYs] = useState([]);
-//version 1.3.0 finance implementation enabled code
+  const [purchaseInvoicesList, setPurchaseInvoicesList] = useState([]);
+  const [taxInvoicesList, setTaxInvoicesList] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [payouts, setPayouts] = useState([]);
+  const [chartOfAccounts, setChartOfAccounts] = useState([]);
+  const [journalEntries, setJournalEntries] = useState([]);
+  const [openingBalances, setOpeningBalances] = useState([]);
+  const [fiscalYearClosings, setFiscalYearClosings] = useState([]);
+  const [recurringRules, setRecurringRules] = useState([]);
+  const [partyAccounts, setPartyAccounts] = useState([]);  // M-5: stable party name registry
+  const [lockedFYs, setLockedFYs] = useState([]);
+  const [customInventoryCategories, setCustomInventoryCategories] = useState([]);
+  const [customExpenseCategories, setCustomExpenseCategories] = useState([]);
+  const [configurations, setConfigurations] = useState([]);
+
+// HR Module State
+const [timeLogs, setTimeLogs] = useState([]);
+const [hrLeaves, setHrLeaves] = useState([]);
+const [shiftRequests, setShiftRequests] = useState([]);
+const [penalties, setPenalties] = useState([]);
+const [hqSettings, setHqSettings] = useState(DEFAULT_HQ_SETTINGS);
+const [payroll, setPayroll] = useState([]);
   // --- Auth & Data Fetching ---
 
   const currentEmployee = employees.find(e => e.id === currentEmpId);
@@ -2957,10 +2996,25 @@ const [lockedFYs, setLockedFYs] = useState([]);
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      if (!u) setLoading(false);
+      if (!u) {
+        // C-4: After logout, Firebase Auth is signed-out.  Restore an
+        // anonymous session so the login screen can still read employees.
+        setLoading(false);
+        signInAnonymously(auth).catch(() => { /* ignore */ });
+      }
     });
     return () => unsubscribe();
   }, []);
+
+  // Register this appId in the cloud-functions registry so the scheduled
+  // poster knows where to look. Best-effort, fire-and-forget.
+  useEffect(() => {
+    if (!user) return;
+    setDoc(doc(db, 'meta', 'active_apps'), {
+      ids: arrayUnion(appId),
+      last_seen: { [appId]: new Date().toISOString() },
+    }, { merge: true }).catch(() => { /* registry write best-effort */ });
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
@@ -2989,10 +3043,36 @@ const [lockedFYs, setLockedFYs] = useState([]);
     const unsubPayments = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubPayouts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payouts'), (snap) => setPayouts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubVendorPayments = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubPurchaseInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubTaxInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubChartOfAccounts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubJournalEntries = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), (snap) => setJournalEntries(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubOpeningBalances = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'opening_balances'), (snap) => setOpeningBalances(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubFiscalYearClosings = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'fiscal_year_closings'), (snap) => setFiscalYearClosings(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubRecurringRules = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'recurring_rules'), (snap) => setRecurringRules(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // M-5: stable party-name registry for ledger display-name resolution
+    const unsubPartyAccounts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubOrgSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), (snap) => {
       if (snap.exists()) setLockedFYs(snap.data().locked_fys || []);
     });
+    const unsubCategorySettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), (snap) => {
+      if (snap.exists()) {
+        setCustomInventoryCategories(snap.data().inventory_categories || []);
+        setCustomExpenseCategories(snap.data().expense_categories || []);
+      }
+    });
+    const unsubConfigurations = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'configurations'), (snap) => setConfigurations(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
 //version 1.3.0 finance implementation enabled code
+
+    // HR Module Listeners
+    const unsubTimeLogs = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'timeLogs'), (snap) => setTimeLogs(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubHrLeaves = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), (snap) => setHrLeaves(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubShiftRequests = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'shiftRequests'), (snap) => setShiftRequests(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubPenalties = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'penalties'), (snap) => setPenalties(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubPayroll = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payroll'), (snap) => setPayroll(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubHqSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'hq'), (snap) => {
+      if (snap.exists()) setHqSettings({ ...DEFAULT_HQ_SETTINGS, ...snap.data() });
+    });
 
     setLoading(false);
 //  //version 1.3.0 finance implementation depcreated code
@@ -3004,7 +3084,9 @@ const [lockedFYs, setLockedFYs] = useState([]);
   //version 1.3.0 finance implementation enabled code
     return () => {
     unsubProjects(); unsubClients(); unsubInventory(); unsubExpenses(); unsubVendorPayments();
-    unsubEmployees(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings();
+    unsubEmployees(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
+    unsubTimeLogs(); unsubHrLeaves(); unsubShiftRequests(); unsubPenalties(); unsubPayroll(); unsubHqSettings(); unsubPurchaseInvoices(); unsubTaxInvoices();
+    unsubChartOfAccounts(); unsubJournalEntries(); unsubOpeningBalances(); unsubFiscalYearClosings(); unsubRecurringRules(); unsubConfigurations(); unsubPartyAccounts();
     };  
       //version 1.3.0 finance implementation enabled code
   }, [user, role]);
@@ -3048,20 +3130,92 @@ const [lockedFYs, setLockedFYs] = useState([]);
     setToasts(prev => [...prev, { id, msg, type }]);
   };
 
+  // One-shot notification: after login + first Firestore snapshot, alert the
+  // user if any recurring rules have pending runs. Only admin/manager see it.
+  const recurringNoticeShownRef = useRef(false);
+  useEffect(() => {
+    if (recurringNoticeShownRef.current) return;
+    if (!role || !can(effectiveRole, 'finance', 'view')) return;
+    if (!Array.isArray(recurringRules) || recurringRules.length === 0) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const { due } = partitionRules(recurringRules, today);
+    if (due.length === 0) return;
+    recurringNoticeShownRef.current = true;
+    addToast(`${due.length} recurring ${due.length === 1 ? 'rule is' : 'rules are'} due to post. Open Accounts → Recurring Entries to review.`, 'info');
+  }, [recurringRules, role, effectiveRole]);
+
   const logAction = async (collectionName, action, docId, data, docName = '') => {
-    if (!user) return;
+    // M-10: Always log, even when Firebase Auth has not finished initialising.
+    // M-12: Snapshot the acting employee id + role so historical audits remain
+    // accurate after employees are renamed, demoted, or removed.
     try {
+      const actorEmp = employees.find(e => e.id === currentEmpId);
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs'), {
         collection: collectionName,
         action: action,
         doc_id: docId,
         doc_name: docName,
         details: data,
-        performed_by: user.email || user.uid,
+        performed_by: user?.email || user?.uid || (actorEmp?.email) || 'system',
+        actor_emp_id: currentEmpId || null,
+        actor_name: actorEmp?.name || null,
+        actor_role: impersonating ? `${role}->${impersonating.role}` : (role || null),
+        impersonated: !!impersonating,
         timestamp: new Date().toISOString()
       });
     } catch (e) {
       console.error("Audit Log Error", e);
+    }
+  };
+
+  // C-4: Upgrade the anonymous Firebase Auth session to a real email/password
+  // session AND write a /users/{uid} mirror doc so security rules can lookup
+  // the user's role by request.auth.uid.  This runs AFTER the legacy app-level
+  // password check has already succeeded, so we trust `password` is correct.
+  // Best-effort: failures don't block login (the legacy flow keeps working).
+  const upgradeFirebaseAuth = async (email, password, mirror) => {
+    if (!email || !password) return;
+    try {
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (err) {
+        if (err?.code === 'auth/user-not-found' || err?.code === 'auth/invalid-credential') {
+          // First-time migration: create the Firebase Auth account on the fly.
+          try {
+            await createUserWithEmailAndPassword(auth, email, password);
+          } catch (createErr) {
+            if (createErr?.code === 'auth/email-already-in-use') {
+              // Account exists but password differs.  Prompt user to reset.
+              console.warn('Firebase Auth account exists but password mismatch. Send password reset.');
+              return;
+            }
+            throw createErr;
+          }
+        } else if (err?.code === 'auth/wrong-password') {
+          console.warn('Firebase Auth password differs from app password. Trigger password reset to sync.');
+          return;
+        } else {
+          throw err;
+        }
+      }
+      // At this point auth.currentUser is the real user.  Write/refresh the
+      // users/{uid} mirror so security rules can authorise role lookups.
+      const u = auth.currentUser;
+      if (u && mirror) {
+        await setDoc(
+          doc(db, 'artifacts', appId, 'public', 'data', 'users', u.uid),
+          {
+            email,
+            employee_id: mirror.employee_id || null,
+            role: mirror.role,
+            name: mirror.name || '',
+            updated_at: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      }
+    } catch (err) {
+      console.warn('Firebase Auth upgrade failed (non-fatal):', err?.code || err?.message || err);
     }
   };
 
@@ -3104,6 +3258,13 @@ const [lockedFYs, setLockedFYs] = useState([]);
         setCurrentEmpId('admin_temp'); 
       }
       if (rememberMe) localStorage.setItem('rentalOpsUser', adminEmp ? adminEmp.id : 'admin_temp');
+      // C-4: Upgrade to Firebase Auth (best-effort) so rules can authorise.
+      const adminEmail = adminEmp?.email || 'admin@rentalops.com';
+      upgradeFirebaseAuth(adminEmail, password, {
+        employee_id: adminEmp?.id || null,
+        role: 'admin',
+        name: adminEmp?.name || 'Administrator',
+      });
       return;
     }
     }
@@ -3139,6 +3300,14 @@ const [lockedFYs, setLockedFYs] = useState([]);
         setRole(emp.role);
         setCurrentEmpId(emp.id);
         if (rememberMe) localStorage.setItem('rentalOpsUser', emp.id);
+        // C-4: Upgrade to Firebase Auth (best-effort) so rules can authorise.
+        if (emp.email) {
+          upgradeFirebaseAuth(emp.email, password, {
+            employee_id: emp.id,
+            role: emp.role,
+            name: emp.name || '',
+          });
+        }
         return;
       } else {
         const attempts = (emp.failed_login_attempts || 0) + 1;
@@ -3193,6 +3362,9 @@ const [lockedFYs, setLockedFYs] = useState([]);
     setImpersonating(null);
     setLoginForm({ username: '', password: '' });
     localStorage.removeItem('rentalOpsUser');
+    // C-4: Sign out of Firebase Auth so a fresh anonymous session is created
+    // for the login screen's pre-auth Firestore reads.
+    signOut(auth).catch(() => { /* ignore */ });
   };
 
   const onProjectClick = (id) => {
@@ -3300,6 +3472,7 @@ const [lockedFYs, setLockedFYs] = useState([]);
   }
 
   return (
+    <ErrorBoundary>
     <div className="flex h-screen w-full bg-slate-50 font-sans overflow-hidden">
       <GlobalSearch
         isOpen={isSearchOpen}
@@ -3307,6 +3480,29 @@ const [lockedFYs, setLockedFYs] = useState([]);
         projects={projects}
         clients={clients}
         inventory={inventory}
+      />
+      <AppAssistantLauncher onClick={() => setIsAssistantOpen(true)} />
+      <AppAssistant
+        isOpen={isAssistantOpen}
+        onClose={() => setIsAssistantOpen(false)}
+        projects={projects}
+        clients={clients}
+        employees={safeEmployees}
+        expenses={expenses}
+        payments={payments}
+        payouts={payouts}
+        vendorPayments={vendorPayments}
+        taxInvoices={taxInvoicesList}
+        purchaseInvoices={purchaseInvoicesList}
+        inventory={inventory}
+        journalEntries={journalEntries}
+        hrLeaves={hrLeaves}
+        role={effectiveRole}
+        db={db}
+        appId={appId}
+        logAction={logAction}
+        addToast={addToast}
+        currentUserId={user?.uid}
       />
       <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2">
         {toasts.map(t => (
@@ -3336,18 +3532,32 @@ const [lockedFYs, setLockedFYs] = useState([]);
           {can(role,'outsourcing','view') && <NavItem to="/outsourcing" setMobileMenuOpen={setMobileMenuOpen} icon={ShoppingBag} label="Outsource" />}
           {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
+          {can(role,'configurations','view') && <NavItem to="/configurations" setMobileMenuOpen={setMobileMenuOpen} icon={Layers} label="Configs" />}
           <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />
           {can(role,'finance','view') && <NavItem to="/finance" setMobileMenuOpen={setMobileMenuOpen} icon={Wallet} label="Finance" />}
+          {can(role,'finance','view') && <NavItem to="/accounting" setMobileMenuOpen={setMobileMenuOpen} icon={ReceiptText} label="Accounts" />}
           <div className="my-3 border-t border-slate-100"></div>
           <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Operations</div>
           {can(role,'challans','view') && <NavItem to="/challans" setMobileMenuOpen={setMobileMenuOpen} icon={ClipboardList} label="Challans" />}
           {can(role,'documents','view') && <NavItem to="/documents" setMobileMenuOpen={setMobileMenuOpen} icon={FolderOpen} label="Documents" />}
           {can(role,'purchase_invoices','view') && <NavItem to="/purchase-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={Receipt} label="Purchases" />}
+          {can(role,'tax_invoices','view') && <NavItem to="/tax-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Tax Invoices" />}
           {can(role,'reports','view') && <NavItem to="/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Reports" />}
+          {can(role,'reports','view') && <NavItem to="/business-report" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Business Report" />}
+          <div className="my-3 border-t border-slate-100"></div>
+          <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Human Resource</div>
+          {can(role,'hr_dashboard','view') && <NavItem to="/hr/dashboard" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="HR Dashboard" />}
+          {(can(role,'hr_attendance','view')) && <NavItem to="/hr/attendance" setMobileMenuOpen={setMobileMenuOpen} icon={Clock} label="Attendance" badge={shiftRequests.filter(s => s.status === 'Pending').length} />}
+          {(can(role,'hr_leaves','view') || can(role,'hr_leaves','view_own')) && <NavItem to="/hr/leaves" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Leave Mgmt" badge={hrLeaves.filter(l => l.status === 'Pending').length} />}
+          {can(role,'hr_reports','view') && <NavItem to="/hr/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileBarChart} label="HR Reports" />}
+          {can(role,'hr_payroll','view') && <NavItem to="/hr/payroll" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Payroll" />}
+          {can(role,'hr_settings','view') && <NavItem to="/hr/settings" setMobileMenuOpen={setMobileMenuOpen} icon={Settings} label="HR Settings" />}
+          {can(role,'hr_portal','view') && <NavItem to="/hr/portal" setMobileMenuOpen={setMobileMenuOpen} icon={UserCheck} label="My HR Portal" />}
           <div className="my-3 border-t border-slate-100"></div>
           <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Administration</div>
           {can(role,'employees','view') && <NavItem to="/employees" setMobileMenuOpen={setMobileMenuOpen} icon={UserCog} label="Employees" badge={employees.filter(e => e.is_locked).length} />}
           {can(role,'audit_logs','view') && <NavItem to="/audit" setMobileMenuOpen={setMobileMenuOpen} icon={Activity} label="Audit Logs" />}
+          {role === 'admin' && <NavItem to="/data-portal" setMobileMenuOpen={setMobileMenuOpen} icon={Download} label="Data Portal" />}
           {can(role,'admin_tools','view') && <NavItem to="/admin" setMobileMenuOpen={setMobileMenuOpen} icon={Settings} label="Admin" />}
         </div>
         <div className="border-t border-slate-100 p-3">
@@ -3413,14 +3623,27 @@ const [lockedFYs, setLockedFYs] = useState([]);
                   {can(role,'outsourcing','view') && <NavItem to="/outsourcing" setMobileMenuOpen={setMobileMenuOpen} icon={ShoppingBag} label="Outsource" />}
                   {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
                   {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
+                  {can(role,'configurations','view') && <NavItem to="/configurations" setMobileMenuOpen={setMobileMenuOpen} icon={Layers} label="Configs" />}
                   <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />
                   {can(role,'finance','view') && <NavItem to="/finance" setMobileMenuOpen={setMobileMenuOpen} icon={Wallet} label="Finance" />}
+                  {can(role,'finance','view') && <NavItem to="/accounting" setMobileMenuOpen={setMobileMenuOpen} icon={ReceiptText} label="Accounts" />}
                   <div className="my-3 border-t border-slate-100"></div>
                   <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Operations</div>
                   {can(role,'challans','view') && <NavItem to="/challans" setMobileMenuOpen={setMobileMenuOpen} icon={ClipboardList} label="Challans" />}
                   {can(role,'documents','view') && <NavItem to="/documents" setMobileMenuOpen={setMobileMenuOpen} icon={FolderOpen} label="Documents" />}
                   {can(role,'purchase_invoices','view') && <NavItem to="/purchase-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={Receipt} label="Purchases" />}
+                  {can(role,'tax_invoices','view') && <NavItem to="/tax-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Tax Invoices" />}
                   {can(role,'reports','view') && <NavItem to="/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Reports" />}
+                  {can(role,'reports','view') && <NavItem to="/business-report" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Business Report" />}
+                  <div className="my-3 border-t border-slate-100"></div>
+                  <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Human Resource</div>
+                  {can(role,'hr_dashboard','view') && <NavItem to="/hr/dashboard" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="HR Dashboard" />}
+                  {(can(role,'hr_attendance','view')) && <NavItem to="/hr/attendance" setMobileMenuOpen={setMobileMenuOpen} icon={Clock} label="Attendance" badge={shiftRequests.filter(s => s.status === 'Pending').length} />}
+                  {(can(role,'hr_leaves','view') || can(role,'hr_leaves','view_own')) && <NavItem to="/hr/leaves" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Leave Mgmt" badge={hrLeaves.filter(l => l.status === 'Pending').length} />}
+                  {can(role,'hr_reports','view') && <NavItem to="/hr/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileBarChart} label="HR Reports" />}
+                  {can(role,'hr_payroll','view') && <NavItem to="/hr/payroll" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Payroll" />}
+                  {can(role,'hr_settings','view') && <NavItem to="/hr/settings" setMobileMenuOpen={setMobileMenuOpen} icon={Settings} label="HR Settings" />}
+                  {can(role,'hr_portal','view') && <NavItem to="/hr/portal" setMobileMenuOpen={setMobileMenuOpen} icon={UserCheck} label="My HR Portal" />}
                   <div className="my-3 border-t border-slate-100"></div>
                   <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Administration</div>
                   {can(role,'employees','view') && <NavItem to="/employees" setMobileMenuOpen={setMobileMenuOpen} icon={UserCog} label="Employees" badge={employees.filter(e => e.is_locked).length} />}
@@ -3462,22 +3685,35 @@ const [lockedFYs, setLockedFYs] = useState([]);
             
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" />} />
-                <Route path="/dashboard" element={<Dashboard projects={projects} expenses={expenses} role={effectiveRole} clients={clients} onProjectClick={(id) => setSelectedProjectId(id)} employees={safeEmployees} payments={payments} db={db} appId={appId} />} />
-                <Route path="/projects" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
-                <Route path="/projects/:projectId" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/dashboard" element={<Dashboard projects={projects} expenses={expenses} role={effectiveRole} clients={clients} onProjectClick={(id) => setSelectedProjectId(id)} employees={safeEmployees} payments={payments} db={db} appId={appId} timeLogs={timeLogs} hqSettings={hqSettings} currentEmpId={effectiveEmpId} logAction={logAction} addToast={addToast} payouts={payouts} vendorPayments={vendorPayments} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} inventory={inventory} journalEntries={journalEntries} hrLeaves={hrLeaves} currentUserId={user?.uid} />} />
+                <Route path="/projects" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} /></ProtectedRoute>} />
+                <Route path="/projects/:projectId" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} /></ProtectedRoute>} />
                 <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/clients" element={<ProtectedRoute role={effectiveRole} resource="clients"><Clients clients={clients} inventory={inventory} projects={projects} payments={payments} vendorPayments={vendorPayments} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
-                <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
-                <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} /></ProtectedRoute>} />
+                <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
+                <Route path="/configurations" element={<ProtectedRoute role={effectiveRole} resource="configurations"><ConfigurationBuilder configurations={configurations} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
+                <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} expenseCats={[...EXPENSE_CATS, ...customExpenseCategories.filter(c => !EXPENSE_CATS.includes(c))]} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/employees" element={<ProtectedRoute role={effectiveRole} resource="employees"><Employees employees={safeEmployees} role={effectiveRole} db={db} appId={appId} advances={advances} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/admin" element={<ProtectedRoute role={effectiveRole} resource="admin_tools"><AdminTools db={db} appId={appId} logAction={logAction} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute role={effectiveRole} resource="finance"><Finance clients={clients} employees={safeEmployees} projects={projects} payments={payments} payouts={payouts} vendorPayments={vendorPayments} expenses={expenses} advances={advances} role={effectiveRole} db={db} appId={appId} user={user} logAction={logAction} lockedFYs={lockedFYs} /></ProtectedRoute>} />
-                <Route path="/reports" element={<ProtectedRoute role={effectiveRole} resource="reports"><Reports projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} advances={advances} role={effectiveRole} /></ProtectedRoute>} />
+                <Route path="/accounting" element={<ProtectedRoute role={effectiveRole} resource="finance"><Accounting clients={clients} projects={projects} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} payments={payments} vendorPayments={vendorPayments} payouts={payouts} expenses={expenses} advances={advances} chartOfAccounts={chartOfAccounts} manualJournalEntries={journalEntries} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} recurringRules={recurringRules} partyAccounts={partyAccounts} db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/reports" element={<ProtectedRoute role={effectiveRole} resource="reports"><Reports projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} advances={advances} role={effectiveRole} timeLogs={timeLogs} purchaseInvoices={purchaseInvoicesList} taxInvoices={taxInvoicesList} chartOfAccounts={chartOfAccounts} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} journalEntries={journalEntries} partyAccounts={partyAccounts} /></ProtectedRoute>} />
+                <Route path="/business-report" element={<ProtectedRoute role={effectiveRole} resource="reports"><BusinessReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/challans" element={<ProtectedRoute role={effectiveRole} resource="challans"><ChallanManager projects={projects} clients={clients} inventory={inventory} db={db} appId={appId} logAction={logAction} user={user} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/documents" element={<ProtectedRoute role={effectiveRole} resource="documents"><DocumentsHub projects={projects} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
-                <Route path="/purchase-invoices" element={<ProtectedRoute role={effectiveRole} resource="purchase_invoices"><PurchaseInvoices db={db} appId={appId} logAction={logAction} inventory={inventory} clients={clients} role={effectiveRole} /></ProtectedRoute>} />
+                <Route path="/purchase-invoices" element={<ProtectedRoute role={effectiveRole} resource="purchase_invoices"><PurchaseInvoices db={db} appId={appId} logAction={logAction} inventory={inventory} clients={clients} projects={projects} role={effectiveRole} purchaseInvoicesExternal={purchaseInvoicesList} setPurchaseInvoicesExternal={setPurchaseInvoicesList} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/tax-invoices" element={<ProtectedRoute role={effectiveRole} resource="tax_invoices"><TaxInvoices db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} taxInvoices={taxInvoicesList} projects={projects} clients={clients} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/audit" element={<ProtectedRoute role={effectiveRole} resource="audit_logs"><AuditLogs db={db} appId={appId} role={effectiveRole} /></ProtectedRoute>} />
+                              <Route path="/data-portal" element={<ProtectedRoute role={effectiveRole} resource="audit_logs"><DataPortal db={db} appId={appId} role={effectiveRole} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
                 <Route path="/profile" element={<ProfileSettings employee={currentEmployee} db={db} appId={appId} logAction={logAction} />} />
+                {/* HR Module Routes */}
+                <Route path="/hr/dashboard" element={<ProtectedRoute role={effectiveRole} resource="hr_dashboard"><HRDashboard employees={safeEmployees} timeLogs={timeLogs} hrLeaves={hrLeaves} shiftRequests={shiftRequests} penalties={penalties} /></ProtectedRoute>} />
+                <Route path="/hr/attendance" element={<ProtectedRoute role={effectiveRole} resource="hr_attendance"><HRAttendance employees={safeEmployees} timeLogs={timeLogs} shiftRequests={shiftRequests} penalties={penalties} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} addToast={addToast} hqSettings={hqSettings} /></ProtectedRoute>} />
+                <Route path="/hr/leaves" element={<ProtectedRoute role={effectiveRole} resource="hr_leaves" action="view_own"><HRLeaves employees={safeEmployees} hrLeaves={hrLeaves} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/hr/reports" element={<ProtectedRoute role={effectiveRole} resource="hr_reports"><HRReports employees={safeEmployees} timeLogs={timeLogs} hrLeaves={hrLeaves} shiftRequests={shiftRequests} penalties={penalties} payroll={payroll} projects={projects} expenses={expenses} payouts={payouts} advances={advances} role={effectiveRole} db={db} appId={appId} logAction={logAction} hqSettings={hqSettings} /></ProtectedRoute>} />
+                <Route path="/hr/payroll" element={<ProtectedRoute role={effectiveRole} resource="hr_payroll"><HRPayroll employees={safeEmployees} timeLogs={timeLogs} penalties={penalties} payroll={payroll} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/hr/settings" element={<ProtectedRoute role={effectiveRole} resource="hr_settings"><HRSettings hqSettings={hqSettings} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/hr/portal" element={<ProtectedRoute role={effectiveRole} resource="hr_portal"><HRPortal employees={safeEmployees} timeLogs={timeLogs} hrLeaves={hrLeaves} shiftRequests={shiftRequests} penalties={penalties} hqSettings={hqSettings} projects={projects} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
               </Routes>
             {/* ===== ADMIN IMPERSONATION MODAL ===== */}
             {showImpersonateModal && (
@@ -3518,5 +3754,6 @@ const [lockedFYs, setLockedFYs] = useState([]);
         </main>
       </div>
     </div>
+    </ErrorBoundary>
   );
 }

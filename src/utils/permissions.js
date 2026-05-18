@@ -115,6 +115,12 @@ export const PERMISSIONS = {
     edit:   ['admin', 'accountant', 'manager'],
     delete: ['admin', 'accountant'],
   },
+  tax_invoices: {
+    view:   ['admin', 'accountant', 'manager'],
+    create: ['admin', 'accountant', 'manager'],
+    edit:   ['admin', 'accountant', 'manager'],
+    delete: ['admin', 'accountant'],
+  },
   documents: {
     view:   ['admin', 'accountant', 'manager', 'tech'],
     create: ['admin', 'manager'],
@@ -127,6 +133,56 @@ export const PERMISSIONS = {
   },
   audit_logs: {
     view: ['admin', 'accountant'],
+  },
+  // ── HR Module Resources ──────────────────────────────────────────────────────
+  hr_dashboard: {
+    view: ['admin', 'accountant', 'manager'],
+  },
+  hr_attendance: {
+    view:        ['admin', 'accountant', 'manager'],
+    create:      ['admin', 'manager'],
+    edit:        ['admin', 'manager'],
+    delete:      ['admin'],
+    close_shift: ['admin', 'manager'],
+  },
+  hr_leaves: {
+    view:     ['admin', 'accountant', 'manager'],
+    view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
+    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
+    approve:  ['admin', 'manager'],
+  },
+  hr_shifts: {
+    view:     ['admin', 'accountant', 'manager'],
+    view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
+    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
+    approve:  ['admin', 'manager'],
+    clarify:  ['admin', 'manager'],
+  },
+  hr_penalties: {
+    view:       ['admin', 'accountant', 'manager'],
+    create:     ['admin', 'manager'],
+    bulk_apply: ['admin'],
+  },
+  hr_payroll: {
+    view:     ['admin', 'accountant'],
+    generate: ['admin', 'accountant'],
+  },
+  hr_reports: {
+    view:   ['admin', 'accountant', 'manager'],
+    export: ['admin', 'accountant', 'manager'],
+  },
+  hr_settings: {
+    view: ['admin'],
+    edit: ['admin'],
+  },
+  hr_portal: {
+    view: ['admin', 'accountant', 'manager', 'tech', 'user'],
+  },
+  configurations: {
+    view:   ['admin', 'accountant', 'manager', 'tech', 'user'],
+    create: ['admin', 'manager'],
+    edit:   ['admin', 'manager'],
+    delete: ['admin'],
   },
 };
 
@@ -142,9 +198,21 @@ export const RESOURCE_DEFS = {
   challans:          { label: 'Challans',            actions: ['view', 'create', 'edit', 'delete'] },
   expenses:          { label: 'Expenses',            actions: ['view_all', 'view_own', 'create', 'edit', 'delete', 'approve'] },
   purchase_invoices: { label: 'Purchase Invoices',   actions: ['view', 'create', 'edit', 'delete'] },
+  tax_invoices:      { label: 'Tax Invoices',        actions: ['view', 'create', 'edit', 'delete'] },
   documents:         { label: 'Documents',           actions: ['view', 'create', 'edit', 'delete'] },
   admin_tools:       { label: 'Admin Tools',         actions: ['view', 'edit'] },
   audit_logs:        { label: 'Audit Logs',          actions: ['view'] },
+  // HR Module
+  hr_dashboard:      { label: 'HR Dashboard',        actions: ['view'] },
+  hr_attendance:     { label: 'HR Attendance',       actions: ['view', 'create', 'edit', 'delete', 'close_shift'] },
+  hr_leaves:         { label: 'HR Leaves',           actions: ['view', 'view_own', 'create', 'approve'] },
+  hr_shifts:         { label: 'HR Shift Requests',   actions: ['view', 'view_own', 'create', 'approve', 'clarify'] },
+  hr_penalties:      { label: 'HR Penalties',        actions: ['view', 'create', 'bulk_apply'] },
+  hr_payroll:        { label: 'HR Payroll',          actions: ['view', 'generate'] },
+  hr_reports:        { label: 'HR Reports',          actions: ['view', 'export'] },
+  hr_settings:       { label: 'HR Settings',         actions: ['view', 'edit'] },
+  hr_portal:         { label: 'HR Portal',           actions: ['view'] },
+  configurations:    { label: 'Configurations',       actions: ['view', 'create', 'edit', 'delete'] },
 };
 
 // ── Human-readable action labels ──────────────────────────────────────────────
@@ -163,6 +231,12 @@ export const ACTION_LABELS = {
   allocation:   'Allocate Items',
   approve:      'Approve',
   manage_roles: 'Change User Roles',
+  // HR actions
+  close_shift: 'Close Open Shift',
+  bulk_apply:  'Bulk Apply',
+  generate:    'Generate',
+  clarify:     'Request Clarification',
+  export:      'Export',
 };
 
 // ── Build full boolean config from static PERMISSIONS (used as default) ───────
@@ -207,9 +281,11 @@ export const getLiveConfig = () => _liveConfig;
  */
 export const can = (role, resource, action) => {
   if (!role || !resource || !action) return false;
-  // Use Firestore-loaded live config if available
+  // Use Firestore-loaded live config if available, but fall back to static for missing resources
   if (_liveConfig) {
-    return _liveConfig.permissions?.[role]?.[resource]?.[action] ?? false;
+    const liveResult = _liveConfig.permissions?.[role]?.[resource]?.[action];
+    if (liveResult !== undefined) return liveResult;
+    // Resource not in live config — fall through to static defaults
   }
   // Fallback: static compile-time permissions
   const resource_perms = PERMISSIONS[resource];
@@ -238,4 +314,14 @@ export const getNavAccess = (role) => ({
   employees:         can(role, 'employees', 'view'),
   admin_tools:       can(role, 'admin_tools', 'view'),
   audit_logs:        can(role, 'audit_logs', 'view'),
+  // HR Module
+  hr_dashboard:      can(role, 'hr_dashboard', 'view'),
+  hr_attendance:     can(role, 'hr_attendance', 'view'),
+  hr_leaves:         can(role, 'hr_leaves', 'view') || can(role, 'hr_leaves', 'view_own'),
+  hr_shifts:         can(role, 'hr_shifts', 'view') || can(role, 'hr_shifts', 'view_own'),
+  hr_penalties:      can(role, 'hr_penalties', 'view'),
+  hr_payroll:        can(role, 'hr_payroll', 'view'),
+  hr_reports:        can(role, 'hr_reports', 'view'),
+  hr_settings:       can(role, 'hr_settings', 'view'),
+  hr_portal:         can(role, 'hr_portal', 'view'),
 });

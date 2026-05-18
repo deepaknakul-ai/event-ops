@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../hr/workforce-app"
+		}
+	],
+	"settings": {
+		"chat.agent.maxRequests": 50
+	}
+}
