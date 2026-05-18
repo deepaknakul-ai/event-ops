@@ -81,7 +81,10 @@ service cloud.firestore {
 
       // Reads: isAuthed() is intentionally broad — anonymous sessions need to
       // read employees/settings for the login page.
-      allow read: if isAuthed();
+      // audit_logs is explicitly excluded: its specific rule below restricts
+      // reads to admin/accountant only (and Firestore OR semantics would let
+      // the wildcard override that restriction without this exclusion).
+      allow read: if isAuthed() && collection != 'audit_logs';
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

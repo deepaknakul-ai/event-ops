@@ -22,7 +22,7 @@ import {
 import { Routes, Route, Navigate, useLocation, Link, useNavigate, useParams } from 'react-router-dom';
 import { auth, db } from './firebase';
 import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
-import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword } from './utils/helpers';
+import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
@@ -3223,28 +3223,29 @@ const [payroll, setPayroll] = useState([]);
     e.preventDefault();
     setLoginError('');
     const { username, password } = { username: loginForm.username.trim(), password: loginForm.password };
-    const hashedInput = await hashPassword(password);
-
     // Admin Check with Employee Matching
     if (username === 'admin') {
-      let adminPass = 'admin123';
-      let isAdminHashed = false;
+      let adminPass = null;
       try {
         const secSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security'));
         if (secSnap.exists()) {
-            adminPass = secSnap.data().admin_password || 'admin123';
-            isAdminHashed = !!secSnap.data().password_hashed;
+            adminPass = secSnap.data().admin_password || null;
         }
       } catch (err) { console.error("Error fetching admin settings", err); }
 
-      const adminMatch = isAdminHashed ? (hashedInput === adminPass) : (password === adminPass);
+      if (!adminPass) {
+        setLoginError('Admin account is not configured. Please use the recovery key to set a password.');
+        return;
+      }
+      const adminMatch = await verifyPassword(password, adminPass);
       if (adminMatch) {
-        // Auto-migrate plaintext admin password to hashed
-        if (!isAdminHashed) {
+        // Upgrade legacy hash to PBKDF2 on successful login
+        if (!adminPass.startsWith('v2:')) {
           try {
             const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
-            await updateDoc(secRef, { admin_password: hashedInput, password_hashed: true });
-          } catch (e) { console.warn('Failed to migrate admin password to hash:', e.message); }
+            const upgraded = await hashPassword(password);
+            await updateDoc(secRef, { admin_password: upgraded, password_hashed: true });
+          } catch (e) { console.warn('Failed to upgrade admin password hash:', e.message); }
         }
 
       setRole('admin');
@@ -3277,20 +3278,23 @@ const [payroll, setPayroll] = useState([]);
         return;
       }
 
-      const validPass = emp.password || 'psw123';
-      const isHashed = !!emp.password_hashed;
-      const passwordMatch = isHashed ? (hashedInput === validPass) : (password === validPass);
+      if (!emp.password) {
+        setLoginError('Account has no password set. Contact Admin to configure your account.');
+        return;
+      }
+      const passwordMatch = await verifyPassword(password, emp.password);
       if (passwordMatch) {
         if (emp.status === 'Disabled' || emp.status === 'Deactivated') {
           setLoginError('Account is disabled. Contact Admin.');
           return;
         }
         
-        // Auto-migrate plaintext password to hashed on successful login
+        // Upgrade legacy hash to PBKDF2 on successful login
         const updates = {};
         if (emp.failed_login_attempts > 0) updates.failed_login_attempts = 0;
-        if (!isHashed) {
-          updates.password = hashedInput;
+        if (!emp.password.startsWith('v2:')) {
+          const upgraded = await hashPassword(password);
+          updates.password = upgraded;
           updates.password_hashed = true;
         }
         if (Object.keys(updates).length > 0) {
@@ -3331,8 +3335,11 @@ const [payroll, setPayroll] = useState([]);
     try {
         const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
         const secSnap = await getDoc(secRef);
-        const validKey = secSnap.exists() ? secSnap.data().recovery_key : 'rentalops'; // Default key if not set
-        
+        if (!secSnap.exists() || !secSnap.data().recovery_key) {
+          return alert('No recovery key is configured. Contact your system administrator.');
+        }
+        const validKey = secSnap.data().recovery_key;
+
         if (recoveryForm.key === validKey) {
             const hashedNewPass = await hashPassword(recoveryForm.new_pass);
             await setDoc(secRef, { admin_password: hashedNewPass, password_hashed: true, recovery_key: validKey });

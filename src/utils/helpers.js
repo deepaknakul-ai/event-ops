@@ -675,13 +675,51 @@ export const calculateLEDSignalPorts = (totalPixelWidth, totalPixelHeight) => {
   };
 };
 
-// ── Password hashing (SHA-256 via Web Crypto API) ─────────────────────────────
+// ── Password hashing (PBKDF2-SHA-256 via Web Crypto API) ─────────────────────
+// Output format: 'v2:{16-byte saltHex}:{32-byte hashHex}'
+// Legacy SHA-256 hashes (64 hex chars, no prefix) are verified by
+// verifyPassword() and upgraded to PBKDF2 transparently on next login.
 export const hashPassword = async (plaintext) => {
   const encoder = new TextEncoder();
-  const data = encoder.encode(plaintext);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', encoder.encode(plaintext), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 200000 },
+    keyMaterial, 256
+  );
+  const toHex = (buf) => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `v2:${toHex(salt.buffer)}:${toHex(bits)}`;
+};
+
+// Verify a plaintext password against any stored hash format:
+//   'v2:saltHex:hashHex'  → PBKDF2 (current)
+//   64 hex chars          → legacy SHA-256
+//   anything else         → plaintext (very old installs)
+export const verifyPassword = async (plaintext, storedHash) => {
+  if (!plaintext || !storedHash) return false;
+  const encoder = new TextEncoder();
+  if (storedHash.startsWith('v2:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const salt = new Uint8Array(parts[1].match(/.{2}/g).map(b => parseInt(b, 16)));
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', encoder.encode(plaintext), 'PBKDF2', false, ['deriveBits']
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 200000 },
+      keyMaterial, 256
+    );
+    const actual = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return actual === parts[2];
+  }
+  if (storedHash.length === 64 && /^[0-9a-f]+$/.test(storedHash)) {
+    const buf = await crypto.subtle.digest('SHA-256', encoder.encode(plaintext));
+    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return hex === storedHash;
+  }
+  return plaintext === storedHash;
 };
 
 // ── HR Module Helpers ─────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { hashPassword } from '../utils/helpers';
+import { hashPassword, verifyPassword } from '../utils/helpers';
 
 const ProfileSettings = ({ employee, db, appId, logAction }) => {
   const [formData, setFormData] = useState({ name: '', mobile1: '', mobile2: '', address: '', email: '' });
@@ -30,12 +30,10 @@ const ProfileSettings = ({ employee, db, appId, logAction }) => {
     if (!passForm.current || !passForm.new || !passForm.confirm) return alert("All fields required");
     if (passForm.new !== passForm.confirm) return alert("New passwords do not match");
     
-    // Compare current password (supports both hashed & legacy plaintext)
-    const hashedCurrent = await hashPassword(passForm.current);
     const storedPass = employee.password;
-    const isHashed = !!employee.password_hashed;
-    const currentMatch = isHashed ? (hashedCurrent === storedPass) : (passForm.current === storedPass);
-    if (!currentMatch) return alert("Incorrect current password");
+    if (!storedPass) return alert('No password on record. Ask admin to set your password first.');
+    const currentMatch = await verifyPassword(passForm.current, storedPass);
+    if (!currentMatch) return alert('Incorrect current password');
 
     try {
       const hashedNew = await hashPassword(passForm.new);
