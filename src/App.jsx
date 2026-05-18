@@ -3305,6 +3305,17 @@ const [payroll, setPayroll] = useState([]);
         setRole(emp.role);
         setCurrentEmpId(emp.id);
         if (rememberMe) localStorage.setItem('rentalOpsUser', emp.id);
+        // Pre-write the /users/{uid} mirror for the CURRENT Firebase Auth session
+        // (which may be anonymous) so Firestore writes succeed immediately
+        // without waiting for upgradeFirebaseAuth to complete.
+        const preWriteUid = auth.currentUser?.uid;
+        if (preWriteUid) {
+          setDoc(
+            doc(db, 'artifacts', appId, 'public', 'data', 'users', preWriteUid),
+            { email: emp.email || null, employee_id: emp.id, role: emp.role, name: emp.name || '', updated_at: new Date().toISOString() },
+            { merge: true }
+          ).catch(err => console.warn('User mirror pre-write failed:', err?.message));
+        }
         // C-4: Upgrade to Firebase Auth (best-effort) so Firestore rules can
         // resolve the role via /users/{uid}.  Use the real email when present;
         // otherwise synthesize a stable internal email from the employee ID so

@@ -206,18 +206,27 @@ service cloud.firestore {
       allow read: if isAuthed() && (uid == userEmpId() || isAdmin(appId));
 
       // Self-create: role field (if provided) must match the employee record.
+      // Supports two auth patterns:
+      //   A) Auth UID == Firestore employee ID  (classic email-based login)
+      //   B) Auth UID differs from employee ID  (synthetic-email login for employees
+      //      without a real email — employee_id field carries the Firestore ID)
+      function empRoleMatches(empId) {
+        return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/employees/$(empId)) &&
+               request.resource.data.role ==
+                 get(/databases/$(database)/documents/artifacts/$(appId)/public/data/employees/$(empId)).data.role;
+      }
       allow create: if isAuthed() && uid == userEmpId() && (
         !('role' in request.resource.data) ||
-        request.resource.data.role ==
-          get(/databases/$(database)/documents/artifacts/$(appId)/public/data/employees/$(userEmpId())).data.role
+        empRoleMatches(userEmpId()) ||
+        ('employee_id' in request.resource.data && empRoleMatches(request.resource.data.employee_id))
       );
 
       // Self-update: role may only be changed to the value in the employee record.
       allow update: if isAdmin(appId) || (
         isAuthed() && uid == userEmpId() && (
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) ||
-          request.resource.data.role ==
-            get(/databases/$(database)/documents/artifacts/$(appId)/public/data/employees/$(userEmpId())).data.role
+          empRoleMatches(userEmpId()) ||
+          ('employee_id' in request.resource.data && empRoleMatches(request.resource.data.employee_id))
         )
       );
 
