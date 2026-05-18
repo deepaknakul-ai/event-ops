@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, memo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertCircle, ArrowDownRight, ArrowLeft, ArrowUpRight, Calculator, CheckCircle, ChevronDown, ChevronUp,
-  ClipboardList, Copy, Download, Edit, FileCheck, FileText, History, ListChecks,
+  ClipboardList, Clock, Copy, Download, Edit, FileCheck, FileText, History, ListChecks,
   MessageCircle, Monitor, Package, Percent, Plus, Printer, Receipt, RotateCcw,
   Search, Share2, Trash2, Truck, TrendingUp, Users, X, Zap, Upload, Image as ImageIcon
 } from 'lucide-react';
@@ -12,7 +12,7 @@ import {
 } from 'recharts';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
@@ -20,19 +20,67 @@ import { storage } from '../firebase';
 import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS } from '../utils/constants';
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
-  getDaysDifference, getFinancialYear, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost
+  getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
+  getLogisticsLines, sumLogisticsRecord
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
 import { can } from '../utils/permissions';
 
+// M-1 fix: explicit state machine. Free transitions previously allowed
+// Closed → Quoted, leaving stale invoice fields. Map below blocks invalid moves
+// and signals which transitions need invoice cleanup.
+const PROJECT_STATE_TRANSITIONS = {
+  Quoted: ['Confirmed', 'Cancelled'],
+  Confirmed: ['Ongoing', 'Quoted', 'Cancelled'],
+  Ongoing: ['Completed', 'Confirmed', 'Cancelled'],
+  Completed: ['Closed', 'Ongoing'],
+  Closed: ['Completed'],
+  Cancelled: ['Quoted'],
+};
+const isValidProjectTransition = (from, to) => {
+  if (!from) return true; // brand new project
+  if (from === to) return true;
+  return (PROJECT_STATE_TRANSITIONS[from] || []).includes(to);
+};
+// When demoting away from invoiced/closed, clear invoice fields so GSTR-1
+// and Accounting don't keep counting a project that's no longer billable.
+const INVOICE_FIELD_RESET = {
+  invoice_status: 'Not Invoiced',
+  invoice_no: '',
+  invoice_date: '',
+  invoice_due_date: '',
+  invoice_label: '',
+  invoice_remarks: '',
+  tax_invoice_id: '',
+};
+
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast }) => {
+const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast, timeLogs = [], taxInvoices = [] }) => {
   const navigate = useNavigate();
   const { projectId } = useParams();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
+
+  // Inline date editing on detail panel
+  const [editingDateField, setEditingDateField] = useState(null); // 'setup_date' | 'start_date' | 'end_date'
+  const [editingDateValue, setEditingDateValue] = useState('');
+
+  const handleInlineDateSave = async () => {
+    if (!editingDateField || !selectedProject) return;
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
+        [editingDateField]: editingDateValue,
+      });
+      logAction?.('projects', 'update_date', selectedProject.id, { field: editingDateField, value: editingDateValue }, selectedProject.project_name);
+      addToast?.('Date updated', 'success');
+    } catch (e) {
+      addToast?.('Failed to update date', 'error');
+    }
+    setEditingDateField(null);
+    setEditingDateValue('');
+  };
   const [isEditItemModalOpen, setIsEditItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   
@@ -107,9 +155,25 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   });
   const [isDefaultFilter, setIsDefaultFilter] = useState(true);
   const [quickFilter, setQuickFilter] = useState('');
+  // Bulk / Group Invoice state
+  const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
+  const [bulkInvoiceSelected, setBulkInvoiceSelected] = useState(new Set());
+  const [bulkInvoiceForm, setBulkInvoiceForm] = useState({ invoice_no: '', invoice_date: new Date().toISOString().split('T')[0], invoice_status: 'Invoiced' });
+  const [bulkFilter, setBulkFilter] = useState({ clientId: '', status: '', dateFrom: '', dateTo: '' });
+
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 15;
   const [sortConfig, setSortConfig] = useState({ key: 'start_date', direction: 'desc' });
+
+  const canViewProjectFinancials = can(role, 'projects', 'view_rates');
+  const canManageProjectInvoices = can(role, 'projects', 'invoice');
+  const canEditProjects = can(role, 'projects', 'edit');
+
+  useEffect(() => {
+    if (!canViewProjectFinancials && sortConfig.key === 'total_value') {
+      setSortConfig(prev => ({ ...prev, key: 'start_date' }));
+    }
+  }, [canViewProjectFinancials, sortConfig.key]);
 
   const [isAllocationModalOpen, setIsAllocationModalOpen] = useState(false);
   const [allocationForm, setAllocationForm] = useState({ item_id: '', qty: 1, rate: 0, days: 1, gst_rate: 18, available_qty: 0, description: '', is_led: false, tilesWide: 0, tilesHigh: 0, tileModelData: null });
@@ -146,8 +210,45 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const [newProj, setNewProj] = useState({ 
     project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '', 
     venue: '', status: 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '',
-    items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18
+    items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18,
+    party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''
   });
+
+  const getPartyCompanies = (client) => {
+    if (!client) return [];
+    const primary = {
+      id: 'primary',
+      name: client.name || 'Primary Company',
+      gstin: client.gstin || '',
+      address: client.address || '',
+    };
+    const extras = (client.companies || []).map(c => ({
+      id: c.id,
+      name: c.name || 'Branch',
+      gstin: c.gstin || '',
+      address: c.address || '',
+    }));
+    return [primary, ...extras];
+  };
+
+  const projectClientEntityOptions = useMemo(() => {
+    const rows = [];
+    clients.forEach(c => {
+      const companies = getPartyCompanies(c);
+      companies.forEach(co => {
+        rows.push({
+          value: co.id === 'primary' ? c.id : `${c.id}::${co.id}`,
+          client_id: c.id,
+          company_id: co.id,
+          company_name: co.name,
+          company_gstin: co.gstin,
+          company_address: co.address,
+          label: co.id === 'primary' ? c.name : `${c.name} — ${co.name}`,
+        });
+      });
+    });
+    return rows;
+  }, [clients]);
 
   useEffect(() => {
     if (projectId) setSelectedProjectId(projectId);
@@ -174,6 +275,29 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       (a, b) => new Date(b.created_at || b.date) - new Date(a.created_at || a.date)
     )[0];
   }, [selectedProject?.remarks]);
+
+  const handleBulkInvoiceApply = async () => {
+    if (!can(role, 'projects', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (bulkInvoiceSelected.size === 0) return alert('Select at least one project.');
+    if (!bulkInvoiceForm.invoice_no.trim()) return alert('Enter an Invoice Number.');
+    if (!bulkInvoiceForm.invoice_date) return alert('Enter an Invoice Date.');
+    const confirmed = window.confirm(`Apply invoice #${bulkInvoiceForm.invoice_no} to ${bulkInvoiceSelected.size} project(s)?`);
+    if (!confirmed) return;
+    const updates = [...bulkInvoiceSelected].map(id =>
+      updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id), {
+        invoice_status: bulkInvoiceForm.invoice_status,
+        invoice_no: bulkInvoiceForm.invoice_no.trim(),
+        invoice_date: bulkInvoiceForm.invoice_date,
+      })
+    );
+    await Promise.all(updates);
+    logAction('projects', 'bulk_invoice', 'multiple', bulkInvoiceForm, `${bulkInvoiceSelected.size} projects`);
+    setBulkInvoiceOpen(false);
+    setBulkInvoiceSelected(new Set());
+    setBulkInvoiceForm({ invoice_no: '', invoice_date: new Date().toISOString().split('T')[0], invoice_status: 'Invoiced' });
+    setBulkFilter({ clientId: '', status: '', dateFrom: '', dateTo: '' });
+    alert(`Invoice applied to ${updates.length} project(s).`);
+  };
 
   const handleSaveRemark = async (projectId, newRemark) => {
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', projectId), {
@@ -256,6 +380,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const exportFilteredProjects = () => {
+    if (!canViewProjectFinancials) return addToast('Access denied: financial export is restricted.', 'error');
     if (sortedProjects.length === 0) return alert("No projects to export");
     const data = sortedProjects.map(p => ({
         "Project Name": p.project_name,
@@ -389,14 +514,46 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   }, [paginatedProjects, clientMap]);
 
   // ... (Keep existing helpers: getAvailableQty, isEmployeeBusy) ...
+  // H-4 fix: composite kit availability now expands sub-components recursively
+  // with a cycle guard. Returns a Map of leafItemId → qtyNeeded for given top-level qty.
+  const expandComposite = (itemId, qty, visited = new Set()) => {
+    const result = new Map();
+    if (visited.has(itemId)) return result; // cycle guard (e.g., A→B→A)
+    const it = inventory.find(i => i.id === itemId);
+    if (!it) return result;
+    if (!it.is_composite || !Array.isArray(it.composition) || it.composition.length === 0) {
+      result.set(itemId, (result.get(itemId) || 0) + (parseInt(qty) || 0));
+      return result;
+    }
+    visited.add(itemId);
+    it.composition.forEach(c => {
+      const subQty = (parseInt(c.qty) || 0) * (parseInt(qty) || 0);
+      if (subQty <= 0) return;
+      const subMap = expandComposite(c.item_id, subQty, new Set(visited));
+      subMap.forEach((q, id) => result.set(id, (result.get(id) || 0) + q));
+    });
+    return result;
+  };
+
   const getAvailableQty = (itemId) => {
     const item = inventory.find(i => i.id === itemId);
     if (!item) return 0;
+    // External / vendor-supplied items: treated as virtually unlimited (G-16);
+    // physical stock lives at the vendor.
+    if (item.is_external) return Number.MAX_SAFE_INTEGER;
     if (!selectedProject?.start_date || !selectedProject?.end_date) return item.total;
     const overlappingProjs = projects.filter(p => p.id !== selectedProject.id && ['Confirmed', 'Ongoing'].includes(p.status) && isDateOverlap(selectedProject.start_date, selectedProject.end_date, p.start_date, p.end_date));
+    // For composite kits we need to check leaf-component conflicts, not the kit id.
     const usedQty = overlappingProjs.reduce((acc, p) => {
-      const alloc = (p.items || []).find(i => i.item_id === itemId);
-      return acc + (alloc ? (parseInt(alloc.qty) || 0) : 0);
+      let consumed = 0;
+      (p.items || []).forEach(alloc => {
+        const aq = parseInt(alloc.qty) || 0;
+        if (aq <= 0) return;
+        // expand each allocated kit to its leaves and count contribution to this itemId
+        const leaves = expandComposite(alloc.item_id, aq);
+        consumed += leaves.get(itemId) || 0;
+      });
+      return acc + consumed;
     }, 0);
     return Math.max(0, item.total - usedQty);
   };
@@ -414,7 +571,8 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setNewProj({ 
       project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '', 
       venue: '', status: 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '', 
-      items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18
+      items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18,
+      party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''
     });
     setClientSearchQuery('');
     setIsCreateOpen(true);
@@ -430,7 +588,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       invoice_no: proj.invoice_no || '', 
       invoice_date: proj.invoice_date || '',
       items: proj.items || [], assigned_employees: proj.assigned_employees || [], logistics_costs: proj.logistics_costs || {},
-      package_cost: proj.package_cost || 0, package_cost_gst: proj.package_cost_gst || 18
+      package_cost: proj.package_cost || 0, package_cost_gst: proj.package_cost_gst || 18,
+      party_company_id: proj.party_company_id || 'primary',
+      party_company_name: proj.party_company_name || (clients.find(c => c.id === proj.client_id)?.name || ''),
+      party_company_gstin: proj.party_company_gstin || (clients.find(c => c.id === proj.client_id)?.gstin || ''),
+      party_company_address: proj.party_company_address || (clients.find(c => c.id === proj.client_id)?.address || '')
     });
     setClientSearchQuery(clients.find(c => c.id === proj.client_id)?.name || '');
     setIsCreateOpen(true);
@@ -455,10 +617,18 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     if (editingId ? !can(role, 'projects', 'edit') : !can(role, 'projects', 'create')) return addToast('Access denied: insufficient permissions.', 'error');
     if(!newProj.client_id || !newProj.project_name) return addToast("Missing Client or Project Name", 'error');
     
+    const selectedClient = clients.find(c => c.id === newProj.client_id);
+    const clientCompanies = getPartyCompanies(selectedClient);
+    const selectedCompany = clientCompanies.find(c => c.id === newProj.party_company_id) || clientCompanies[0] || null;
+
     // Ensure default invoice status
     const data = { 
         ...newProj, 
         invoice_status: newProj.invoice_status || 'Not Invoiced',
+      party_company_id: selectedCompany?.id || '',
+      party_company_name: selectedCompany?.name || '',
+      party_company_gstin: selectedCompany?.gstin || '',
+      party_company_address: selectedCompany?.address || '',
         updated_at: serverTimestamp() 
     };
 
@@ -478,6 +648,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const updateStatus = async (pid, newStatus) => {
     if (!can(role, 'projects', 'edit')) return alert('Access denied: insufficient permissions.');
     if (newStatus === 'Closed' && !can(role, 'projects', 'close')) return alert("Only Admin can close projects.");
+    const proj = projects.find(p => p.id === pid);
+    const fromStatus = proj?.status || 'Quoted';
+    // M-1 fix: enforce state machine. Block illegal transitions like Closed → Quoted.
+    if (!isValidProjectTransition(fromStatus, newStatus)) {
+      return alert(`Invalid transition: ${fromStatus} → ${newStatus}. Allowed next states: ${(PROJECT_STATE_TRANSITIONS[fromStatus] || []).join(', ') || 'none'}.`);
+    }
     if (newStatus === 'Confirmed') {
       const today = new Date().toISOString().split('T')[0];
       setConfirmOrderForm({
@@ -495,8 +671,28 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       setIsConfirmOrderOpen(true);
       return;
     }
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', pid), { status: newStatus });
-    logAction('projects', 'status_change', pid, { status: newStatus }, selectedProject?.project_name);
+    // M-1 fix: when demoting from Closed/Completed back to an earlier state,
+    // clear invoice fields so a previously-invoiced project doesn't keep
+    // appearing in GSTR-1 / Accounting sales book.
+    const demotionFromInvoiced =
+      (fromStatus === 'Closed' || fromStatus === 'Completed') &&
+      newStatus !== 'Closed' && newStatus !== 'Completed' &&
+      proj?.invoice_status === 'Invoiced';
+    const payload = { status: newStatus };
+    if (demotionFromInvoiced) {
+      Object.assign(payload, INVOICE_FIELD_RESET);
+      // Tell the user we're un-invoicing
+      if (!confirm(`Demoting an Invoiced project to ${newStatus} will clear its invoice number, date and tax-invoice link. Continue?`)) return;
+    }
+    // Cancellation: also clear invoice fields and release allocations are not auto-released
+    // (data integrity left to user) but mark a cancellation timestamp.
+    if (newStatus === 'Cancelled') {
+      Object.assign(payload, INVOICE_FIELD_RESET);
+      payload.cancelled_at = new Date().toISOString();
+      payload.cancelled_by = user?.uid || '';
+    }
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', pid), payload);
+    logAction('projects', 'status_change', pid, payload, proj?.project_name);
   };
 
   const handleSaveConfirmation = async (skip = false) => {
@@ -687,6 +883,22 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         }, 0);
   };
 
+  // M-4: collect serials referenced on prior challans of a given type. Used to
+  // validate that a return challan only ships serials that were actually
+  // delivered and not already returned.
+  const getChallanedSerials = (allocationId, type, excludeChallanId = null) => {
+    const set = new Set();
+    (selectedProject.challans || [])
+      .filter(c => c.type === type && c.id !== excludeChallanId)
+      .forEach(c => {
+        const item = c.items.find(i => i.id === allocationId);
+        if (item && Array.isArray(item.serial_numbers)) {
+          item.serial_numbers.forEach(s => { if (s) set.add(String(s)); });
+        }
+      });
+    return set;
+  };
+
   const openChallanModal = (type, challanToEdit = null) => {
     setChallanType(type);
     setEditingChallan(challanToEdit);
@@ -721,6 +933,10 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
 const generateQuotationPDF = async () => {
+    if (!canViewProjectFinancials) {
+      addToast('Access denied: quotation amounts are restricted.', 'error');
+      return;
+    }
     const doc = new jsPDF();
     const org = await getOrgSettings();
     const client = clients.find(c => c.id === selectedProject.client_id);
@@ -804,18 +1020,24 @@ const generateQuotationPDF = async () => {
         });
         (LOGISTICS_TYPES).forEach(lt => {
             const cost = selectedProject.logistics_costs?.[lt.id];
-            if (cost && cost.amount > 0) {
-                const total = cost.amount * (1 + (cost.gst || 0) / 100);
+            if (!cost) return;
+            // H-10: emit one PDF row per split line (or single legacy bucket).
+            getLogisticsLines(lt.id, lt.label, cost).forEach(line => {
+                if (!(line.amount > 0)) return;
+                const total = line.amount * (1 + (line.gst || 0) / 100);
+                const desc = line.description && line.description !== lt.label
+                    ? `${lt.label} — ${line.description}`
+                    : lt.label;
                 body.push([
                     body.length + 1,
-                    lt.label,
+                    desc,
                     1,
                     1,
-                    formatCurrencyPDF(cost.amount),
-                    `${cost.gst || 0}%`,
+                    formatCurrencyPDF(line.amount),
+                    `${line.gst || 0}%`,
                     formatCurrencyPDF(total)
                 ]);
-            }
+            });
         });
         grandTotal = totals.total_revenue;
     }
@@ -933,6 +1155,10 @@ const generateQuotationPDF = async () => {
   };
 
   const generateQuotationExcel = () => {
+    if (!canViewProjectFinancials) {
+      addToast('Access denied: quotation amounts are restricted.', 'error');
+      return;
+    }
     const totals = calculateProjectTotals();
     let data = [];
 
@@ -967,18 +1193,24 @@ const generateQuotationPDF = async () => {
         });
         (LOGISTICS_TYPES).forEach(lt => {
             const cost = selectedProject.logistics_costs?.[lt.id];
-            if (cost && cost.amount > 0) {
-                const total = cost.amount * (1 + (cost.gst || 0) / 100);
+            if (!cost) return;
+            // H-10: emit one Excel row per split line.
+            getLogisticsLines(lt.id, lt.label, cost).forEach(line => {
+                if (!(line.amount > 0)) return;
+                const total = line.amount * (1 + (line.gst || 0) / 100);
+                const desc = line.description && line.description !== lt.label
+                    ? `${lt.label} — ${line.description}`
+                    : lt.label;
                 data.push({
                     '#': data.length + 1,
-                    'Item Description': lt.label,
+                    'Item Description': desc,
                     'Qty': 1,
                     'Days': 1,
-                    'Rate': cost.amount,
-                    'GST %': cost.gst || 0,
+                    'Rate': line.amount,
+                    'GST %': line.gst || 0,
                     'Amount': total
                 });
-            }
+            });
         });
     }
 
@@ -1015,6 +1247,10 @@ const generateQuotationPDF = async () => {
 
   const generateFinalReportPDF = async () => {
     if (!selectedProject) return;
+    if (!canViewProjectFinancials) {
+      addToast('Access denied: financial report is restricted.', 'error');
+      return;
+    }
 
     const doc = new jsPDF();
     const org = await getOrgSettings();
@@ -1135,6 +1371,11 @@ const generateQuotationPDF = async () => {
   // --- Print Handler ---
   const printProjectDocument = async (type) => {
     if (!selectedProject) return;
+
+    if (!canViewProjectFinancials && (type === 'quotation_pdf' || type === 'quotation_excel')) {
+      addToast('Access denied: quotation amounts are restricted.', 'error');
+      return;
+    }
 
     if (type === 'quotation_pdf') {
       generateQuotationPDF();
@@ -1453,7 +1694,40 @@ const generateQuotationPDF = async () => {
                 alert(`Error: Item "${item.item_name}" exceeds available quantity. Max: ${maxQty}, Requested: ${qty}`);
                 return;
             }
-            itemsToShip.push({ ...item, qty });
+
+            // M-4: when serial numbers are picked for this line, validate them
+            // against prior challans before persisting.
+            const pickedSerials = Array.isArray(challanSerials[item.id])
+              ? challanSerials[item.id].map(s => String(s).trim()).filter(Boolean)
+              : [];
+            if (pickedSerials.length) {
+                const dupes = pickedSerials.filter((s, i) => pickedSerials.indexOf(s) !== i);
+                if (dupes.length) {
+                    alert(`Error: duplicate serial(s) on "${item.item_name}": ${[...new Set(dupes)].join(', ')}`);
+                    return;
+                }
+                if (pickedSerials.length > qty) {
+                    alert(`Error: ${pickedSerials.length} serials selected for "${item.item_name}" but qty is ${qty}.`);
+                    return;
+                }
+                if (challanType === 'return') {
+                    const excludeId = editingChallan ? editingChallan.id : null;
+                    const deliveredSerials = getChallanedSerials(item.id, 'delivery');
+                    const returnedSerials = getChallanedSerials(item.id, 'return', excludeId);
+                    const invalid = pickedSerials.filter(s => !deliveredSerials.has(s));
+                    if (invalid.length) {
+                        alert(`Error: serial(s) on "${item.item_name}" were never delivered: ${invalid.join(', ')}`);
+                        return;
+                    }
+                    const reReturned = pickedSerials.filter(s => returnedSerials.has(s));
+                    if (reReturned.length) {
+                        alert(`Error: serial(s) on "${item.item_name}" already returned on a prior challan: ${reReturned.join(', ')}`);
+                        return;
+                    }
+                }
+            }
+
+            itemsToShip.push({ ...item, qty, serial_numbers: pickedSerials });
         }
     }
 
@@ -1461,50 +1735,99 @@ const generateQuotationPDF = async () => {
     if (!can(role, 'challans', 'create')) return alert('Access denied: insufficient permissions.');
 
     try {
-        let challanData = { ...editingChallan };
-        
-        if (!editingChallan) {
-            const fy = getFinancialYear();
-            const newChallanNo = await runTransaction(db, async (transaction) => {
-                const counterRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'challan');
+        // H-13: counter key derived from the challan's document date,
+        // not today's FY, so backdating doesn't corrupt the FY counter.
+        const fy = getFYFromDate(challanForm.date) || getFinancialYear();
+        const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id);
+        const counterRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'challan');
+
+        // H-14: All counter increment + challan array mutation happens in a
+        // single runTransaction so partial failures cannot leave the project
+        // doc in an inconsistent state (challan removed but not re-added).
+        const challanData = await runTransaction(db, async (transaction) => {
+            const projectDoc = await transaction.get(projectRef);
+            if (!projectDoc.exists()) throw new Error('Project not found');
+            const projectData = projectDoc.data();
+            const existingChallans = Array.isArray(projectData.challans) ? projectData.challans : [];
+
+            // Build the challan record (reserve a new number if creating)
+            let record;
+            if (editingChallan) {
+                const original = existingChallans.find(c => c.id === editingChallan.id);
+                if (!original) throw new Error('Challan no longer exists. Reload and try again.');
+                record = {
+                    ...original,
+                    items: itemsToShip,
+                    transport: challanForm,
+                    date: new Date(challanForm.date).toISOString(),
+                    updated_at: new Date().toISOString(),
+                };
+            } else {
                 const counterDoc = await transaction.get(counterRef);
-                let currentCount = 0;
-                if (counterDoc.exists()) {
-                    const data = counterDoc.data();
-                    currentCount = (data && typeof data[fy] === 'number') ? data[fy] : 0;
-                }
+                const currentCount = (counterDoc.exists() && typeof counterDoc.data()?.[fy] === 'number')
+                    ? counterDoc.data()[fy] : 0;
                 const nextCount = currentCount + 1;
                 transaction.set(counterRef, { [fy]: nextCount }, { merge: true });
-                return `${fy}/${String(nextCount).padStart(4, '0')}`;
-            });
-            
-            challanData = {
-                id: Date.now().toString(),
-                challan_no: newChallanNo,
-                type: challanType,
-                created_by: user.uid,
-                date: new Date().toISOString()
-            };
-        }
+                record = {
+                    id: Date.now().toString(),
+                    challan_no: `${fy}/${String(nextCount).padStart(4, '0')}`,
+                    type: challanType,
+                    created_by: user.uid,
+                    date: new Date(challanForm.date).toISOString(),
+                    updated_at: new Date().toISOString(),
+                    items: itemsToShip,
+                    transport: challanForm,
+                };
+            }
 
-        challanData.items = itemsToShip;
-        challanData.transport = challanForm;
-        challanData.date = new Date(challanForm.date).toISOString();
-        challanData.updated_at = new Date().toISOString();
+            // Replace existing challan in-place; otherwise append.
+            const nextChallans = editingChallan
+                ? existingChallans.map(c => c.id === editingChallan.id ? record : c)
+                : [...existingChallans, record];
 
-        const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id);
-        
-        if (editingChallan) {
-            await updateDoc(projectRef, { challans: arrayRemove(editingChallan) });
-        }
-        
-        await updateDoc(projectRef, { 
-            challans: arrayUnion(challanData),
-            ...(!selectedProject.challan_no && challanType === 'delivery' ? { challan_no: challanData.challan_no, challan_date: challanData.date } : {})
+            const updates = { challans: nextChallans };
+            if (!projectData.challan_no && challanType === 'delivery') {
+                updates.challan_no = record.challan_no;
+                updates.challan_date = record.date;
+            }
+            transaction.update(projectRef, updates);
+            return record;
         });
-        
+
         logAction('projects', editingChallan ? 'update_challan' : 'create_challan', selectedProject.id, { challan_no: challanData.challan_no }, selectedProject.project_name);
-        
+
+        // H-3: Mirror the movement to /inventory_movements/ for fast inventory
+        // history queries. Best-effort writes performed AFTER the transaction
+        // commits — failures here are logged but don't block the save.
+        try {
+            const direction = challanType === 'delivery' ? 'out' : 'in';
+            const ts = new Date().toISOString();
+            await Promise.all(
+                itemsToShip
+                    .filter(i => i.item_id) // skip ad-hoc lines without inventory link
+                    .map(i => addDoc(
+                        collection(db, 'artifacts', appId, 'public', 'data', 'inventory_movements'),
+                        {
+                            item_id: i.item_id,
+                            item_name: i.item_name || '',
+                            qty: parseInt(i.qty) || 0,
+                            direction,
+                            challan_id: challanData.id,
+                            challan_no: challanData.challan_no,
+                            challan_type: challanType,
+                            project_id: selectedProject.id,
+                            project_name: selectedProject.project_name,
+                            client_id: selectedProject.client_id || null,
+                            date: challanData.date,
+                            edit: !!editingChallan,
+                            recorded_at: ts,
+                        }
+                    ))
+            );
+        } catch (mvErr) {
+            console.warn('inventory_movements mirror write failed (non-fatal):', mvErr.message);
+        }
+
         if (confirm("Challan Saved. Print now?")) {
             printChallanPDF(challanData);
         }
@@ -1524,10 +1847,48 @@ const generateQuotationPDF = async () => {
       message: `Are you sure you want to delete Challan ${challan.challan_no}? This action cannot be undone.`,
       onConfirm: async () => {
         try {
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
-                challans: arrayRemove(challan)
+            // H-14: read-modify-write under a transaction so concurrent
+            // edits cannot resurrect the deleted challan.
+            const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id);
+            await runTransaction(db, async (transaction) => {
+                const projectDoc = await transaction.get(projectRef);
+                if (!projectDoc.exists()) throw new Error('Project not found');
+                const existing = Array.isArray(projectDoc.data().challans) ? projectDoc.data().challans : [];
+                const next = existing.filter(c => c.id !== challan.id);
+                transaction.update(projectRef, { challans: next });
             });
             logAction('projects', 'delete_challan', selectedProject.id, { challan_no: challan.challan_no }, selectedProject.project_name);
+
+            // H-3: reversal mirror in inventory_movements (delivery delete = items
+            // never went out; return delete = items never came back).
+            try {
+                const reverseDir = challan.type === 'delivery' ? 'in' : 'out';
+                const ts = new Date().toISOString();
+                await Promise.all(
+                    (challan.items || [])
+                        .filter(i => i.item_id)
+                        .map(i => addDoc(
+                            collection(db, 'artifacts', appId, 'public', 'data', 'inventory_movements'),
+                            {
+                                item_id: i.item_id,
+                                item_name: i.item_name || '',
+                                qty: parseInt(i.qty) || 0,
+                                direction: reverseDir,
+                                challan_id: challan.id,
+                                challan_no: challan.challan_no,
+                                challan_type: challan.type,
+                                project_id: selectedProject.id,
+                                project_name: selectedProject.project_name,
+                                client_id: selectedProject.client_id || null,
+                                date: challan.date,
+                                reversal: true,
+                                recorded_at: ts,
+                            }
+                        ))
+                );
+            } catch (mvErr) {
+                console.warn('inventory_movements reversal write failed (non-fatal):', mvErr.message);
+            }
         } catch(e) {
             console.error(e);
             alert("Failed to delete challan");
@@ -1611,7 +1972,233 @@ const generateQuotationPDF = async () => {
     });
   };
 
+  const generateTaxInvoicePDF = async () => {
+    if (!canManageProjectInvoices) {
+      addToast('Access denied: invoice documents are restricted.', 'error');
+      return;
+    }
+    try {
+      const pdfDoc = new jsPDF();
+      const org = await getOrgSettings();
+      const client = clients.find(c => c.id === selectedProject.client_id);
+      const pageWidth = pdfDoc.internal.pageSize.width;
+      const pageH = pdfDoc.internal.pageSize.height;
+      const margin = 14;
+      const invDate = selectedProject.invoice_date
+        ? new Date(selectedProject.invoice_date).toLocaleDateString('en-IN')
+        : new Date().toLocaleDateString('en-IN');
+      const invNo = selectedProject.invoice_no || '—';
+
+      // GST breakdown
+      const gstBD = getProjectGSTBreakdown(selectedProject, org?.gstin || '', client?.gstin || '');
+      const isIGST = gstBD.supplyType === 'IGST';
+
+      // --- draw compact header on pages 2+ ---
+      const drawCompactHeader = () => {
+        const pg = pdfDoc.internal.getCurrentPageInfo().pageNumber;
+        if (pg === 1) return;
+        pdfDoc.setFillColor(30, 64, 175);
+        pdfDoc.rect(margin, 5, pageWidth - margin * 2, 16, 'F');
+        pdfDoc.setFontSize(10); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(255, 255, 255);
+        pdfDoc.text(org?.name || 'Company', margin + 3, 14);
+        pdfDoc.text('TAX INVOICE', pageWidth / 2, 14, { align: 'center' });
+        pdfDoc.text(`${invNo}  |  ${invDate}`, pageWidth - margin - 2, 14, { align: 'right' });
+        pdfDoc.setTextColor(0, 0, 0);
+      };
+      const addNewPage = () => { pdfDoc.addPage(); drawCompactHeader(); return 32; };
+
+      let y = 12;
+
+      // --- PAGE 1 HEADER ---
+      if (org?.logo) { try { pdfDoc.addImage(org.logo, 'JPEG', margin, y, 25, 25); } catch(e) {} }
+      pdfDoc.setFontSize(15); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(30, 64, 175);
+      pdfDoc.text(org?.name || 'Company', pageWidth - margin, y + 8, { align: 'right' });
+      pdfDoc.setFontSize(8); pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setTextColor(80, 80, 80);
+      const orgAddrLines = pdfDoc.splitTextToSize(org?.address || '', 80);
+      pdfDoc.text(orgAddrLines, pageWidth - margin, y + 14, { align: 'right' });
+      let hY = y + 14 + orgAddrLines.length * 4;
+      if (org?.gstin) { pdfDoc.text(`GSTIN: ${org.gstin}`, pageWidth - margin, hY, { align: 'right' }); hY += 4; }
+      if (org?.phone) { pdfDoc.text(`Ph: ${org.phone}`, pageWidth - margin, hY, { align: 'right' }); }
+      pdfDoc.setTextColor(0, 0, 0);
+
+      // Title Banner
+      y = Math.max(hY + 6, 44);
+      pdfDoc.setFillColor(30, 64, 175);
+      pdfDoc.rect(margin, y, pageWidth - margin * 2, 10, 'F');
+      pdfDoc.setFontSize(13); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(255, 255, 255);
+      pdfDoc.text('TAX INVOICE', pageWidth / 2, y + 7, { align: 'center' });
+      pdfDoc.setTextColor(0, 0, 0);
+      y += 14;
+
+      // Invoice meta row
+      pdfDoc.setFontSize(9); pdfDoc.setFont('helvetica', 'normal');
+      pdfDoc.text('Invoice No: ', margin, y); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.text(invNo, margin + 22, y);
+      pdfDoc.setFont('helvetica', 'normal'); pdfDoc.text(`Date: ${invDate}`, pageWidth - margin, y, { align: 'right' });
+      y += 5;
+      // Due date & FY
+      const invDueDate = selectedProject.invoice_due_date
+        ? new Date(selectedProject.invoice_due_date).toLocaleDateString('en-IN') : '';
+      if (invDueDate) { pdfDoc.setFontSize(8); pdfDoc.setTextColor(180, 80, 0); pdfDoc.text(`Due: ${invDueDate}`, margin, y); pdfDoc.setTextColor(0,0,0); }
+      const fy = selectedProject.invoice_date
+        ? (() => { const d = new Date(selectedProject.invoice_date); const m = d.getMonth(); const yr = d.getFullYear(); return m < 3 ? `${yr-1}-${String(yr).slice(-2)}` : `${yr}-${String(yr+1).slice(-2)}`; })()
+        : '';
+      if (fy) { pdfDoc.setFontSize(8); pdfDoc.setTextColor(100, 100, 100); pdfDoc.text(`Financial Year: ${fy}`, pageWidth - margin, y, { align: 'right' }); pdfDoc.setTextColor(0,0,0); }
+      y += 4;
+
+      // Bill To / Supply Info Box
+      pdfDoc.setDrawColor(200, 200, 220); pdfDoc.setLineWidth(0.3);
+      const boxH = 34;
+      pdfDoc.rect(margin, y, pageWidth - margin * 2, boxH, 'S');
+      // Split box vertically at center
+      const midX = margin + (pageWidth - margin * 2) / 2;
+      pdfDoc.setDrawColor(200, 200, 220); pdfDoc.line(midX, y, midX, y + boxH);
+
+      pdfDoc.setFontSize(8); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(80, 80, 80);
+      pdfDoc.text('BILL TO', margin + 2, y + 5);
+      pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(0, 0, 0); pdfDoc.setFontSize(9);
+      pdfDoc.text(client?.name || '—', margin + 2, y + 11);
+      pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setFontSize(8); pdfDoc.setTextColor(60, 60, 60);
+      const cAddr = pdfDoc.splitTextToSize(client?.address || '', 85);
+      pdfDoc.text(cAddr, margin + 2, y + 17);
+      if (client?.gstin) pdfDoc.text(`GSTIN: ${client.gstin}`, margin + 2, y + 17 + cAddr.length * 4);
+
+      pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setFontSize(8); pdfDoc.setTextColor(80, 80, 80);
+      pdfDoc.text('SUPPLY DETAILS', midX + 2, y + 5);
+      pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setFontSize(8); pdfDoc.setTextColor(60, 60, 60);
+      pdfDoc.text(`Project: ${selectedProject.project_name}`, midX + 2, y + 11);
+      pdfDoc.text(`Venue: ${selectedProject.venue || '—'}`, midX + 2, y + 16);
+      pdfDoc.text(`Period: ${selectedProject.start_date || '—'} to ${selectedProject.end_date || '—'}`, midX + 2, y + 21);
+      pdfDoc.text(`Place of Supply: ${gstBD.placeOfSupply || '—'} · ${isIGST ? 'IGST (Inter-State)' : 'CGST+SGST (Intra-State)'}`, midX + 2, y + 27);
+      pdfDoc.setTextColor(0, 0, 0);
+      y += boxH + 4;
+
+      // --- ITEM TABLE ---
+      const colHeaders = isIGST
+        ? ['#', 'HSN', 'Description', 'Qty', 'Days', 'Rate', 'Taxable', 'IGST %', 'IGST Amt', 'Total']
+        : ['#', 'HSN', 'Description', 'Qty', 'Days', 'Rate', 'Taxable', 'CGST %', 'CGST Amt', 'SGST %', 'SGST Amt', 'Total'];
+
+      const tableRows = gstBD.items.map((item, i) => {
+        const base = isIGST
+          ? [i + 1, item.hsn, item.description, item.qty || 1, item.days || 1,
+              item.rate ? formatCurrencyPDF(item.rate) : '—',
+              formatCurrencyPDF(item.taxable),
+              `${item.igstRate}%`, formatCurrencyPDF(item.igstAmt),
+              formatCurrencyPDF(item.total)]
+          : [i + 1, item.hsn, item.description, item.qty || 1, item.days || 1,
+              item.rate ? formatCurrencyPDF(item.rate) : '—',
+              formatCurrencyPDF(item.taxable),
+              `${item.cgstRate}%`, formatCurrencyPDF(item.cgstAmt),
+              `${item.sgstRate}%`, formatCurrencyPDF(item.sgstAmt),
+              formatCurrencyPDF(item.total)];
+        return base;
+      });
+
+      const colStyles = isIGST
+        ? { 0: { cellWidth: 7 }, 1: { cellWidth: 16 }, 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'center' }, 8: { halign: 'right' }, 9: { halign: 'right' } }
+        : { 0: { cellWidth: 6 }, 1: { cellWidth: 14 }, 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'center' }, 8: { halign: 'right' }, 9: { halign: 'center' }, 10: { halign: 'right' }, 11: { halign: 'right' } };
+
+      autoTable(pdfDoc, {
+        startY: y,
+        head: [colHeaders],
+        body: tableRows,
+        theme: 'grid',
+        headStyles: { fillColor: [30, 64, 175], fontSize: 7.5, textColor: [255, 255, 255] },
+        styles: { fontSize: 7.5, cellPadding: 1.8 },
+        columnStyles: colStyles,
+        didDrawPage: () => { drawCompactHeader(); }
+      });
+      y = pdfDoc.lastAutoTable.finalY + 4;
+
+      // --- GST SUMMARY TABLE ---
+      const summaryRows = [];
+      if (isIGST) {
+        summaryRows.push(['Taxable Amount', formatCurrencyPDF(gstBD.totals.taxable)]);
+        summaryRows.push([`IGST`, formatCurrencyPDF(gstBD.totals.igstAmt)]);
+      } else {
+        summaryRows.push(['Taxable Amount', formatCurrencyPDF(gstBD.totals.taxable)]);
+        summaryRows.push([`CGST`, formatCurrencyPDF(gstBD.totals.cgstAmt)]);
+        summaryRows.push([`SGST`, formatCurrencyPDF(gstBD.totals.sgstAmt)]);
+      }
+      summaryRows.push(['GRAND TOTAL', formatCurrencyPDF(gstBD.totals.total)]);
+
+      if (y + 40 > pageH - 20) { y = addNewPage(); }
+      autoTable(pdfDoc, {
+        startY: y,
+        body: summaryRows,
+        theme: 'plain',
+        styles: { fontSize: 9, cellPadding: 2 },
+        columnStyles: { 0: { halign: 'right', fontStyle: 'bold', cellWidth: 130 }, 1: { halign: 'right' } },
+        didParseCell: (data) => {
+          if (data.row.index === summaryRows.length - 1) {
+            data.cell.styles.fontStyle = 'bold'; data.cell.styles.fontSize = 11.5;
+            data.cell.styles.textColor = [30, 64, 175];
+          }
+        },
+        didDrawPage: () => { drawCompactHeader(); }
+      });
+      y = pdfDoc.lastAutoTable.finalY + 6;
+
+      // --- BANK DETAILS ---
+      const banks = org?.bank_accounts || [];
+      const defBank = banks.find(b => b.id === org?.default_bank_id) || banks[0];
+      if (defBank) {
+        if (y + 32 > pageH - 14) { y = addNewPage(); }
+        pdfDoc.setFillColor(240, 245, 255); pdfDoc.setDrawColor(180, 200, 240); pdfDoc.setLineWidth(0.3);
+        pdfDoc.rect(margin, y, pageWidth - margin * 2, 28, 'FD');
+        pdfDoc.setFontSize(8.5); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(30, 64, 175);
+        pdfDoc.text('Bank Details (for NEFT/RTGS)', margin + 3, y + 6);
+        pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setTextColor(0, 0, 0); pdfDoc.setFontSize(8);
+        pdfDoc.text(`Bank: ${defBank.bank_name || ''}`, margin + 3, y + 12);
+        pdfDoc.text(`A/c No: ${defBank.account_number || ''}`, margin + 3, y + 17);
+        pdfDoc.text(`IFSC: ${defBank.ifsc || ''}`, margin + 3, y + 22);
+        pdfDoc.text(`A/c Name: ${defBank.account_name || org?.name || ''}`, pageWidth / 2, y + 12);
+        pdfDoc.text(`Branch: ${defBank.branch || ''}`, pageWidth / 2, y + 17);
+        y += 32;
+      }
+
+      // --- REMARKS ---
+      const invRemarks = selectedProject.invoice_remarks || '';
+      if (invRemarks) {
+        if (y + 16 > pageH - 10) { y = addNewPage(); }
+        pdfDoc.setFillColor(255, 249, 230); pdfDoc.setDrawColor(220, 180, 60); pdfDoc.setLineWidth(0.3);
+        pdfDoc.rect(margin, y, pageWidth - margin * 2, 14, 'FD');
+        pdfDoc.setFontSize(8); pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setTextColor(120, 80, 0);
+        pdfDoc.text('Remarks:', margin + 2, y + 5);
+        pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setTextColor(60, 40, 0);
+        const remarkLines = pdfDoc.splitTextToSize(invRemarks, pageWidth - margin * 2 - 20);
+        pdfDoc.text(remarkLines, margin + 22, y + 5);
+        y += 14 + (remarkLines.length - 1) * 4;
+      }
+
+      // --- TERMS ---
+      if (y + 20 > pageH - 10) { y = addNewPage(); }
+      pdfDoc.setFontSize(7.5); pdfDoc.setFont('helvetica', 'italic'); pdfDoc.setTextColor(120, 120, 120);
+      pdfDoc.text('This is a computer-generated Tax Invoice and is valid without a signature.', margin, y);
+      const invoiceTerms = org?.invoice_terms || org?.terms || '';
+      if (invoiceTerms) {
+        y += 5;
+        pdfDoc.setFont('helvetica', 'bold'); pdfDoc.setFontSize(7.5); pdfDoc.setTextColor(80, 80, 80);
+        pdfDoc.text('Terms & Conditions:', margin, y);
+        y += 4;
+        pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setTextColor(100, 100, 100);
+        const termLines = pdfDoc.splitTextToSize(invoiceTerms, pageWidth - margin * 2);
+        pdfDoc.text(termLines, margin, y);
+      }
+
+      const safeName = (selectedProject.project_name || 'project').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+      pdfDoc.save(`TaxInvoice_${invNo.replace(/\//g, '-')}_${safeName}.pdf`);
+      logAction('projects', 'generate_tax_invoice_pdf', selectedProject.id, { invoice_no: invNo }, selectedProject.project_name);
+    } catch (err) {
+      console.error('Tax Invoice PDF Error:', err);
+      addToast('Failed to generate Tax Invoice PDF', 'error');
+    }
+  };
+
   const generateProformaInvoicePDF = async (piData) => {
+    if (!canManageProjectInvoices) {
+      addToast('Access denied: proforma documents are restricted.', 'error');
+      return;
+    }
     try {
       const pdfDoc = new jsPDF();
       const org = await getOrgSettings();
@@ -1995,6 +2582,46 @@ const generateQuotationPDF = async () => {
     logAction('projects', 'update_logistics', selectedProject.id, { type, field, value }, selectedProject.project_name);
   };
 
+  // H-10: persist split-line edits onto logistics_costs[type].lines[]
+  const persistLogisticsLines = async (type, lines) => {
+    const currentCosts = selectedProject.logistics_costs || {};
+    const existing = currentCosts[type] || {};
+    const newCosts = { ...currentCosts, [type]: { ...existing, lines } };
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { logistics_costs: newCosts });
+    logAction('projects', 'update_logistics_lines', selectedProject.id, { type, count: lines.length }, selectedProject.project_name);
+  };
+
+  const addLogisticsLine = async (type) => {
+    if (!can(role, 'projects', 'edit')) return;
+    const labelBase = (LOGISTICS_TYPES.find(lt => lt.id === type)?.label) || type;
+    const existing = (selectedProject.logistics_costs || {})[type];
+    const lines = Array.isArray(existing?.lines) ? [...existing.lines] : [];
+    // If migrating from legacy single-bucket, seed with that value as line 1.
+    if (lines.length === 0 && existing && (existing.amount > 0 || existing.gst > 0)) {
+      lines.push({ id: `${type}_legacy`, description: labelBase, amount: parseFloat(existing.amount || 0), gst: parseFloat(existing.gst || 0) });
+    }
+    lines.push({ id: `${type}_${Date.now()}`, description: '', amount: 0, gst: lines[0]?.gst ?? 18 });
+    await persistLogisticsLines(type, lines);
+  };
+
+  const removeLogisticsLine = async (type, lineId) => {
+    if (!can(role, 'projects', 'edit')) return;
+    const existing = (selectedProject.logistics_costs || {})[type];
+    const lines = (Array.isArray(existing?.lines) ? existing.lines : []).filter(l => l.id !== lineId);
+    await persistLogisticsLines(type, lines);
+  };
+
+  const updateLogisticsLine = async (type, lineId, field, value) => {
+    if (!can(role, 'projects', 'edit')) return;
+    const existing = (selectedProject.logistics_costs || {})[type];
+    const lines = (Array.isArray(existing?.lines) ? existing.lines : []).map(l => {
+      if (l.id !== lineId) return l;
+      if (field === 'description') return { ...l, description: value };
+      return { ...l, [field]: parseFloat(value) || 0 };
+    });
+    await persistLogisticsLines(type, lines);
+  };
+
   const openAllocationModal = () => {
     const days = selectedProject?.start_date && selectedProject?.end_date ? getDaysDifference(selectedProject.start_date, selectedProject.end_date) : 1;
     setAllocationForm({ item_id: '', qty: 1, rate: 0, days: days, gst_rate: 18, available_qty: 0, description: '', is_led: false, tilesWide: 0, tilesHigh: 0, tileModelData: null });
@@ -2053,8 +2680,18 @@ const generateQuotationPDF = async () => {
       }
     }
 
-    const amount = finalQty * allocationForm.rate * allocationForm.days;
-    const newItem = { id: Date.now().toString(), item_id: item.id, item_name: item.name, category: item.category, is_external: item.is_external || false, qty: parseInt(finalQty), rate: parseFloat(allocationForm.rate), days: parseInt(allocationForm.days), gst_rate: parseFloat(allocationForm.gst_rate), amount, gst_amount: amount * (allocationForm.gst_rate/100), total: amount * (1 + allocationForm.gst_rate/100), description: allocationForm.description || '' };
+    // H-11 fix: server-side qty validation; UI "min=0" is bypassable.
+    if (!Number.isFinite(finalQty) || finalQty <= 0) return alert('Quantity must be greater than zero.');
+    const rate = parseFloat(allocationForm.rate) || 0;
+    const days = parseInt(allocationForm.days) || 0;
+    const gst_rate = parseFloat(allocationForm.gst_rate) || 0;
+    if (rate < 0 || days <= 0 || gst_rate < 0) return alert('Invalid rate, days or GST rate.');
+
+    // M-8 fix: round all currency math to paise so total = amount + gst_amount.
+    const amount = round2(finalQty * rate * days);
+    const gst_amount = round2(amount * (gst_rate / 100));
+    const total = round2(amount + gst_amount);
+    const newItem = { id: Date.now().toString(), item_id: item.id, item_name: item.name, category: item.category, is_external: item.is_external || false, qty: finalQty, rate, days, gst_rate, amount, gst_amount, total, description: allocationForm.description || '' };
     if (allocationForm.is_led) {
       newItem.led = {
         tilesWide: parseInt(allocationForm.tilesWide),
@@ -2073,12 +2710,15 @@ const generateQuotationPDF = async () => {
     const rate = parseFloat(updatedItem.rate) || 0;
     const days = parseInt(updatedItem.days) || 0;
     const gst_rate = parseFloat(updatedItem.gst_rate) || 0;
-    
-    const amount = qty * rate * days;
-    const gst_amount = amount * (gst_rate / 100);
-    const total = amount + gst_amount;
+    if (qty <= 0) return alert('Quantity must be greater than zero.');
+    if (rate < 0 || days <= 0 || gst_rate < 0) return alert('Invalid rate, days or GST rate.');
 
-    const finalItem = { ...updatedItem, qty, rate, days, amount, gst_amount, total };
+    // M-8 fix: round each leg, derive total from amount+gst_amount (consistent with PDF).
+    const amount = round2(qty * rate * days);
+    const gst_amount = round2(amount * (gst_rate / 100));
+    const total = round2(amount + gst_amount);
+
+    const finalItem = { ...updatedItem, qty, rate, days, gst_rate, amount, gst_amount, total };
 
     const newItems = selectedProject.items.map(item => {
       if (item.id === finalItem.id) {
@@ -2121,7 +2761,10 @@ const generateQuotationPDF = async () => {
       equipmentGST = (selectedProject.items || []).reduce((acc, i) => acc + (i.gst_amount || 0), 0);
       if (selectedProject.logistics_costs) {
         Object.values(selectedProject.logistics_costs).forEach(c => {
-           const base = c.amount || 0; logisticsBase += base; logisticsGST += base * ((c.gst || 0)/100);
+           // H-10: respect split lines if present.
+           const s = sumLogisticsRecord(c);
+           logisticsBase += s.amount;
+           logisticsGST += s.gstAmount;
         });
       }
       gstOutput = equipmentGST + logisticsGST;
@@ -2176,6 +2819,11 @@ const generateQuotationPDF = async () => {
     const margin = (totals.equipment + totals.logistics) - (totals.outsourcing + totals.direct_expense);
     const isInvoicingEnabled = selectedProject.status === 'Completed' || selectedProject.status === 'Closed' || role === 'admin';
     const clientInfo = clients.find(c => c.id === selectedProject.client_id);
+    const allProjectExpenses = expenses.filter(e => e.project_id === selectedProject.id && !isExpenseExcludedStatus(e.status));
+    const ownExpenseIds = new Set([currentEmpId, user?.uid].filter(Boolean).map(String));
+    const ownProjectExpenses = allProjectExpenses.filter(e => ownExpenseIds.has(String(e.employee_id)));
+    const visibleProjectExpenses = canViewProjectFinancials ? allProjectExpenses : ownProjectExpenses;
+    const visibleProjectExpenseTotal = visibleProjectExpenses.reduce((s, e) => s + parseFloat(e.amount || 0), 0);
     const operatingRevenue = totals.equipment + totals.logistics;
     const operatingCost = totals.outsourcing + totals.direct_expense;
     const pnlPieData = [
@@ -2188,11 +2836,11 @@ const generateQuotationPDF = async () => {
     return (
       <div className="space-y-6">
         {/* ===== SECTION 1: HEADER & NAVIGATION ===== */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:justify-between">
           <button onClick={() => { setSelectedProjectId(null); navigate('/projects'); }} className="flex items-center text-slate-500 hover:text-indigo-600 transition-colors">
             <ArrowLeft size={18} className="mr-2" /> Back to Projects
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center flex-wrap gap-2">
             <span className={`px-4 py-1.5 rounded-full text-sm font-bold border ${STATUS_COLORS[selectedProject.status]}`}>{selectedProject.status}</span>
             {selectedProject.quote_status === 'approved' && (
               <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 border border-green-200 flex items-center gap-1"><CheckCircle size={12}/> Client Approved</span>
@@ -2229,7 +2877,7 @@ const generateQuotationPDF = async () => {
                 <div className="text-indigo-100 text-sm">📍 {selectedProject.venue}</div>
               )}
             </div>
-            {role !== 'tech' && (
+            {canViewProjectFinancials && (
               <div className="bg-white/20 backdrop-blur rounded-xl p-4 text-center min-w-[160px]">
                 <div className="text-xs text-indigo-100 uppercase font-semibold">Grand Total</div>
                 <div className="text-3xl font-bold">{formatCurrency(totals.total_revenue)}</div>
@@ -2248,17 +2896,77 @@ const generateQuotationPDF = async () => {
 
         {/* ===== SECTION 3: KEY INFO CARDS ===== */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100">
-            <div className="text-xs text-slate-500 uppercase font-semibold mb-1">Start Date</div>
-            <div className="text-lg font-bold text-slate-800">{selectedProject.start_date || '—'}</div>
+          {/* Start Date */}
+          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100 group">
+            <div className="text-xs text-slate-500 uppercase font-semibold mb-1 flex items-center justify-between">
+              Start Date
+              {can(role, 'projects', 'edit') && editingDateField !== 'start_date' && (
+                <button onClick={() => { setEditingDateField('start_date'); setEditingDateValue(selectedProject.start_date || ''); }}
+                  className="opacity-100 md:opacity-0 md:group-hover:opacity-100 text-indigo-500 hover:text-indigo-700 transition-opacity">
+                  <Edit size={12} />
+                </button>
+              )}
+            </div>
+            {editingDateField === 'start_date' ? (
+              <div className="flex items-center gap-1 mt-1">
+                <input type="date" autoFocus value={editingDateValue} onChange={e => setEditingDateValue(e.target.value)}
+                  className="flex-1 rounded border border-indigo-300 px-2 py-1 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                <button onClick={handleInlineDateSave} className="text-green-600 hover:text-green-800 font-bold text-xs px-1">✓</button>
+                <button onClick={() => setEditingDateField(null)} className="text-slate-400 hover:text-slate-600 text-xs px-1">✕</button>
+              </div>
+            ) : (
+              <div className="text-lg font-bold text-slate-800 cursor-pointer" onClick={() => { if (can(role, 'projects', 'edit')) { setEditingDateField('start_date'); setEditingDateValue(selectedProject.start_date || ''); } }}>
+                {fmtDate(selectedProject.start_date)}
+              </div>
+            )}
           </div>
-          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100">
-            <div className="text-xs text-slate-500 uppercase font-semibold mb-1">End Date</div>
-            <div className="text-lg font-bold text-slate-800">{selectedProject.end_date || '—'}</div>
+          {/* End Date */}
+          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100 group">
+            <div className="text-xs text-slate-500 uppercase font-semibold mb-1 flex items-center justify-between">
+              End Date
+              {can(role, 'projects', 'edit') && editingDateField !== 'end_date' && (
+                <button onClick={() => { setEditingDateField('end_date'); setEditingDateValue(selectedProject.end_date || ''); }}
+                  className="opacity-100 md:opacity-0 md:group-hover:opacity-100 text-indigo-500 hover:text-indigo-700 transition-opacity">
+                  <Edit size={12} />
+                </button>
+              )}
+            </div>
+            {editingDateField === 'end_date' ? (
+              <div className="flex items-center gap-1 mt-1">
+                <input type="date" autoFocus value={editingDateValue} onChange={e => setEditingDateValue(e.target.value)}
+                  className="flex-1 rounded border border-indigo-300 px-2 py-1 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                <button onClick={handleInlineDateSave} className="text-green-600 hover:text-green-800 font-bold text-xs px-1">✓</button>
+                <button onClick={() => setEditingDateField(null)} className="text-slate-400 hover:text-slate-600 text-xs px-1">✕</button>
+              </div>
+            ) : (
+              <div className="text-lg font-bold text-slate-800 cursor-pointer" onClick={() => { if (can(role, 'projects', 'edit')) { setEditingDateField('end_date'); setEditingDateValue(selectedProject.end_date || ''); } }}>
+                {fmtDate(selectedProject.end_date)}
+              </div>
+            )}
           </div>
-          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100">
-            <div className="text-xs text-slate-500 uppercase font-semibold mb-1">Setup Date</div>
-            <div className="text-lg font-bold text-indigo-600">{selectedProject.setup_date || '—'}</div>
+          {/* Setup Date */}
+          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100 group">
+            <div className="text-xs text-slate-500 uppercase font-semibold mb-1 flex items-center justify-between">
+              Setup Date
+              {can(role, 'projects', 'edit') && editingDateField !== 'setup_date' && (
+                <button onClick={() => { setEditingDateField('setup_date'); setEditingDateValue(selectedProject.setup_date || ''); }}
+                  className="opacity-100 md:opacity-0 md:group-hover:opacity-100 text-indigo-500 hover:text-indigo-700 transition-opacity">
+                  <Edit size={12} />
+                </button>
+              )}
+            </div>
+            {editingDateField === 'setup_date' ? (
+              <div className="flex items-center gap-1 mt-1">
+                <input type="date" autoFocus value={editingDateValue} onChange={e => setEditingDateValue(e.target.value)}
+                  className="flex-1 rounded border border-indigo-300 px-2 py-1 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                <button onClick={handleInlineDateSave} className="text-green-600 hover:text-green-800 font-bold text-xs px-1">✓</button>
+                <button onClick={() => setEditingDateField(null)} className="text-slate-400 hover:text-slate-600 text-xs px-1">✕</button>
+              </div>
+            ) : (
+              <div className="text-lg font-bold text-indigo-600 cursor-pointer" onClick={() => { if (can(role, 'projects', 'edit')) { setEditingDateField('setup_date'); setEditingDateValue(selectedProject.setup_date || ''); } }}>
+                {fmtDate(selectedProject.setup_date)}
+              </div>
+            )}
           </div>
           <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100">
             <div className="text-xs text-slate-500 uppercase font-semibold mb-1">Duration</div>
@@ -2315,7 +3023,7 @@ const generateQuotationPDF = async () => {
                 {selectedProject.confirmation_details.confirmed_by_internal && (
                   <div><span className="text-xs text-slate-500 block">Received By</span><span className="font-semibold text-slate-800">{selectedProject.confirmation_details.confirmed_by_internal}</span></div>
                 )}
-                {selectedProject.confirmation_details.advance_committed > 0 && (
+                {canViewProjectFinancials && selectedProject.confirmation_details.advance_committed > 0 && (
                   <div><span className="text-xs text-slate-500 block">Advance Committed</span><span className="font-semibold text-green-700">{formatCurrency(selectedProject.confirmation_details.advance_committed)}</span></div>
                 )}
                 {selectedProject.confirmation_details.follow_up_required && (
@@ -2381,25 +3089,33 @@ const generateQuotationPDF = async () => {
         <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-100">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-semibold text-slate-500 uppercase mr-2">Documents:</span>
-            <button onClick={() => printProjectDocument('quotation_pdf')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-indigo-50 hover:border-indigo-200 text-slate-700 transition-all">
-              <FileText size={16} className="text-indigo-500" /> Quote PDF
-            </button>
-            <button onClick={() => printProjectDocument('quotation_excel')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-green-50 hover:border-green-200 text-slate-700 transition-all">
-              <FileText size={16} className="text-green-500" /> Quote Excel
-            </button>
+            {canViewProjectFinancials && (
+              <button onClick={() => printProjectDocument('quotation_pdf')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-indigo-50 hover:border-indigo-200 text-slate-700 transition-all">
+                <FileText size={16} className="text-indigo-500" /> Quote PDF
+              </button>
+            )}
+            {canViewProjectFinancials && (
+              <button onClick={() => printProjectDocument('quotation_excel')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-green-50 hover:border-green-200 text-slate-700 transition-all">
+                <FileText size={16} className="text-green-500" /> Quote Excel
+              </button>
+            )}
             <button onClick={() => printProjectDocument('job_sheet')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-amber-50 hover:border-amber-200 text-slate-700 transition-all">
               <Printer size={16} className="text-amber-500" /> Job Sheet
             </button>
             <button onClick={() => printProjectDocument('pick_list')} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-purple-50 hover:border-purple-200 text-slate-700 transition-all">
               <ListChecks size={16} className="text-purple-500" /> Pick List
             </button>
-            <button onClick={generateFinalReportPDF} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50 hover:border-slate-300 text-slate-700 transition-all">
-              <FileText size={16} className="text-slate-600" /> Final Report
-            </button>
-            <button onClick={() => { setProformaForm({ date: new Date().toISOString().split('T')[0], notes: '', payment_terms: '' }); setIsProformaModalOpen(true); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-teal-50 hover:border-teal-200 text-slate-700 transition-all">
-              <Receipt size={16} className="text-teal-600" /> Proforma Invoice
-            </button>
-            {(selectedProject.proforma_invoices || []).length > 0 && (
+            {canViewProjectFinancials && (
+              <button onClick={generateFinalReportPDF} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50 hover:border-slate-300 text-slate-700 transition-all">
+                <FileText size={16} className="text-slate-600" /> Final Report
+              </button>
+            )}
+            {canManageProjectInvoices && (
+              <button onClick={() => { setProformaForm({ date: new Date().toISOString().split('T')[0], notes: '', payment_terms: '' }); setIsProformaModalOpen(true); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-teal-50 hover:border-teal-200 text-slate-700 transition-all">
+                <Receipt size={16} className="text-teal-600" /> Proforma Invoice
+              </button>
+            )}
+            {canManageProjectInvoices && (selectedProject.proforma_invoices || []).length > 0 && (
               <button onClick={() => setIsProformaHistoryOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-100 text-slate-700 transition-all" title="Proforma Invoice History">
                 <History size={16} className="text-teal-500" />
                 <span className="font-mono text-xs bg-teal-100 text-teal-700 px-1.5 rounded">{(selectedProject.proforma_invoices || []).length}</span>
@@ -2466,11 +3182,11 @@ const generateQuotationPDF = async () => {
                       <tr>
                         <th className="p-3 rounded-l-lg">Item</th>
                         <th className="p-3 text-center">Qty</th>
-                        <th className="p-3 text-center">Days</th>
-                        {role !== 'tech' && <th className="p-3 text-right">Rate</th>}
-                        {role !== 'tech' && <th className="p-3 text-right">Amount</th>}
-                        {role !== 'tech' && <th className="p-3 text-right">GST Amt</th>}
-                        {role !== 'tech' && <th className="p-3 text-right">Total Amt</th>}
+                        <th className="p-3 text-center hidden sm:table-cell">Days</th>
+                        {canViewProjectFinancials && <th className="p-3 text-right hidden sm:table-cell">Rate</th>}
+                        {canViewProjectFinancials && <th className="p-3 text-right hidden sm:table-cell">Amount</th>}
+                        {canViewProjectFinancials && <th className="p-3 text-right hidden sm:table-cell">GST Amt</th>}
+                        {canViewProjectFinancials && <th className="p-3 text-right">Total</th>}
                         <th className="p-3 rounded-r-lg"></th>
                       </tr>
                     </thead>
@@ -2483,11 +3199,11 @@ const generateQuotationPDF = async () => {
                             {item.is_external && <span className="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded mt-1 inline-block">External</span>}
                           </td>
                           <td className="p-3 text-center font-medium">{item.qty}</td>
-                          <td className="p-3 text-center">{item.days}</td>
-                          {role !== 'tech' && <td className="p-3 text-right text-slate-600">{formatCurrency(item.rate)}</td>}
-                          {role !== 'tech' && <td className="p-3 text-right text-slate-700">{formatCurrency(item.amount || (item.qty * item.rate * item.days))}</td>}
-                          {role !== 'tech' && <td className="p-3 text-right text-amber-700">{formatCurrency(item.gst_amount || ((item.amount || item.qty * item.rate * item.days) * item.gst_rate / 100))}</td>}
-                          {role !== 'tech' && <td className="p-3 text-right font-semibold text-indigo-700">{formatCurrency(item.total)}</td>}
+                          <td className="p-3 text-center hidden sm:table-cell">{item.days}</td>
+                          {canViewProjectFinancials && <td className="p-3 text-right text-slate-600 hidden sm:table-cell">{formatCurrency(item.rate)}</td>}
+                          {canViewProjectFinancials && <td className="p-3 text-right text-slate-700 hidden sm:table-cell">{formatCurrency(item.amount || (item.qty * item.rate * item.days))}</td>}
+                          {canViewProjectFinancials && <td className="p-3 text-right text-amber-700 hidden sm:table-cell">{formatCurrency(item.gst_amount || ((item.amount || item.qty * item.rate * item.days) * item.gst_rate / 100))}</td>}
+                          {canViewProjectFinancials && <td className="p-3 text-right font-semibold text-indigo-700">{formatCurrency(item.total)}</td>}
                           <td className="p-3 text-right">
                             {(role === 'manager' || role === 'admin') && (
                               <div className="flex justify-end gap-1">
@@ -2503,12 +3219,13 @@ const generateQuotationPDF = async () => {
                         </tr>
                       ))}
                     </tbody>
-                    {role !== 'tech' && (
+                    {canViewProjectFinancials && (
                       <tfoot className="bg-indigo-50 font-bold text-indigo-700 text-sm">
                         <tr>
-                          <td colSpan={4} className="p-3 text-right rounded-l-lg">Equipment Total:</td>
-                          <td className="p-3 text-right text-slate-700">{formatCurrency(totals.equipment)}</td>
-                          <td className="p-3 text-right text-amber-700">{formatCurrency((selectedProject.items || []).reduce((acc, i) => acc + (i.gst_amount || 0), 0))}</td>
+                          <td colSpan={2} className="p-3 text-right rounded-l-lg">Equipment Total:</td>
+                          <td className="p-3 text-right text-slate-700 hidden sm:table-cell">{formatCurrency(totals.equipment)}</td>
+                          <td className="p-3 text-right text-amber-700 hidden sm:table-cell">{formatCurrency((selectedProject.items || []).reduce((acc, i) => acc + (i.gst_amount || 0), 0))}</td>
+                          <td className="p-3 text-right text-indigo-700 hidden sm:table-cell"></td>
                           <td className="p-3 text-right text-indigo-700">{formatCurrency((selectedProject.items || []).reduce((acc, i) => acc + (i.total || 0), 0))}</td>
                           <td className="rounded-r-lg"></td>
                         </tr>
@@ -2525,7 +3242,7 @@ const generateQuotationPDF = async () => {
             </div>
 
             {/* Logistics Table */}
-            {role !== 'tech' && (
+            {canViewProjectFinancials && (
               <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-100">
                 <h3 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
                   <Truck size={20} className="text-amber-500" /> Logistics & Services
@@ -2542,28 +3259,103 @@ const generateQuotationPDF = async () => {
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-slate-800">
                       {LOGISTICS_TYPES.map(type => {
-                        const saved = (selectedProject.logistics_costs || {})[type.id] || { amount: 0, gst: 18 };
-                        const total = (saved.amount || 0) * (1 + (saved.gst || 0) / 100);
+                        const record = (selectedProject.logistics_costs || {})[type.id];
+                        const split = Array.isArray(record?.lines) ? record.lines : [];
+                        const hasSplit = split.length > 0;
+                        const summary = sumLogisticsRecord(record || {});
+                        const legacy = record || { amount: 0, gst: 18 };
                         return (
-                          <tr key={type.id} className="hover:bg-slate-50">
-                            <td className="p-3 flex items-center gap-2">
-                              <span className="text-slate-400">{type.icon}</span>
-                              <span className="text-slate-700 font-medium">{type.label}</span>
-                            </td>
-                            <td className="p-3">
-                              <input type="number" min="0" className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400" value={saved.amount} onChange={(e) => updateLogisticsCost(type.id, 'amount', e.target.value)} disabled={role === 'tech'} />
-                            </td>
-                            <td className="p-3">
-                              <select className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200" value={saved.gst} onChange={(e) => updateLogisticsCost(type.id, 'gst', e.target.value)} disabled={role === 'tech'}>
-                                <option value="0">0%</option>
-                                <option value="5">5%</option>
-                                <option value="12">12%</option>
-                                <option value="18">18%</option>
-                                <option value="28">28%</option>
-                              </select>
-                            </td>
-                            <td className="p-3 text-right font-medium text-slate-800">{formatCurrency(total)}</td>
-                          </tr>
+                          <React.Fragment key={type.id}>
+                            <tr className="hover:bg-slate-50">
+                              <td className="p-3 flex items-center gap-2">
+                                <span className="text-slate-400">{type.icon}</span>
+                                <span className="text-slate-700 font-medium">{type.label}</span>
+                                {canEditProjects && (
+                                  <button
+                                    type="button"
+                                    onClick={() => addLogisticsLine(type.id)}
+                                    title="Add a split line item"
+                                    className="ml-2 text-xs px-2 py-0.5 rounded-full border border-amber-300 text-amber-700 hover:bg-amber-50"
+                                  >+ Split</button>
+                                )}
+                                {hasSplit && (
+                                  <span className="ml-2 text-[11px] text-slate-500">{split.length} line{split.length === 1 ? '' : 's'}</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {hasSplit ? (
+                                  <span className="text-slate-500 italic text-xs">From split lines</span>
+                                ) : (
+                                  <input type="number" min="0" className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400" value={legacy.amount} onChange={(e) => updateLogisticsCost(type.id, 'amount', e.target.value)} disabled={!canEditProjects} />
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {hasSplit ? (
+                                  <span className="text-slate-400 text-xs">—</span>
+                                ) : (
+                                  <select className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200" value={legacy.gst} onChange={(e) => updateLogisticsCost(type.id, 'gst', e.target.value)} disabled={!canEditProjects}>
+                                    <option value="0">0%</option>
+                                    <option value="5">5%</option>
+                                    <option value="12">12%</option>
+                                    <option value="18">18%</option>
+                                    <option value="28">28%</option>
+                                  </select>
+                                )}
+                              </td>
+                              <td className="p-3 text-right font-medium text-slate-800">{formatCurrency(hasSplit ? summary.total : (legacy.amount || 0) * (1 + (legacy.gst || 0) / 100))}</td>
+                            </tr>
+                            {hasSplit && split.map((line) => (
+                              <tr key={line.id} className="bg-amber-50/40">
+                                <td className="p-2 pl-10">
+                                  <input
+                                    type="text"
+                                    placeholder="Description"
+                                    className="w-full rounded-lg border border-slate-200 p-1.5 text-xs"
+                                    value={line.description || ''}
+                                    onChange={(e) => updateLogisticsLine(type.id, line.id, 'description', e.target.value)}
+                                    disabled={!canEditProjects}
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="w-full rounded-lg border border-slate-200 p-1.5 text-xs"
+                                    value={line.amount || 0}
+                                    onChange={(e) => updateLogisticsLine(type.id, line.id, 'amount', e.target.value)}
+                                    disabled={!canEditProjects}
+                                  />
+                                </td>
+                                <td className="p-2">
+                                  <select
+                                    className="w-full rounded-lg border border-slate-200 p-1.5 text-xs"
+                                    value={line.gst || 0}
+                                    onChange={(e) => updateLogisticsLine(type.id, line.id, 'gst', e.target.value)}
+                                    disabled={!canEditProjects}
+                                  >
+                                    <option value="0">0%</option>
+                                    <option value="5">5%</option>
+                                    <option value="12">12%</option>
+                                    <option value="18">18%</option>
+                                    <option value="28">28%</option>
+                                  </select>
+                                </td>
+                                <td className="p-2 text-right text-xs">
+                                  <span className="font-medium text-slate-700 mr-2">
+                                    {formatCurrency((parseFloat(line.amount || 0)) * (1 + (parseFloat(line.gst || 0)) / 100))}
+                                  </span>
+                                  {canEditProjects && (
+                                    <button
+                                      type="button"
+                                      onClick={() => removeLogisticsLine(type.id, line.id)}
+                                      title="Remove line"
+                                      className="text-red-500 hover:text-red-700 px-1"
+                                    >×</button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </React.Fragment>
                         );
                       })}
                     </tbody>
@@ -2628,8 +3420,11 @@ const generateQuotationPDF = async () => {
                   <Users size={18} className="text-blue-500" /> Assigned Team
                 </h3>
                 {(role === 'admin' || role === 'manager') && (
-                  <button onClick={() => setIsEmpModalOpen(true)} className="text-xs font-medium text-indigo-600 hover:text-indigo-800 transition-colors">
-                    Manage
+                  <button
+                    onClick={() => setIsEmpModalOpen(true)}
+                    className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 transition-colors"
+                  >
+                    Manage Team
                   </button>
                 )}
               </div>
@@ -2652,80 +3447,121 @@ const generateQuotationPDF = async () => {
               </div>
             </div>
 
+            {/* Work Attending Report Card */}
+            {(() => {
+              const projLogs = timeLogs.filter(l => l.project_id === selectedProject.id);
+              if (projLogs.length === 0) return null;
+              return (
+                <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-100">
+                  <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                    <Clock size={18} className="text-indigo-500" /> Work Attending Report
+                  </h3>
+                  <div className="text-xs text-slate-500 mb-3">{projLogs.length} site visit(s) recorded</div>
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {projLogs.sort((a, b) => new Date(b.checkIn || 0) - new Date(a.checkIn || 0)).map(log => {
+                      const emp = employees.find(e => e.id === log.employeeId);
+                      const hrs = log.checkIn && log.checkOut ? ((new Date(log.checkOut) - new Date(log.checkIn)) / 3600000).toFixed(1) : null;
+                      return (
+                        <div key={log.id} className="rounded-lg bg-indigo-50 border border-indigo-100 p-3 text-sm">
+                          <div className="flex justify-between items-start">
+                            <span className="font-medium text-slate-800">{emp?.name || 'Unknown'}</span>
+                            <span className="text-xs text-slate-500">{log.checkIn ? new Date(log.checkIn).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '-'}</span>
+                          </div>
+                          <div className="text-xs text-slate-600 mt-1">
+                            In: {log.checkIn ? new Date(log.checkIn).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '-'}
+                            {log.checkOut ? ` — Out: ${new Date(log.checkOut).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ' (Active)'}
+                            {hrs && <span className="ml-2 font-medium text-indigo-700">({hrs}h)</span>}
+                          </div>
+                          {log.gpsCheckIn && <div className="text-xs text-slate-400 mt-0.5">📍 {log.gpsCheckIn.lat?.toFixed(4)}, {log.gpsCheckIn.lng?.toFixed(4)}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Expenses Card */}
             <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-100">
               <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
-                <Receipt size={18} className="text-red-500" /> Project Expenses
+                <Receipt size={18} className="text-red-500" /> {canViewProjectFinancials ? 'Project Expenses' : 'My Expenses'}
               </h3>
               <div className="text-3xl font-bold text-red-600">
-                {formatCurrency(expenses.filter(e => e.project_id === selectedProject.id && !isExpenseExcludedStatus(e.status)).reduce((s, e) => s + parseFloat(e.amount), 0))}
+                {formatCurrency(visibleProjectExpenseTotal)}
               </div>
               <div className="mt-2 text-xs text-slate-500">
-                {expenses.filter(e => e.project_id === selectedProject.id && !isExpenseExcludedStatus(e.status)).length} expense(s) recorded
+                {visibleProjectExpenses.length} expense(s) recorded
               </div>
             </div>
 
             {/* Invoice Card */}
-            {role !== 'tech' && (
+            {canManageProjectInvoices && (
               <div className={`rounded-xl p-6 shadow-sm border transition-colors ${selectedProject.invoice_status === 'Invoiced' ? 'bg-green-50 border-green-200' : 'bg-white border-slate-100'}`}>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                    <FileText size={18} className="text-green-600" /> Invoice Status
+                    <FileText size={18} className="text-green-600" /> Invoice
                   </h3>
                   <div className={`text-xs px-2 py-1 rounded-full font-medium ${selectedProject.invoice_status === 'Invoiced' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600'}`}>
                     {selectedProject.invoice_status || 'Not Invoiced'}
                   </div>
                 </div>
-                
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Status</label>
-                    <select
-                      disabled={!isInvoicingEnabled}
-                      className={`w-full rounded-lg border p-2 text-sm ${!isInvoicingEnabled ? 'bg-slate-100 cursor-not-allowed' : 'bg-white border-slate-200 focus:ring-2 focus:ring-green-200'}`}
-                      value={selectedProject.invoice_status || 'Not Invoiced'}
-                      onChange={(e) => updateInvoiceDetails('invoice_status', e.target.value)}
-                    >
-                      <option value="Not Invoiced">Not Invoiced</option>
-                      <option value="Invoiced">Invoiced</option>
-                    </select>
-                  </div>
 
-                  {selectedProject.invoice_status === 'Invoiced' && (
-                    <>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Invoice No.</label>
-                        <input
-                          type="text"
-                          className="w-full rounded-lg border border-slate-200 p-2 text-sm focus:ring-2 focus:ring-green-200"
-                          placeholder="INV-2024-001"
-                          value={selectedProject.invoice_no || ''}
-                          onChange={(e) => updateInvoiceDetails('invoice_no', e.target.value)}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Invoice Date</label>
-                        <input
-                          type="date"
-                          className="w-full rounded-lg border border-slate-200 p-2 text-sm focus:ring-2 focus:ring-green-200"
-                          value={selectedProject.invoice_date || ''}
-                          onChange={(e) => updateInvoiceDetails('invoice_date', e.target.value)}
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {!isInvoicingEnabled && (
-                    <div className="text-xs text-orange-600 flex items-center gap-1 font-medium bg-orange-50 px-3 py-2 rounded-lg">
-                      <AlertCircle size={12} /> Complete project to invoice
+                {selectedProject.invoice_status === 'Invoiced' ? (
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-500 text-xs uppercase font-semibold">Invoice No.</span>
+                      <span className="font-bold text-slate-800 font-mono">{selectedProject.invoice_no}</span>
                     </div>
-                  )}
-                </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-500 text-xs uppercase font-semibold">Date</span>
+                      <span className="font-medium text-slate-700">{fmtDate(selectedProject.invoice_date)}</span>
+                    </div>
+                    {selectedProject.invoice_due_date && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500 text-xs uppercase font-semibold">Due Date</span>
+                        <span className={`font-medium ${new Date(selectedProject.invoice_due_date) < new Date() ? 'text-red-600' : 'text-orange-600'}`}>
+                          {fmtDate(selectedProject.invoice_due_date)}
+                        </span>
+                      </div>
+                    )}
+                    {selectedProject.invoice_label && selectedProject.invoice_label !== 'Invoice' && (
+                      <div className="bg-purple-50 border border-purple-200 rounded px-2 py-1 text-xs font-semibold text-purple-700">
+                        {selectedProject.invoice_label}
+                      </div>
+                    )}
+                    {selectedProject.invoice_remarks && (
+                      <div className="bg-slate-50 border border-slate-200 rounded p-2 text-xs text-slate-600 italic">
+                        &ldquo;{selectedProject.invoice_remarks}&rdquo;
+                      </div>
+                    )}
+                    <div className="flex gap-2 pt-1">
+                      <button onClick={() => navigate('/tax-invoices')} className="flex-1 flex items-center justify-center gap-1 rounded-lg border border-indigo-300 text-indigo-700 hover:bg-indigo-50 py-2 text-xs font-semibold transition">
+                        <Edit size={13} /> Manage in Tax Invoices
+                      </button>
+                      <button onClick={generateTaxInvoicePDF} className="flex-1 flex items-center justify-center gap-1 rounded-lg bg-blue-700 hover:bg-blue-800 text-white py-2 text-xs font-semibold transition">
+                        <FileText size={13} /> Tax Invoice PDF
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {!isInvoicingEnabled && (
+                      <div className="text-xs text-orange-600 flex items-center gap-1 font-medium bg-orange-50 px-3 py-2 rounded-lg">
+                        <AlertCircle size={12} /> Complete project to invoice
+                      </div>
+                    )}
+                    {isInvoicingEnabled && (
+                      <button onClick={() => navigate('/tax-invoices')} className="w-full flex items-center justify-center gap-2 rounded-lg bg-green-600 hover:bg-green-700 text-white py-2.5 text-sm font-semibold transition">
+                        <FileText size={15} /> Create Tax Invoice
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             {/* Financial Summary Card */}
-            {role !== 'tech' && (
+            {canViewProjectFinancials && (
               <div className="rounded-xl bg-gradient-to-br from-indigo-50 to-blue-50 p-6 shadow-sm border border-indigo-100">
                 <h3 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
                   <Calculator size={18} className="text-indigo-600" /> Summary
@@ -2766,7 +3602,7 @@ const generateQuotationPDF = async () => {
         </div>
 
         {/* ===== SECTION 6: PROFIT & LOSS BREAKDOWN (Full Width) ===== */}
-        {role !== 'tech' && (
+        {canViewProjectFinancials && (
           <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-100">
             <h3 className="mb-6 font-bold text-slate-800 text-lg flex items-center gap-2">
               <TrendingUp size={20} className="text-green-600" /> Profit & Loss Analysis
@@ -2841,7 +3677,7 @@ const generateQuotationPDF = async () => {
             </div>
           </div>
         )}
-        {role !== 'tech' && (
+        {canViewProjectFinancials && (
           <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-100">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
@@ -2988,7 +3824,7 @@ const generateQuotationPDF = async () => {
         )}
 
         {/* ===== REIMBURSABLE EXPENSES (Client Actuals) ===== */}
-        {role !== 'tech' && (
+        {canViewProjectFinancials && (
           <div className="rounded-xl bg-white p-6 shadow-sm border border-teal-100">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
@@ -3068,7 +3904,7 @@ const generateQuotationPDF = async () => {
         <Modal isOpen={isChallanModalOpen} onClose={() => setIsChallanModalOpen(false)} title={`${editingChallan ? 'Edit' : 'Generate'} ${challanType === 'return' ? 'Return' : 'Delivery'} Challan`}>
             <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
               <div className="bg-blue-50 p-3 rounded text-xs text-blue-700">Enter transport details to be printed on the official {challanType} challan.</div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div><label className="text-xs font-bold text-slate-500">Transport Mode</label><select className="w-full rounded border p-2 text-slate-800" value={challanForm.mode} onChange={e => setChallanForm({ ...challanForm, mode: e.target.value })}><option>Road</option><option>Air</option><option>Train</option><option>Hand Carry</option></select></div>
                 <div><label className="text-xs font-bold text-slate-500">Vehicle No</label><input className="w-full rounded border p-2 text-slate-800" value={challanForm.vehicle_no} onChange={e => setChallanForm({ ...challanForm, vehicle_no: e.target.value })} placeholder="MH-01-AB-1234" /></div>
                 <div><label className="text-xs font-bold text-slate-500">Driver Name</label><input className="w-full rounded border p-2 text-slate-800" value={challanForm.driver_name} onChange={e => setChallanForm({ ...challanForm, driver_name: e.target.value })} /></div>
@@ -3158,15 +3994,17 @@ const generateQuotationPDF = async () => {
             </div>
         </Modal>
 
-        {/* ===== PROFORMA INVOICE MODALS ===== */}
-        {/* Create Proforma Invoice */}
-        <Modal isOpen={isProformaModalOpen} onClose={() => setIsProformaModalOpen(false)} title="Create Proforma Invoice">
+        {canManageProjectInvoices && (
+          <>
+            {/* ===== PROFORMA INVOICE MODALS ===== */}
+            {/* Create Proforma Invoice */}
+            <Modal isOpen={isProformaModalOpen} onClose={() => setIsProformaModalOpen(false)} title="Create Proforma Invoice">
           <div className="space-y-4">
             <div className="bg-teal-50 border border-teal-200 rounded p-3 text-xs text-teal-800">
               A new Proforma Invoice will be auto-numbered (<span className="font-mono font-semibold">PI/FY/XXXX</span>) and a snapshot of current items will be saved.
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="text-sm font-bold text-slate-700">Issue Date</label>
                 <input type="date" className="w-full rounded border p-2 text-slate-800" value={proformaForm.date} onChange={e => setProformaForm({...proformaForm, date: e.target.value})} />
@@ -3212,10 +4050,10 @@ const generateQuotationPDF = async () => {
               <button onClick={handleSaveProformaInvoice} className="flex-1 rounded bg-teal-600 py-2 text-white font-bold hover:bg-teal-700">Save & Generate PI</button>
             </div>
           </div>
-        </Modal>
+          </Modal>
 
-        {/* Proforma Invoice History */}
-        <Modal isOpen={isProformaHistoryOpen} onClose={() => setIsProformaHistoryOpen(false)} title="Proforma Invoice History">
+          {/* Proforma Invoice History */}
+          <Modal isOpen={isProformaHistoryOpen} onClose={() => setIsProformaHistoryOpen(false)} title="Proforma Invoice History">
           <div className="space-y-2">
             {(selectedProject?.proforma_invoices || []).length === 0 ? (
               <div className="text-center text-slate-400 p-6">No Proforma Invoices generated yet.</div>
@@ -3239,7 +4077,9 @@ const generateQuotationPDF = async () => {
               ))
             )}
           </div>
-        </Modal>
+            </Modal>
+          </>
+        )}
 
         {/* ... (Keep existing Modals: Allocation, Employee) ... */}
         <Modal isOpen={isAllocationModalOpen} onClose={() => { setIsAllocationModalOpen(false); setShowItemDropdown(false); }} title="Allocate Equipment">
@@ -3249,9 +4089,9 @@ const generateQuotationPDF = async () => {
               <label className="block text-sm font-medium text-slate-700 mb-1.5">Select Item</label>
               <div ref={itemComboRef} className="relative">
                 {/* Row: category filter + search input */}
-                <div className="flex gap-2">
+                <div className="flex flex-col sm:flex-row gap-2">
                   <select
-                    className="rounded border border-slate-300 px-2 py-2 text-sm text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 shrink-0 max-w-[140px]"
+                    className="rounded border border-slate-300 px-2 py-2 text-sm text-slate-700 bg-white focus:ring-2 focus:ring-indigo-500 w-full sm:w-auto sm:shrink-0 sm:max-w-[140px]"
                     value={itemCategoryFilter}
                     onChange={e => { setItemCategoryFilter(e.target.value); setShowItemDropdown(true); }}
                   >
@@ -3302,7 +4142,7 @@ const generateQuotationPDF = async () => {
                   const filtered = inventory.filter(item => {
                     const matchCat = !itemCategoryFilter || item.category === itemCategoryFilter;
                     const matchQ = !q || item.name.toLowerCase().includes(q) || (item.category || '').toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q);
-                    return matchCat && matchQ;
+                    return matchCat && matchQ && !item.is_archived;
                   });
                   return (
                     <div className="absolute z-[999] left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto">
@@ -3346,7 +4186,7 @@ const generateQuotationPDF = async () => {
                 })()}
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label htmlFor="alloc-qty-inventory" className="block text-sm font-medium text-slate-700">Quantity</label>
                 <input id="alloc-qty-inventory" name="qty" type="number" min="1" className={`w-full rounded border p-2 focus:ring-2 focus:ring-indigo-500 text-slate-800 ${allocationForm.qty > allocationForm.available_qty ? 'border-red-500 bg-red-50' : ''}`} value={allocationForm.qty} onChange={e => setAllocationForm({...allocationForm, qty: e.target.value})} aria-invalid={allocationForm.qty > allocationForm.available_qty ? 'true' : 'false'} />
@@ -3370,7 +4210,7 @@ const generateQuotationPDF = async () => {
             {allocationForm.is_led && (
               <div className="rounded border border-indigo-100 bg-indigo-50 p-3 mt-3">
                 <div className="text-sm font-semibold text-indigo-700 mb-2">LED Wall Configuration</div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs font-medium text-slate-700">Tiles Wide (no. of tiles)</label>
                     <input type="number" min={1} className="w-full rounded border p-2" value={allocationForm.tilesWide} onChange={e => setAllocationForm({...allocationForm, tilesWide: e.target.value})} />
@@ -3437,7 +4277,41 @@ const generateQuotationPDF = async () => {
           </div>
         </Modal>
         <Modal isOpen={isEmpModalOpen} onClose={() => setIsEmpModalOpen(false)} title="Assign Team to Project">
-            <div className="space-y-4"><div className="space-y-2 max-h-96 overflow-y-auto">{employees.map(emp => { const isAssigned = (selectedProject.assigned_employees || []).includes(emp.id); const isBusy = !isAssigned && isEmployeeBusy(emp.id); return (<div key={emp.id} className={`flex items-center justify-between p-3 rounded border cursor-pointer ${isAssigned ? 'bg-indigo-50 border-indigo-200' : isBusy ? 'bg-orange-50 border-orange-200' : 'bg-white hover:bg-slate-50'}`} onClick={() => toggleEmployee(emp.id)}><div className="flex items-center gap-3"><div className={`h-8 w-8 rounded-full flex items-center justify-center font-bold ${isBusy ? 'bg-orange-200 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>{emp.name.charAt(0)}</div><div><div className="font-medium text-slate-800 flex items-center gap-2">{emp.name}{isBusy && <span className="text-[10px] bg-orange-100 text-orange-700 px-1 rounded border border-orange-200">Busy</span>}</div><div className="text-xs text-slate-500 capitalize">{emp.role}</div></div></div><div className={`h-5 w-5 rounded border flex items-center justify-center ${isAssigned ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300'}`}>{isAssigned && <CheckCircle size={14} />}</div></div>); })}</div><div className="flex justify-end pt-2"><button onClick={() => setIsEmpModalOpen(false)} className="rounded bg-slate-50 px-6 py-2 text-black hover:bg-slate-50">Done</button></div></div>
+          <div className="space-y-4">
+            <div className="text-xs text-slate-500">Tap an employee to assign or remove from this project.</div>
+            <div className="space-y-2 max-h-[60dvh] overflow-y-auto pr-1">
+              {employees.map(emp => {
+                const isAssigned = (selectedProject.assigned_employees || []).includes(emp.id);
+                const isBusy = !isAssigned && isEmployeeBusy(emp.id);
+                return (
+                  <div
+                    key={emp.id}
+                    className={`flex items-center justify-between gap-2 p-3 rounded border cursor-pointer ${isAssigned ? 'bg-indigo-50 border-indigo-200' : isBusy ? 'bg-orange-50 border-orange-200' : 'bg-white hover:bg-slate-50'}`}
+                    onClick={() => toggleEmployee(emp.id)}
+                  >
+                    <div className="min-w-0 flex items-center gap-3">
+                      <div className={`h-8 w-8 shrink-0 rounded-full flex items-center justify-center font-bold ${isBusy ? 'bg-orange-200 text-orange-700' : 'bg-slate-200 text-slate-600'}`}>
+                        {emp.name.charAt(0)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-medium text-slate-800 flex items-center gap-2">
+                          <span className="truncate">{emp.name}</span>
+                          {isBusy && <span className="text-[10px] bg-orange-100 text-orange-700 px-1 rounded border border-orange-200 shrink-0">Busy</span>}
+                        </div>
+                        <div className="text-xs text-slate-500 capitalize">{emp.role}</div>
+                      </div>
+                    </div>
+                    <div className={`h-5 w-5 shrink-0 rounded border flex items-center justify-center ${isAssigned ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300'}`}>
+                      {isAssigned && <CheckCircle size={14} />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end pt-2">
+              <button onClick={() => setIsEmpModalOpen(false)} className="rounded bg-slate-50 px-6 py-2 text-black hover:bg-slate-100">Done</button>
+            </div>
+          </div>
         </Modal>
 
         {/* ===== QUICK EXPENSE MODAL ===== */}
@@ -3446,7 +4320,7 @@ const generateQuotationPDF = async () => {
             <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800">
               Logging expense for: <span className="font-bold">{selectedProject?.project_name}</span>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="text-xs font-bold text-slate-700">Category <span className="text-red-500">*</span></label>
                 <select className="w-full rounded border p-2 text-slate-800 bg-white" value={quickExpenseForm.category} onChange={e => setQuickExpenseForm({...quickExpenseForm, category: e.target.value})}>
@@ -3539,7 +4413,7 @@ const generateQuotationPDF = async () => {
               <label className="text-xs font-bold text-slate-700">Description <span className="text-red-500">*</span></label>
               <input type="text" className="w-full rounded border p-2 text-slate-800" placeholder="e.g. Local transport, Fuel charges, Parking" value={reimbursableForm.description} onChange={e => setReimbursableForm({...reimbursableForm, description: e.target.value})} />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="text-xs font-bold text-slate-700">Category</label>
                 <select className="w-full rounded border p-2 text-slate-800 bg-white" value={reimbursableForm.category} onChange={e => setReimbursableForm({...reimbursableForm, category: e.target.value})}>
@@ -3693,6 +4567,9 @@ const generateQuotationPDF = async () => {
           {(role === 'manager' || role === 'admin') && (
             <div className="flex gap-2 w-full md:w-auto">
                 <button onClick={exportFilteredProjects} className="flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50 whitespace-nowrap w-full md:w-auto"><Download size={18} /> Export</button>
+                <button onClick={() => { setBulkInvoiceOpen(true); setBulkInvoiceSelected(new Set()); }} className="flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap w-full md:w-auto">
+                    <Receipt size={18} /> Group Invoice
+                </button>
                 <button onClick={openCreate} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap w-full md:w-auto">
                     <Plus size={18} /> Create New Quote
                 </button>
@@ -3746,7 +4623,7 @@ const generateQuotationPDF = async () => {
                 <select className="w-full text-xs rounded border p-1 bg-slate-50 text-black" value={sortConfig.key} onChange={e => setSortConfig({...sortConfig, key: e.target.value})}>
                     <option value="start_date">Start Date</option>
                     <option value="client">Client</option>
-                    <option value="total_value">Total Value</option>
+                  {canViewProjectFinancials && <option value="total_value">Total Value</option>}
                 </select>
                 <button onClick={() => setSortConfig(prev => ({ ...prev, direction: prev.direction === 'asc' ? 'desc' : 'asc' }))} className="px-2 rounded border bg-slate-50 hover:bg-slate-100 text-slate-800" title="Toggle Direction">
                     {sortConfig.direction === 'asc' ? '↑' : '↓'}
@@ -3782,12 +4659,12 @@ const generateQuotationPDF = async () => {
               <div className="space-y-2">
                 <div className="bg-slate-50 rounded p-2">
                   <div className="text-xs text-slate-500 font-semibold uppercase">Setup Date</div>
-                  <div className="font-semibold text-slate-800">{project.setup_date || '—'}</div>
+                  <div className="font-semibold text-slate-800">{fmtDate(project.setup_date)}</div>
                   {setupToStart > 0 && <div className="text-xs text-slate-600">({setupToStart} days before)</div>}
                 </div>
                 <div className="bg-slate-50 rounded p-2">
                   <div className="text-xs text-slate-500 font-semibold uppercase">Start Date</div>
-                  <div className="font-semibold text-slate-800">{project.start_date}</div>
+                  <div className="font-semibold text-slate-800">{fmtDate(project.start_date)}</div>
                 </div>
               </div>
 
@@ -3796,7 +4673,7 @@ const generateQuotationPDF = async () => {
                 <div className="bg-slate-50 rounded p-2">
                   <div className="text-xs text-slate-500 font-semibold uppercase">Duration</div>
                   <div className="font-semibold text-slate-800">{daysDiff} days</div>
-                  <div className="text-xs text-slate-600">End: {project.end_date}</div>
+                  <div className="text-xs text-slate-600">End: {fmtDate(project.end_date)}</div>
                 </div>
                 <div className="bg-slate-50 rounded p-2">
                   <div className="text-xs text-slate-500 font-semibold uppercase">Venue</div>
@@ -3806,11 +4683,19 @@ const generateQuotationPDF = async () => {
 
               {/* Column 3: Project Value & Items */}
               <div className="space-y-2">
-                <div className="bg-indigo-50 rounded p-2 border border-indigo-100">
-                  <div className="text-xs text-indigo-600 font-semibold uppercase">Project Value</div>
-                  <div className="font-bold text-indigo-700">{formatCurrency(getProjectGrandTotal(project))}</div>
-                  <div className="text-xs text-indigo-600">{(project.items || []).length} items</div>
-                </div>
+                {canViewProjectFinancials ? (
+                  <div className="bg-indigo-50 rounded p-2 border border-indigo-100">
+                    <div className="text-xs text-indigo-600 font-semibold uppercase">Project Value</div>
+                    <div className="font-bold text-indigo-700">{formatCurrency(getProjectGrandTotal(project))}</div>
+                    <div className="text-xs text-indigo-600">{(project.items || []).length} items</div>
+                  </div>
+                ) : (
+                  <div className="bg-indigo-50 rounded p-2 border border-indigo-100">
+                    <div className="text-xs text-indigo-600 font-semibold uppercase">Allocated Items</div>
+                    <div className="font-bold text-indigo-700">{(project.items || []).length}</div>
+                    <div className="text-xs text-indigo-600">Financial value hidden</div>
+                  </div>
+                )}
                 <div className="bg-slate-50 rounded p-2">
                   <div className="text-xs text-slate-500 font-semibold uppercase">Progress</div>
                   <div className="text-sm font-semibold text-slate-800">{progress}%</div>
@@ -3825,7 +4710,7 @@ const generateQuotationPDF = async () => {
 
             {/* Action Buttons - Visible on Hover */}
             {(role==='admin'||role==='manager') && (
-              <div className="absolute bottom-4 right-4 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute bottom-4 right-4 flex gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                 <button onClick={(e)=>{e.stopPropagation();openEdit(project)}} className="p-2 text-blue-600 bg-blue-50 rounded hover:bg-blue-100 transition" title="Edit Project"><Edit size={16}/></button>
                 <button onClick={(e)=>{e.stopPropagation();handleDuplicate(project)}} className="p-2 text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition" title="Duplicate Project"><Copy size={16}/></button>
                 <button onClick={(e)=>{e.stopPropagation();handleDelete(project.id)}} className="p-2 text-red-600 bg-red-50 rounded hover:bg-red-100 transition" title="Delete Project"><Trash2 size={16}/></button>
@@ -3854,21 +4739,32 @@ const generateQuotationPDF = async () => {
                 className="w-full rounded border p-2 text-slate-800"
                 placeholder="Search client by name..."
                 value={showClientDropdown ? clientSearchQuery : (clients.find(c => c.id === newProj.client_id)?.name || clientSearchQuery)}
-                onChange={e => { setClientSearchQuery(e.target.value); setShowClientDropdown(true); if (!e.target.value) setNewProj({...newProj, client_id: ''}); }}
+                onChange={e => { setClientSearchQuery(e.target.value); setShowClientDropdown(true); if (!e.target.value) setNewProj({...newProj, client_id: '', party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''}); }}
                 onFocus={() => setShowClientDropdown(true)}
               />
               {newProj.client_id && !showClientDropdown && (
-                <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600" onClick={() => { setNewProj({...newProj, client_id: ''}); setClientSearchQuery(''); setShowClientDropdown(true); }}><X size={16} /></button>
+                <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600" onClick={() => { setNewProj({...newProj, client_id: '', party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''}); setClientSearchQuery(''); setShowClientDropdown(true); }}><X size={16} /></button>
               )}
               {showClientDropdown && (
                 <ul className="absolute z-50 mt-1 max-h-48 w-full overflow-auto rounded border bg-white shadow-lg">
-                  {clients.filter(c => c.name?.toLowerCase().includes(clientSearchQuery.toLowerCase())).length === 0 ? (
+                  {projectClientEntityOptions.filter(c => c.label?.toLowerCase().includes(clientSearchQuery.toLowerCase())).length === 0 ? (
                     <li className="px-3 py-2 text-sm text-slate-400">No clients found</li>
                   ) : (
-                    clients.filter(c => c.name?.toLowerCase().includes(clientSearchQuery.toLowerCase())).map(c => (
-                      <li key={c.id} className={`cursor-pointer px-3 py-2 text-sm hover:bg-indigo-50 ${newProj.client_id === c.id ? 'bg-indigo-100 font-semibold' : ''}`}
-                        onClick={() => { setNewProj({...newProj, client_id: c.id}); setClientSearchQuery(c.name); setShowClientDropdown(false); }}>
-                        {c.name}
+                    projectClientEntityOptions.filter(c => c.label?.toLowerCase().includes(clientSearchQuery.toLowerCase())).map(c => (
+                      <li key={c.value} className={`cursor-pointer px-3 py-2 text-sm hover:bg-indigo-50 ${newProj.client_id === c.client_id && (newProj.party_company_id || 'primary') === c.company_id ? 'bg-indigo-100 font-semibold' : ''}`}
+                        onClick={() => {
+                          setNewProj({
+                            ...newProj,
+                            client_id: c.client_id,
+                            party_company_id: c.company_id || 'primary',
+                            party_company_name: c.company_name || '',
+                            party_company_gstin: c.company_gstin || '',
+                            party_company_address: c.company_address || '',
+                          });
+                          setClientSearchQuery(c.label);
+                          setShowClientDropdown(false);
+                        }}>
+                        {c.label}
                       </li>
                     ))
                   )}
@@ -3876,7 +4772,37 @@ const generateQuotationPDF = async () => {
               )}
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          {newProj.client_id && (() => {
+            const selectedClient = clients.find(c => c.id === newProj.client_id);
+            const companies = getPartyCompanies(selectedClient);
+            return (
+              <div>
+                <label className="text-sm font-bold text-slate-800">Billing Company / Branch</label>
+                <select
+                  className="w-full rounded border p-2 text-slate-800"
+                  value={newProj.party_company_id || 'primary'}
+                  onChange={e => {
+                    const selected = companies.find(x => x.id === e.target.value);
+                    setNewProj({
+                      ...newProj,
+                      party_company_id: selected?.id || '',
+                      party_company_name: selected?.name || '',
+                      party_company_gstin: selected?.gstin || '',
+                      party_company_address: selected?.address || '',
+                    });
+                  }}
+                >
+                  {companies.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}{c.gstin ? ` (${c.gstin})` : ''}</option>
+                  ))}
+                </select>
+                {newProj.party_company_address && (
+                  <div className="mt-1 text-xs text-slate-500">Address: {newProj.party_company_address}</div>
+                )}
+              </div>
+            );
+          })()}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <div><label className="text-sm font-bold text-slate-800">Setup Date</label><input type="date" className="w-full rounded border p-2 text-slate-800" value={newProj.setup_date} onChange={e => { const v = e.target.value; setNewProj(prev => ({ ...prev, setup_date: v, start_date: v, end_date: v })); }} /></div>
               <div><label className="text-sm font-bold text-slate-800">Start Date</label><input type="date" className="w-full rounded border p-2 text-slate-800" value={newProj.start_date} onChange={e => setNewProj({...newProj, start_date: e.target.value})} /></div>
               <div><label className="text-sm font-bold text-slate-800">End Date</label><input type="date" className="w-full rounded border p-2 text-slate-800" value={newProj.end_date} onChange={e => setNewProj({...newProj, end_date: e.target.value})} /></div>
@@ -3888,7 +4814,7 @@ const generateQuotationPDF = async () => {
             <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-3">
               <p className="text-xs text-blue-700"><strong>Package Cost:</strong> If specified, this will be the final revenue for P&L and client invoicing, superseding item allocations and logistics costs.</p>
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div>
                 <label className="text-sm font-bold text-slate-800">Package Cost (Excl. GST)</label>
                 <input type="number" min="0" step="0.01" className="w-full rounded border p-2 text-slate-800" value={newProj.package_cost || 0} onChange={e => setNewProj({...newProj, package_cost: parseFloat(e.target.value) || 0})} placeholder="0.00" />
@@ -3913,6 +4839,176 @@ const generateQuotationPDF = async () => {
           </div>
         </div>
     </Modal>
+
+      {/* ===== GROUP / BULK INVOICE MODAL ===== */}
+      <Modal isOpen={bulkInvoiceOpen} onClose={() => { setBulkInvoiceOpen(false); setBulkFilter({ clientId: '', status: '', dateFrom: '', dateTo: '' }); }} title="Group Invoice — Update Multiple Projects">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500">Assign a single invoice number and date to multiple projects at once. Useful when several events are billed under one consolidated invoice.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-700">Invoice Number <span className="text-red-500">*</span></label>
+              <input type="text" placeholder="e.g. INV-2024-001" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={bulkInvoiceForm.invoice_no} onChange={e => setBulkInvoiceForm(f => ({ ...f, invoice_no: e.target.value }))} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-700">Invoice Date <span className="text-red-500">*</span></label>
+              <input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={bulkInvoiceForm.invoice_date} onChange={e => setBulkInvoiceForm(f => ({ ...f, invoice_date: e.target.value }))} />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-700">Status</label>
+              <select className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={bulkInvoiceForm.invoice_status} onChange={e => setBulkInvoiceForm(f => ({ ...f, invoice_status: e.target.value }))}>
+                <option value="Invoiced">Invoiced</option>
+                <option value="Not Invoiced">Not Invoiced</option>
+              </select>
+            </div>
+          </div>
+          <div className="border-t pt-3">
+            {/* Filters */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Client</label>
+                <select className="w-full rounded border border-slate-300 p-1.5 text-xs text-black bg-white" value={bulkFilter.clientId} onChange={e => setBulkFilter(f => ({ ...f, clientId: e.target.value }))}>
+                  <option value="">All Clients</option>
+                  {clients.filter(c => c.type !== 'Vendor').sort((a,b) => (a.name||'').localeCompare(b.name||'')).map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Status</label>
+                <select className="w-full rounded border border-slate-300 p-1.5 text-xs text-black bg-white" value={bulkFilter.status} onChange={e => setBulkFilter(f => ({ ...f, status: e.target.value }))}>
+                  <option value="">All Eligible</option>
+                  <option value="Confirmed">Confirmed</option>
+                  <option value="Ongoing">Ongoing</option>
+                  <option value="Completed">Completed</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Start From</label>
+                <input type="date" className="w-full rounded border border-slate-300 p-1.5 text-xs text-black bg-white" value={bulkFilter.dateFrom} onChange={e => setBulkFilter(f => ({ ...f, dateFrom: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Start To</label>
+                <input type="date" className="w-full rounded border border-slate-300 p-1.5 text-xs text-black bg-white" value={bulkFilter.dateTo} onChange={e => setBulkFilter(f => ({ ...f, dateTo: e.target.value }))} />
+              </div>
+            </div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-slate-700 uppercase">Select Projects</span>
+              <div className="flex gap-2">
+                <button onClick={() => {
+                  const eligible = projects.filter(p => {
+                    if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
+                    if (bulkFilter.status && p.status !== bulkFilter.status) return false;
+                    if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
+                    if (bulkFilter.dateFrom && (p.start_date || '') < bulkFilter.dateFrom) return false;
+                    if (bulkFilter.dateTo && (p.start_date || '') > bulkFilter.dateTo) return false;
+                    return true;
+                  });
+                  setBulkInvoiceSelected(new Set(eligible.map(p => p.id)));
+                }} className="text-xs text-indigo-600 hover:underline">Select All Visible</button>
+                <span className="text-slate-300">|</span>
+                <button onClick={() => setBulkInvoiceSelected(new Set())} className="text-xs text-slate-500 hover:underline">Clear</button>
+              </div>
+            </div>
+            <div className="max-h-64 overflow-y-auto space-y-1 border rounded p-2 bg-slate-50">
+              {projects.filter(p => {
+                  if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
+                  if (bulkFilter.status && p.status !== bulkFilter.status) return false;
+                  if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
+                  if (bulkFilter.dateFrom && (p.start_date || '') < bulkFilter.dateFrom) return false;
+                  if (bulkFilter.dateTo && (p.start_date || '') > bulkFilter.dateTo) return false;
+                  return true;
+              }).length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-4">No projects match the current filters.</p>
+              )}
+              {projects
+                .filter(p => {
+                  if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
+                  if (bulkFilter.status && p.status !== bulkFilter.status) return false;
+                  if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
+                  if (bulkFilter.dateFrom && (p.start_date || '') < bulkFilter.dateFrom) return false;
+                  if (bulkFilter.dateTo && (p.start_date || '') > bulkFilter.dateTo) return false;
+                  return true;
+                })
+                .sort((a, b) => (a.start_date || '').localeCompare(b.start_date || ''))
+                .map(p => {
+                  const client = clients.find(c => c.id === p.client_id);
+                  const checked = bulkInvoiceSelected.has(p.id);
+                  return (
+                    <label key={p.id} className={`flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-white transition ${checked ? 'bg-emerald-50 border border-emerald-200' : 'border border-transparent'}`}>
+                      <input type="checkbox" className="accent-emerald-600 w-4 h-4" checked={checked} onChange={e => {
+                        const next = new Set(bulkInvoiceSelected);
+                        e.target.checked ? next.add(p.id) : next.delete(p.id);
+                        setBulkInvoiceSelected(next);
+                      }} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-slate-800 truncate">{p.project_name}</div>
+                        <div className="text-xs text-slate-500">{client?.name || '—'} · {fmtDate(p.start_date)} → {fmtDate(p.end_date)}</div>
+                      </div>
+                      <div className="shrink-0 flex flex-col items-end gap-0.5">
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${STATUS_COLORS[p.status]}`}>{p.status}</span>
+                        {p.invoice_status === 'Invoiced' && <span className="text-[9px] text-green-600 font-medium">#{p.invoice_no}</span>}
+                        <span className="text-[10px] font-semibold text-slate-700">{formatCurrency(getProjectGrandTotal(p))}</span>
+                      </div>
+                    </label>
+                  );
+                })}
+            </div>
+          </div>
+          {bulkInvoiceSelected.size > 0 && (() => {
+            let taxable = 0, gstAmt = 0, grandTotal = 0;
+            for (const id of bulkInvoiceSelected) {
+              const p = projects.find(x => x.id === id);
+              if (!p) continue;
+              if (p.package_cost && p.package_cost > 0) {
+                const gstRate = p.package_cost_gst || 18;
+                const base = p.package_cost;
+                taxable += base;
+                gstAmt += base * gstRate / 100;
+                grandTotal += base * (1 + gstRate / 100);
+              } else {
+                (p.items || []).forEach(i => {
+                  taxable += i.amount || 0;
+                  gstAmt += i.gst_amount || 0;
+                  grandTotal += i.total || 0;
+                });
+                Object.values(p.logistics_costs || {}).forEach(c => {
+                  const base = c.amount || 0;
+                  const g = base * ((c.gst || 0) / 100);
+                  taxable += base;
+                  gstAmt += g;
+                  grandTotal += base + g;
+                });
+              }
+            }
+            return (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                <div className="text-xs font-bold text-indigo-700 uppercase mb-2">Invoice Summary — {bulkInvoiceSelected.size} Project{bulkInvoiceSelected.size !== 1 ? 's' : ''} Selected</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="bg-white rounded p-2 text-center border border-indigo-100">
+                    <div className="text-[10px] text-slate-500 uppercase font-semibold mb-0.5">Amount (excl. GST)</div>
+                    <div className="text-sm font-bold text-slate-800">{formatCurrency(taxable)}</div>
+                  </div>
+                  <div className="bg-white rounded p-2 text-center border border-orange-100">
+                    <div className="text-[10px] text-orange-600 uppercase font-semibold mb-0.5">GST Amount</div>
+                    <div className="text-sm font-bold text-orange-700">{formatCurrency(gstAmt)}</div>
+                  </div>
+                  <div className="bg-indigo-600 rounded p-2 text-center">
+                    <div className="text-[10px] text-indigo-200 uppercase font-semibold mb-0.5">Total Amount</div>
+                    <div className="text-sm font-bold text-white">{formatCurrency(grandTotal)}</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+          <div className="flex items-center justify-between border-t pt-3">
+            <span className="text-sm text-slate-500">{bulkInvoiceSelected.size} project(s) selected</span>
+            <div className="flex gap-2">
+              <button onClick={() => setBulkInvoiceOpen(false)} className="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">Cancel</button>
+              <button onClick={handleBulkInvoiceApply} disabled={bulkInvoiceSelected.size === 0 || !bulkInvoiceForm.invoice_no.trim()} className="px-5 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700 text-sm font-semibold disabled:opacity-50">Apply to Selected</button>
+            </div>
+          </div>
+        </div>
+      </Modal>
   </div>
   );
 };
