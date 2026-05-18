@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+service-account.json
+firestore-backup-2026-05-01/
