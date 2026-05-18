@@ -2879,6 +2879,7 @@ export default function App() {
   const [showForgotPass, setShowForgotPass] = useState(false);
   const [showEmpForgotPass, setShowEmpForgotPass] = useState(false);
   const [recoveryForm, setRecoveryForm] = useState({ key: '', new_pass: '' });
+  const [isBootstrap, setIsBootstrap] = useState(false);
   const [resetRequestEmail, setResetRequestEmail] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
   const [toasts, setToasts] = useState([]);
@@ -3304,14 +3305,16 @@ const [payroll, setPayroll] = useState([]);
         setRole(emp.role);
         setCurrentEmpId(emp.id);
         if (rememberMe) localStorage.setItem('rentalOpsUser', emp.id);
-        // C-4: Upgrade to Firebase Auth (best-effort) so rules can authorise.
-        if (emp.email) {
-          upgradeFirebaseAuth(emp.email, password, {
-            employee_id: emp.id,
-            role: emp.role,
-            name: emp.name || '',
-          });
-        }
+        // C-4: Upgrade to Firebase Auth (best-effort) so Firestore rules can
+        // resolve the role via /users/{uid}.  Use the real email when present;
+        // otherwise synthesize a stable internal email from the employee ID so
+        // employees without email still get a recognised Firebase Auth session.
+        const authEmail = emp.email || `${emp.id}@rental-ops.internal`;
+        upgradeFirebaseAuth(authEmail, password, {
+          employee_id: emp.id,
+          role: emp.role,
+          name: emp.name || '',
+        });
         return;
       } else {
         const attempts = (emp.failed_login_attempts || 0) + 1;
@@ -3330,7 +3333,38 @@ const [payroll, setPayroll] = useState([]);
     setLoginError('Invalid username or password');
   };
 
+  // Called when "Admin Recovery" is clicked — detects whether this is a fresh
+  // deployment (no security doc) and switches the modal into bootstrap mode.
+  const handleOpenRecovery = async () => {
+    try {
+      const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
+      const secSnap = await getDoc(secRef);
+      setIsBootstrap(!secSnap.exists() || !secSnap.data().recovery_key);
+    } catch {
+      setIsBootstrap(false);
+    }
+    setRecoveryForm({ key: '', new_pass: '' });
+    setShowForgotPass(true);
+  };
+
   const handleRecovery = async () => {
+    if (isBootstrap) {
+      // First-time setup: create the security document from scratch.
+      if (!recoveryForm.new_pass || !recoveryForm.key) {
+        return alert('Enter a new admin password AND a recovery key. Both are required.');
+      }
+      try {
+        const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
+        const hashedNewPass = await hashPassword(recoveryForm.new_pass);
+        await setDoc(secRef, { admin_password: hashedNewPass, password_hashed: true, recovery_key: recoveryForm.key });
+        alert('Admin account initialised successfully. You can now log in.');
+        setShowForgotPass(false);
+        setIsBootstrap(false);
+      } catch (e) { console.error(e); alert('Setup failed. Check your connection and try again.'); }
+      return;
+    }
+
+    // Normal recovery: verify existing recovery key then reset password.
     if (!recoveryForm.key || !recoveryForm.new_pass) return alert("Enter Recovery Key and New Password");
     try {
         const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
@@ -3456,15 +3490,28 @@ const [payroll, setPayroll] = useState([]);
              <button type="submit" className="w-full bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-all shadow-sm shadow-indigo-200 hover:shadow-md hover:shadow-indigo-200">Sign In</button>
              <div className="flex justify-between text-sm mt-4">
                 <button type="button" onClick={() => setShowEmpForgotPass(true)} className="text-indigo-600 hover:underline">Forgot Employee Password?</button>
-                <button type="button" onClick={() => setShowForgotPass(true)} className="text-slate-500 hover:underline">Admin Recovery</button>
+                <button type="button" onClick={handleOpenRecovery} className="text-slate-500 hover:underline">Admin Recovery</button>
              </div>
           </form>
         </div>
-        <Modal isOpen={showForgotPass} onClose={() => setShowForgotPass(false)} title="Admin Password Recovery">
+        <Modal isOpen={showForgotPass} onClose={() => { setShowForgotPass(false); setIsBootstrap(false); }} title={isBootstrap ? 'First-Time Admin Setup' : 'Admin Password Recovery'}>
             <div className="space-y-4">
-                <div><label className="text-sm font-medium">Recovery Key</label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.key} onChange={e => setRecoveryForm({...recoveryForm, key: e.target.value})} placeholder="Enter Recovery Key" /></div>
-                <div><label className="text-sm font-medium">New Password</label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.new_pass} onChange={e => setRecoveryForm({...recoveryForm, new_pass: e.target.value})} placeholder="Set New Password" /></div>
-                <button onClick={handleRecovery} className="w-full rounded bg-red-600 text-white py-2 hover:bg-red-700">Reset Password</button>
+              {isBootstrap ? (
+                <>
+                  <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+                    <strong>No admin account found.</strong> This appears to be a fresh installation. Set your admin password and choose a recovery key to get started.
+                  </div>
+                  <div><label className="text-sm font-medium">New Admin Password</label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.new_pass} onChange={e => setRecoveryForm({...recoveryForm, new_pass: e.target.value})} placeholder="Choose a strong password" /></div>
+                  <div><label className="text-sm font-medium">Recovery Key <span className="text-slate-400 font-normal">(keep this safe — you'll need it to reset the password later)</span></label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.key} onChange={e => setRecoveryForm({...recoveryForm, key: e.target.value})} placeholder="Choose a secret recovery key" /></div>
+                  <button onClick={handleRecovery} className="w-full rounded bg-green-600 text-white py-2 hover:bg-green-700 font-semibold">Initialise Admin Account</button>
+                </>
+              ) : (
+                <>
+                  <div><label className="text-sm font-medium">Recovery Key</label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.key} onChange={e => setRecoveryForm({...recoveryForm, key: e.target.value})} placeholder="Enter Recovery Key" /></div>
+                  <div><label className="text-sm font-medium">New Password</label><input type="password" className="w-full rounded border p-2 text-black" value={recoveryForm.new_pass} onChange={e => setRecoveryForm({...recoveryForm, new_pass: e.target.value})} placeholder="Set New Password" /></div>
+                  <button onClick={handleRecovery} className="w-full rounded bg-red-600 text-white py-2 hover:bg-red-700">Reset Password</button>
+                </>
+              )}
             </div>
         </Modal>
         <Modal isOpen={showEmpForgotPass} onClose={() => setShowEmpForgotPass(false)} title="Employee Password Reset">
@@ -3540,7 +3587,7 @@ const [payroll, setPayroll] = useState([]);
           {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'configurations','view') && <NavItem to="/configurations" setMobileMenuOpen={setMobileMenuOpen} icon={Layers} label="Configs" />}
-          <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />
+          {can(role,'expenses','view_own') && <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />}
           {can(role,'finance','view') && <NavItem to="/finance" setMobileMenuOpen={setMobileMenuOpen} icon={Wallet} label="Finance" />}
           {can(role,'finance','view') && <NavItem to="/accounting" setMobileMenuOpen={setMobileMenuOpen} icon={ReceiptText} label="Accounts" />}
           <div className="my-3 border-t border-slate-100"></div>
