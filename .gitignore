@@ -25,3 +25,11 @@ dist-ssr
 
 service-account.json
 firestore-backup-2026-05-01/
+
+# Environment variable files (contain Firebase credentials per environment)
+.env.development
+.env.production
+.env.staging
+
+# Claude Code session temp files
+tmpclaude-*

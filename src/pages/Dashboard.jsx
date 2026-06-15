@@ -253,6 +253,18 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
       data[key] = { totalRevenue: 0, netRevenue: 0, gst: 0, expenses: 0, outsourcing: 0 };
     });
 
+    const getAllocationTaxInclusive = (allocation) => {
+      const taxAmount = parseFloat(allocation?.tax_amount);
+      if (Number.isFinite(taxAmount) && taxAmount >= 0) return taxAmount;
+
+      const baseAmount = parseFloat(allocation?.amount || 0);
+      const gstRate = parseFloat(allocation?.gst || 0);
+      if (!Number.isFinite(baseAmount)) return 0;
+
+      const safeRate = Number.isFinite(gstRate) ? gstRate : 0;
+      return baseAmount * (1 + safeRate / 100);
+    };
+
     // Aggregate revenue & outsourcing from Completed/Closed projects
     projects.forEach(p => {
       if (['Completed', 'Closed'].includes(p.status)) {
@@ -263,10 +275,33 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                data[key].totalRevenue += getProjectGrandTotal(p);
                data[key].netRevenue += getProjectNetTotal(p);
                data[key].gst += getProjectGST(p);
-               // Outsourcing: vendor_allocations total (tax-inclusive)
-               (p.vendor_allocations || []).forEach(v => {
-                 data[key].outsourcing += parseFloat(v.tax_amount || v.amount || 0);
+               // Outsourcing: count each linked PO once, then add non-PO allocations.
+               const poAmountsById = new Map();
+               (p.purchase_orders || []).forEach(po => {
+                 if (!po || po.id === undefined || po.id === null) return;
+                 if (po.status === 'Cancelled') return;
+                 const poAmount = parseFloat(po.amount || 0);
+                 poAmountsById.set(String(po.id), Number.isFinite(poAmount) ? poAmount : 0);
                });
+
+               const countedPOIds = new Set();
+               let projectOutsourcing = 0;
+               (p.vendor_allocations || []).forEach(v => {
+                 const poId = v?.po_id !== undefined && v?.po_id !== null ? String(v.po_id) : '';
+                 if (poId) {
+                   if (countedPOIds.has(poId)) return;
+                   countedPOIds.add(poId);
+
+                   if (poAmountsById.has(poId)) {
+                     projectOutsourcing += poAmountsById.get(poId);
+                     return;
+                   }
+                 }
+
+                 projectOutsourcing += getAllocationTaxInclusive(v);
+               });
+
+               data[key].outsourcing += projectOutsourcing;
              }
          }
       }

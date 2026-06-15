@@ -1,5 +1,5 @@
 // c:\APP\temp\rental-ops\src\utils\helpers.js
-import { GST_STATE_CODES } from './constants';
+import { GST_STATE_CODES, VALID_GST_RATES, GSTIN_CHECKSUM_CHARS } from './constants';
 
 // M-8 fix: round to paise to prevent float drift between line totals and grand total.
 export const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
@@ -84,15 +84,46 @@ export const normalizeGSTIN = (gstin) => {
   return String(gstin).trim().toUpperCase().replace(/\s+/g, '');
 };
 
-export const validateGSTIN = (gstin, stateCode) => {
-  void stateCode;
+export const validateGSTIN = (gstin) => {
   const norm = normalizeGSTIN(gstin);
-  if (!norm || norm.length !== 15) return { valid: false, msg: 'Length must be 15' };
-  const firstTwo = norm.substring(0, 2);
-  if (!GST_STATE_CODES[firstTwo]) return { valid: false, msg: 'Invalid State Code' };
+  if (!norm || norm.length !== 15) return { valid: false, msg: 'GSTIN must be exactly 15 characters' };
+  const stateCode = norm.substring(0, 2);
+  if (!GST_STATE_CODES[stateCode]) return { valid: false, msg: `Invalid state code: ${stateCode}` };
   const regex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
-  if (!regex.test(norm)) return { valid: false, msg: 'Invalid Format Pattern' };
-  return { valid: true, msg: 'Valid', value: norm };
+  if (!regex.test(norm)) return { valid: false, msg: 'Invalid GSTIN format (expected: 22AAAAA0000A1Z5)' };
+  // Verify checksum digit (position 15) using GSTN spec algorithm.
+  let sum = 0;
+  for (let i = 0; i < 14; i++) {
+    const v = GSTIN_CHECKSUM_CHARS.indexOf(norm[i]);
+    const p = v * (i % 2 === 0 ? 1 : 2);
+    sum += Math.floor(p / 36) + (p % 36);
+  }
+  const expected = GSTIN_CHECKSUM_CHARS[(36 - (sum % 36)) % 36];
+  if (norm[14] !== expected) return { valid: false, msg: 'Invalid GSTIN — checksum digit mismatch' };
+  return { valid: true, msg: 'Valid', value: norm, stateName: GST_STATE_CODES[stateCode] };
+};
+
+// Returns true if rate is a notified GST slab.
+export const validateGSTRate = (rate) => VALID_GST_RATES.includes(parseFloat(rate));
+
+// Validates HSN/SAC code — 4, 6, or 8 digits for goods; 6 digits (SAC) for services.
+export const validateHSNCode = (code) => {
+  const s = String(code || '').trim();
+  return /^[0-9]{4}$/.test(s) || /^[0-9]{6}$/.test(s) || /^[0-9]{8}$/.test(s);
+};
+
+// Classifies a tax invoice into GSTR-1 table category.
+// B2B  — buyer has valid GSTIN (registered person)
+// B2CL — unregistered buyer, inter-state supply, invoice value ≥ ₹2.5 lakh
+// B2CS — unregistered buyer, intra-state OR inter-state < ₹2.5 lakh
+export const getGSTR1Category = (invoice) => {
+  const buyerGSTIN = (invoice.bill_to_gstin_at_issue || invoice.sale_company_gstin || '').trim();
+  const isRegistered = buyerGSTIN.length === 15;
+  if (isRegistered) return 'B2B';
+  const isInterState = (invoice.supply_type || '') === 'IGST';
+  const value = parseFloat(invoice.final_amount || invoice.computed_total || 0);
+  if (isInterState && value >= 250000) return 'B2CL';
+  return 'B2CS';
 };
 
 export const formatDate = (dateStr) => {
@@ -318,7 +349,13 @@ export const sumLogisticsRecord = (record) => {
 export const getProjectGSTBreakdown = (project, orgGSTIN, clientGSTIN) => {
   const orgState = (orgGSTIN || '').substring(0, 2);
   const clientState = (clientGSTIN || '').substring(0, 2);
-  const isIntraState = orgState && clientState && orgState === clientState;
+  // B2B: both GSTINs present — compare state codes.
+  // B2C (no client GSTIN): treat as intra-state (CGST+SGST) when org state is known,
+  // because the safest default for a B2C local supply is intra-state, not IGST.
+  // The finance team must manually confirm for cross-state B2C supplies.
+  const isIntraState = orgState
+    ? (clientState ? orgState === clientState : true)
+    : false;
   const supplyType = isIntraState ? 'CGST_SGST' : 'IGST';
 
   const items = [];
@@ -673,6 +710,18 @@ export const calculateLEDSignalPorts = (totalPixelWidth, totalPixelHeight) => {
       note: 'Primary ports handle signal distribution; backup ports provide redundancy for system reliability'
     }
   };
+};
+
+// ── Cryptographic token generation ───────────────────────────────────────────
+// Single source of truth for all security-sensitive random tokens.
+// Never falls back to Math.random — throws instead so callers fail loudly.
+export const generateSecureToken = (byteLength = 16) => {
+  if (!window.crypto?.getRandomValues) {
+    throw new Error('Web Crypto API unavailable — cannot generate secure token');
+  }
+  const bytes = new Uint8Array(byteLength);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 };
 
 // ── Password hashing (PBKDF2-SHA-256 via Web Crypto API) ─────────────────────

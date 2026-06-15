@@ -7,7 +7,8 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category } from '../utils/helpers';
+import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { can } from '../utils/permissions';
 
@@ -717,16 +718,16 @@ const Reports = ({
 
       const monthlyData = {};
 
-      // Output GST from completed/closed projects
-      projects
-        .filter(p => ['Completed', 'Closed'].includes(p.status))
-        .forEach(p => {
-          const date = new Date(p.end_date);
+      // Output GST from issued tax invoices (tax point = invoice_date, not project end_date).
+      taxInvoices
+        .filter(inv => inv.status !== 'Cancelled' && inv.invoice_date)
+        .forEach(inv => {
+          const date = new Date(inv.invoice_date);
           if (s && date < s) return;
           if (e && date > e) return;
           const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
           if (!monthlyData[key]) monthlyData[key] = { Month: key, 'Output GST': 0, 'Input GST (POs)': 0, 'Net GST Liability': 0, Projects: 0 };
-          monthlyData[key]['Output GST'] += getProjectGST(p);
+          monthlyData[key]['Output GST'] += parseFloat(inv.gst_amount || 0);
           monthlyData[key].Projects += 1;
         });
 
@@ -864,43 +865,52 @@ const Reports = ({
     }
 
     // --- 15. GSTR-1 Invoice Register ---
+    // Data source: tax_invoices collection (authoritative issued invoices).
+    // Separated into B2B / B2CL / B2CS per GSTN filing requirement.
     if (reportType === 'gstr1') {
       const s = startDate ? new Date(startDate) : null;
       const e = endDate ? new Date(endDate) : null;
       if (e) e.setHours(23, 59, 59, 999);
 
-      const invoicedProjects = projects.filter(p =>
-        (p.invoice_status === 'Invoiced' || p.status === 'Closed') &&
-        p.invoice_no
-      );
+      const fyOf = (dateStr) => {
+        const d = new Date(dateStr);
+        const m = d.getMonth(); const yr = d.getFullYear();
+        return m < 3 ? `${yr-1}-${String(yr).slice(-2)}` : `${yr}-${String(yr+1).slice(-2)}`;
+      };
 
-      return invoicedProjects
-        .filter(p => {
-          if (!s && !e) return true;
-          const d = new Date(p.invoice_date || p.end_date);
+      return taxInvoices
+        .filter(inv => {
+          if (inv.status === 'Cancelled') return false;
+          if (!inv.invoice_date) return false;
+          const d = new Date(inv.invoice_date);
           if (s && d < s) return false;
           if (e && d > e) return false;
           return true;
         })
-        .sort((a, b) => new Date(a.invoice_date || a.end_date) - new Date(b.invoice_date || b.end_date))
-        .map(p => {
-          const client = clients.find(c => c.id === p.client_id);
-          const gstBD = getProjectGSTBreakdown(p, filterId || '', client?.gstin || '');
-          const isIGST = gstBD.supplyType === 'IGST';
-          const fy = (() => { const d = new Date(p.invoice_date || p.end_date); const m = d.getMonth(); const yr = d.getFullYear(); return m < 3 ? `${yr-1}-${String(yr).slice(-2)}` : `${yr}-${String(yr+1).slice(-2)}`; })();
+        .sort((a, b) => a.invoice_date.localeCompare(b.invoice_date))
+        .map(inv => {
+          const category = getGSTR1Category(inv);
+          const isIGST = (inv.supply_type || '') === 'IGST';
+          const posCode = (inv.place_of_supply || '').substring(0, 2);
+          const posName = GST_STATE_CODES[posCode] || posCode || '—';
+          const buyerGSTIN = inv.bill_to_gstin_at_issue || inv.sale_company_gstin || '';
           return {
-            'FY': fy,
-            'Invoice No': p.invoice_no || '—',
-            'Invoice Date': p.invoice_date || p.end_date || '—',
-            'Client': client?.name || '—',
-            'Client GSTIN': client?.gstin || 'B2C',
+            'GSTR-1 Table': category,
+            'FY': fyOf(inv.invoice_date),
+            'Invoice No': inv.invoice_no || '—',
+            'Invoice Date': inv.invoice_date || '—',
+            'Invoice Type': inv.invoice_type || 'Regular',
+            'Buyer Name': inv.sale_company_name || inv.client_name || '—',
+            'Buyer GSTIN': buyerGSTIN || 'Unregistered',
+            'Place of Supply': posName,
+            'Reverse Charge': inv.reverse_charge ? 'Y' : 'N',
             'Supply Type': isIGST ? 'IGST' : 'CGST+SGST',
-            'Taxable Value': gstBD.totals.taxable,
-            'IGST': isIGST ? gstBD.totals.igstAmt : 0,
-            'CGST': isIGST ? 0 : gstBD.totals.cgstAmt,
-            'SGST': isIGST ? 0 : gstBD.totals.sgstAmt,
-            'Total': gstBD.totals.total,
-            'Project Status': p.status,
+            'Taxable Value': parseFloat(inv.taxable || 0),
+            'IGST Amt': isIGST ? parseFloat(inv.igst_amount || 0) : 0,
+            'CGST Amt': !isIGST ? parseFloat(inv.cgst_amount || 0) : 0,
+            'SGST Amt': !isIGST ? parseFloat(inv.sgst_amount || 0) : 0,
+            'Total GST': parseFloat(inv.gst_amount || 0),
+            'Invoice Value': parseFloat(inv.final_amount || inv.computed_total || 0),
           };
         });
     }

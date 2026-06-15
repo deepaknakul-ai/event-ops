@@ -84,7 +84,7 @@ describe('split-line expense', () => {
     expect(tx.intent).toBe('expense');
     expect(tx.entries).toHaveLength(2);
     const accounts = tx.entries.map((e) => e.debitAccount).sort();
-    expect(accounts).toContain('Travel Expense');
+    expect(accounts).toContain('Travelling & Conveyance');
     expect(accounts).toContain('Food Expense');
     expect(tx.meta.split).toBe(true);
   });

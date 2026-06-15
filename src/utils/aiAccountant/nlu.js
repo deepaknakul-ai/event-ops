@@ -6,11 +6,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { extractAmountSmart, detectPaymentMode } from './amount.js';
-import { extractParty } from './party.js';
+import { extractParty, stripHonorifics, diceSimilarity } from './party.js';
 import { parseDate } from './dates.js';
-import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag } from './extract.js';
+import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag, extractTDSBreakdown } from './extract.js';
 import { inferAccountMeta, KNOWN_ACCOUNT_DEFAULTS, round2 } from './schema.js';
 import { suggestAccountForText, suggestAccountForParty, suggestIntentFromPhrase } from './learning.js';
+import { determineSupplyType, outputGSTLines, inputGSTLines, classifyExpenseAccount, tdsSectionForTransaction } from './knowledge.js';
 
 // ── Intent keyword table ─────────────────────────────────────────────────────
 // Each list intentionally contains many natural-language variants — formal,
@@ -179,6 +180,49 @@ const INTENT_SIGNALS = {
     ],
     weight: 22,
   },
+  prepaid_expense: {
+    keywords: [
+      'prepaid', 'paid in advance for', 'advance rent', 'prepaid insurance',
+      'prepaid expense', 'paid advance insurance', 'insurance for the year',
+    ],
+    weight: 22,
+  },
+  outstanding_expense: {
+    keywords: [
+      'outstanding', 'accrued', 'accrual', 'provision for', 'payable but not paid',
+      'yet to pay', 'expense payable', 'unpaid expense', 'due but not paid', 'book the expense',
+    ],
+    weight: 22,
+  },
+  capital_introduced: {
+    keywords: [
+      'capital introduced', 'introduced capital', 'invested capital', 'capital invested',
+      'owner invested', 'brought in capital', 'infused capital', 'capital infusion', 'proprietor introduced',
+    ],
+    weight: 24,
+  },
+  drawings: {
+    keywords: [
+      'drawings', 'drew for personal', 'withdrew for personal', 'personal use',
+      'owner withdrew', 'proprietor withdrew', 'personal expense from business',
+    ],
+    weight: 24,
+  },
+  gst_payment: {
+    keywords: [
+      'gst payment', 'paid gst', 'gst paid', 'deposited gst', 'gst deposited',
+      'gst challan', 'gst to government', 'gstr3b payment', 'paid gst to govt',
+      'gst liability paid',
+    ],
+    weight: 24,
+  },
+  tds_payment: {
+    keywords: [
+      'tds payment', 'paid tds', 'deposited tds', 'tds deposited', 'tds challan',
+      'tds to government', 'tds liability paid', 'paid tds to govt',
+    ],
+    weight: 24,
+  },
 };
 
 // Max possible signal weight used to normalize confidence into [0..1].
@@ -214,7 +258,23 @@ export function classifyIntent(text) {
     scores.receipt = (scores.receipt || 0) + 20;
     scores.payment = Math.max(0, (scores.payment || 0) - 10);
   }
+  // Negative-keyword guard: "rent received / rental income" is INCOME, not a
+  // rent expense. Suppress the rent-expense intent and treat as a receipt.
+  if (scores.rent > 0 && /\brent(al)?\s+(received|income|earned|collected)\b/i.test(text)) {
+    scores.rent = 0;
+    scores.receipt = (scores.receipt || 0) + 18;
+  }
   if (scores.expense > 0 && scores.payment > 0 && hasTo) scores.payment += 3;
+
+  // Net-of-TDS outflow: when a salary/payment verb co-occurs with "TDS", WE are
+  // withholding tax on an outflow — keep salary/payment (the compound parser
+  // adds the TDS leg). The bare `tds` intent stays for client-deducted receipts
+  // (no salary/payment verb present).
+  if (scores.tds > 0 && (scores.salary > 0 || scores.payment > 0)) {
+    if (scores.salary >= scores.payment) scores.salary += 15;
+    else scores.payment += 12;
+    scores.tds = Math.max(0, scores.tds - 12);
+  }
 
   const bankSignal = /\b(bank|neft|rtgs|upi|imps|online|net\s*banking|cheque|check)\b/i.test(text);
 
@@ -395,7 +455,14 @@ export function findPartyCandidates(text, names) {
     const firstWord = ln.split(/\s+/)[0];
     if (firstWord.length >= 3 && new RegExp(`\\b${escapeRegex(firstWord)}\\b`).test(lower)) {
       hits.push({ name: n, weight: 5, source: 'prefix' });
+      continue;
     }
+    // Fuzzy: honorific-insensitive bigram similarity against each input word
+    // ("sharma ji" ↔ "Sharma Traders"). Only a candidate, not an exact match.
+    const strippedName = stripHonorifics(n).toLowerCase();
+    const words = compactText.split(' ').filter((w) => w.length >= 3);
+    const bestDice = words.reduce((mx, w) => Math.max(mx, diceSimilarity(w, strippedName)), 0);
+    if (bestDice >= 0.55) hits.push({ name: n, weight: 4, source: 'fuzzy' });
   }
   // Deduplicate by name, keep highest weight
   const byName = {};
@@ -481,6 +548,17 @@ export function parseMessage(text, ctx = {}) {
     }
   }
 
+  // Fallback: an expense noun without an explicit spend verb ("diesel 4k for
+  // site", "office electricity 3000"). If a specific expense account is
+  // recognised, treat the message as an expense.
+  if (!intent || score < 8) {
+    const guess = classifyExpenseAccount(trimmed);
+    if (guess.account && guess.account !== 'Miscellaneous Expense') {
+      intent = 'expense';
+      score = Math.max(score, 12);
+    }
+  }
+
   if (amount <= 0) {
     // No amount, but we detected a booking-style intent → ask for it.
     if (intent && score > 0) {
@@ -545,7 +623,7 @@ export function parseMessage(text, ctx = {}) {
   const date = ctx.date || (found && found.date) || today();
   const dateMatched = found ? found.matched : null;
   const confidence = Math.min(1, round2(score / MAX_SIGNAL));
-  const projectTag = extractProjectTag(trimmed);
+  const projectTag = extractProjectTag(trimmed, ctx.projectNames);
 
   /** @type {import('./schema.js').Transaction} */
   const base = {
@@ -573,8 +651,19 @@ export function parseMessage(text, ctx = {}) {
     }
     case 'payment': {
       const p = party || 'Unknown Vendor';
-      base.entries = [{ debitAccount: `Party: ${p}`, creditAccount: cashOrBank, amount }];
-      base.narration = `Payment made to ${p}${bankSignal ? ' (bank)' : ''}`;
+      const tdsB = extractTDSBreakdown(trimmed);
+      if (tdsB) {
+        // Vendor payment with TDS withheld: settle the payable, pay net, hold TDS.
+        base.entries = [
+          { debitAccount: `Party: ${p}`, creditAccount: cashOrBank, amount: tdsB.net },
+          { debitAccount: `Party: ${p}`, creditAccount: 'TDS Payable', amount: tdsB.tds },
+        ];
+        base.narration = `Payment to ${p} (gross ${tdsB.gross}, TDS ${tdsB.tds})`;
+        base.meta = { ...base.meta, compound: true, gross: tdsB.gross, tds: tdsB.tds, net: tdsB.net, amount: tdsB.gross };
+      } else {
+        base.entries = [{ debitAccount: `Party: ${p}`, creditAccount: cashOrBank, amount }];
+        base.narration = `Payment made to ${p}${bankSignal ? ' (bank)' : ''}`;
+      }
       base.party = { type: 'vendor', name: p };
       break;
     }
@@ -582,25 +671,36 @@ export function parseMessage(text, ctx = {}) {
       const p = party || 'Unknown Client';
       const rate = extractGSTRate(trimmed);
       const { taxable, gst } = splitGSTByRate(amount, rate);
-      base.entries = rate > 0
-        ? [
-            { debitAccount: `Party: ${p}`, creditAccount: 'Sales Revenue',      amount: taxable },
-            { debitAccount: `Party: ${p}`, creditAccount: 'Output GST Payable', amount: gst },
-          ]
-        : [
-            { debitAccount: `Party: ${p}`, creditAccount: 'Sales Revenue', amount: taxable },
-          ];
-      base.narration = rate > 0
-        ? `Invoice raised to ${p} (incl. ${rate}% GST)`
-        : `Invoice raised to ${p} (exempt / no GST)`;
+      const partyGstin = ctx.partyGstins?.[p.toLowerCase()] || '';
+      const supplyType = determineSupplyType(ctx.orgGstin, partyGstin);
+      const gstLines = outputGSTLines(gst, supplyType);
+      base.entries = [
+        { debitAccount: `Party: ${p}`, creditAccount: 'Sales Revenue', amount: taxable },
+        ...gstLines.map((g) => ({ debitAccount: `Party: ${p}`, creditAccount: g.account, amount: g.amount })),
+      ];
+      const gstLabel = rate > 0
+        ? `incl. ${rate}% GST (${supplyType === 'inter' ? 'IGST' : supplyType === 'intra' ? 'CGST+SGST' : 'GST'})`
+        : 'exempt / no GST';
+      base.narration = `Invoice raised to ${p} (${gstLabel})`;
       base.party = { type: 'client', name: p };
-      base.meta = { ...base.meta, taxable, gst, gstRate: rate };
+      base.meta = { ...base.meta, taxable, gst, gstRate: rate, supplyType };
       break;
     }
     case 'salary': {
       const name = party || 'Staff';
-      base.entries = [{ debitAccount: 'Salary Expense', creditAccount: cashOrBank, amount }];
-      base.narration = `Salary paid to ${name}`;
+      const tdsB = extractTDSBreakdown(trimmed);
+      if (tdsB) {
+        // Gross salary split: net paid in cash/bank + TDS withheld (per-line balanced).
+        base.entries = [
+          { debitAccount: 'Salary Expense', creditAccount: cashOrBank, amount: tdsB.net },
+          { debitAccount: 'Salary Expense', creditAccount: 'TDS Payable', amount: tdsB.tds },
+        ];
+        base.narration = `Salary to ${name} (gross ${tdsB.gross}, TDS ${tdsB.tds})`;
+        base.meta = { ...base.meta, compound: true, gross: tdsB.gross, tds: tdsB.tds, net: tdsB.net, amount: tdsB.gross };
+      } else {
+        base.entries = [{ debitAccount: 'Salary Expense', creditAccount: cashOrBank, amount }];
+        base.narration = `Salary paid to ${name}`;
+      }
       base.party = { type: 'employee', name };
       break;
     }
@@ -609,10 +709,11 @@ export function parseMessage(text, ctx = {}) {
       // Accept when the parser found >=2 line-items. (We DO NOT clamp to the
       // smart-extracted amount, because that picks a single number — the user
       // typically wrote N sub-amounts whose sum is the true total.)
+      const hasProject = !!projectTag;
       const split = extractSplitLines(trimmed);
       if (split.length >= 2) {
         base.entries = split.map((item) => ({
-          debitAccount: guessExpenseAccount(item.description) || 'Expense:General',
+          debitAccount: classifyExpenseAccount(item.description, { hasProject }).account,
           creditAccount: cashOrBank,
           amount: item.amount,
         }));
@@ -620,10 +721,12 @@ export function parseMessage(text, ctx = {}) {
         base.meta = { ...base.meta, split: true, lineCount: split.length };
       } else {
         const learnedAcct = suggestAccountForText(trimmed, ctx.learned);
+        const classified = classifyExpenseAccount(trimmed, { hasProject });
         const account = (learnedAcct && learnedAcct.confidence >= 0.4 ? learnedAcct.account : null)
-          || guessExpenseAccount(trimmed);
+          || classified.account;
         base.entries = [{ debitAccount: account, creditAccount: cashOrBank, amount }];
         base.narration = `Expense: ${party || trimmed}`;
+        base.meta = { ...base.meta, expenseGroup: classified.direct ? 'Direct' : 'Indirect' };
       }
       break;
     }
@@ -638,19 +741,19 @@ export function parseMessage(text, ctx = {}) {
       const p = party || 'Unknown Vendor';
       const rate = extractGSTRate(trimmed);
       const { taxable, gst } = splitGSTByRate(amount, rate);
-      base.entries = rate > 0
-        ? [
-            { debitAccount: 'Purchase Expense',  creditAccount: `Party: ${p}`, amount: taxable },
-            { debitAccount: 'Input GST Credit',  creditAccount: `Party: ${p}`, amount: gst },
-          ]
-        : [
-            { debitAccount: 'Purchase Expense',  creditAccount: `Party: ${p}`, amount: taxable },
-          ];
-      base.narration = rate > 0
-        ? `Purchase from ${p} (incl. ${rate}% GST)`
-        : `Purchase from ${p} (no GST)`;
+      const partyGstin = ctx.partyGstins?.[p.toLowerCase()] || '';
+      const supplyType = determineSupplyType(ctx.orgGstin, partyGstin);
+      const gstLines = inputGSTLines(gst, supplyType);
+      base.entries = [
+        { debitAccount: 'Purchase Expense', creditAccount: `Party: ${p}`, amount: taxable },
+        ...gstLines.map((g) => ({ debitAccount: g.account, creditAccount: `Party: ${p}`, amount: g.amount })),
+      ];
+      const gstLabel = rate > 0
+        ? `incl. ${rate}% GST (${supplyType === 'inter' ? 'IGST' : supplyType === 'intra' ? 'CGST+SGST' : 'GST'})`
+        : 'no GST';
+      base.narration = `Purchase from ${p} (${gstLabel})`;
       base.party = { type: 'vendor', name: p };
-      base.meta = { ...base.meta, taxable, gst, gstRate: rate };
+      base.meta = { ...base.meta, taxable, gst, gstRate: rate, supplyType };
       break;
     }
     case 'bank_deposit': {
@@ -743,12 +846,58 @@ export function parseMessage(text, ctx = {}) {
       base.party = { type: 'client', name: p };
       break;
     }
+    case 'gst_payment': {
+      // Settling the net GST liability with the government.
+      base.entries = [{ debitAccount: 'Output GST Payable', creditAccount: cashOrBank, amount }];
+      base.narration = 'GST paid to government';
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
+    case 'tds_payment': {
+      // Depositing TDS deducted from vendors/employees with the government.
+      base.entries = [{ debitAccount: 'TDS Payable', creditAccount: cashOrBank, amount }];
+      base.narration = 'TDS deposited to government';
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
+    case 'prepaid_expense': {
+      // Expense paid in advance → recognised as an asset until it is consumed.
+      base.entries = [{ debitAccount: 'Prepaid Expenses', creditAccount: cashOrBank, amount }];
+      base.narration = `Prepaid expense${party ? ` — ${party}` : ''}`;
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
+    case 'outstanding_expense': {
+      // Expense incurred but not yet paid → accrue a liability (matching concept).
+      const acct = classifyExpenseAccount(trimmed, { hasProject: !!projectTag }).account;
+      base.entries = [{ debitAccount: acct, creditAccount: 'Outstanding Expenses', amount }];
+      base.narration = `Provision / outstanding: ${acct}`;
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
+    case 'capital_introduced': {
+      base.entries = [{ debitAccount: cashOrBank, creditAccount: 'Capital', amount }];
+      base.narration = 'Capital introduced by owner';
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
+    case 'drawings': {
+      base.entries = [{ debitAccount: 'Drawings', creditAccount: cashOrBank, amount }];
+      base.narration = 'Drawings by owner (personal use)';
+      base.party = { type: 'internal', name: '' };
+      break;
+    }
     default:
       return null;
   }
 
   base.accountCreates = buildAccountCreates(base.entries);
   if (projectTag) base.meta = { ...base.meta, projectTag };
+
+  // Stamp the inferred TDS section so the validator's compliance layer can warn
+  // when a deduction threshold is crossed (consumed via validatorCtx.tdsSection).
+  const tdsSection = tdsSectionForTransaction(intent, trimmed);
+  if (tdsSection) base.meta = { ...base.meta, tdsSection };
 
   // Learning: stamp a preferred-account hint for the party (consumer UI can
   // show "Usually posted to: X" next to the entry preview).

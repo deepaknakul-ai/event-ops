@@ -5,7 +5,7 @@ import {
 import { collection, addDoc, updateDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import jsPDF from 'jspdf';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
-import { formatCurrency, hashPassword, normalizeHourlyRateHistory, getHourlyRateForDate } from '../utils/helpers';
+import { formatCurrency, hashPassword, normalizeHourlyRateHistory, getHourlyRateForDate, generateSecureToken } from '../utils/helpers';
 import { ROLE_LABELS, ROLE_COLOR, can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
 
@@ -385,14 +385,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
     doc.save(`ID_Card_${emp.name.replace(/\s+/g, '_')}.pdf`);
   };
 
-  const generateStatementToken = () => {
-    if (window.crypto && window.crypto.getRandomValues) {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    }
-    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  };
+  const generateStatementToken = () => generateSecureToken(16);
 
   const handleStatementLink = async (emp) => {
     if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');

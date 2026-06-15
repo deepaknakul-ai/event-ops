@@ -76,6 +76,43 @@ export function extractSplitLines(text) {
   return parts.length >= 2 ? parts : [];
 }
 
+// ── TDS compound breakdown ────────────────────────────────────────────────────
+/**
+ * Detect a net-of-TDS event in one sentence, e.g.
+ *   "salary 50k, TDS 5k deducted, paid 45k bank"
+ *   "paid vendor 1,00,000 less 2% TDS 2000"
+ * Returns { gross, tds, net } or null. Section codes like 194C are ignored so
+ * they are not mistaken for amounts.
+ * @param {string} text
+ * @returns {{gross:number, tds:number, net:number}|null}
+ */
+export function extractTDSBreakdown(text) {
+  if (!text || !/\btds\b/i.test(text)) return null;
+  // Strip section references (194C, 194, 192, 195, 206AA…) before scanning numbers.
+  const clean = text.replace(/\b(?:u\/s\s*)?(?:section\s*)?19[0-9][a-z]{0,3}\b/gi, ' ');
+
+  // Amount adjacent to the word "tds".
+  let tds = 0;
+  let m = clean.match(/tds[^0-9]{0,14}?(\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?)/i)
+       || clean.match(/(\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?)\s*(?:as\s+)?tds/i);
+  if (m) tds = extractAmount(m[1]);
+  if (tds <= 0) return null;
+
+  // All monetary amounts in the sentence.
+  const nums = [];
+  const re = /\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?/gi;
+  let mm;
+  while ((mm = re.exec(clean))) {
+    const v = extractAmount(mm[0]);
+    if (v > 0) nums.push(v);
+  }
+  if (nums.length < 2) return null;
+
+  const gross = Math.max(...nums);
+  if (gross <= tds) return null;
+  return { gross: round2(gross), tds: round2(tds), net: round2(gross - tds) };
+}
+
 // ── Voucher reference ───────────────────────────────────────────────────────
 /**
  * Detect a voucher reference like:
@@ -101,11 +138,14 @@ export function extractVoucherNo(text) {
 // ── Project tag ─────────────────────────────────────────────────────────────
 /**
  * Detect project tag.
- * Supports: "#P-123", "#123", "project-123", "project ABC Launch".
- * Returns a string (tag or project name) or null.
+ * Supports: "#P-123", "#123", "project-123", "project ABC Launch", and — when a
+ * `projectNames` list is supplied — a fuzzy reference to a real project name
+ * anywhere in the text ("diesel for the Andheri job" → "Andheri Live").
+ * Returns a string (tag or matched project name) or null.
  * @param {string} text
+ * @param {string[]} [projectNames]  // live project names for fuzzy matching
  */
-export function extractProjectTag(text) {
+export function extractProjectTag(text, projectNames) {
   if (!text) return null;
   let m = text.match(/#\s*(P-?\d+)\b/i);
   if (m) return m[1].toUpperCase();
@@ -113,5 +153,24 @@ export function extractProjectTag(text) {
   if (m) return `P-${m[1]}`;
   m = text.match(/\bproject[\s:-]+([A-Za-z0-9][\w .-]{1,40})/i);
   if (m) return m[1].trim().replace(/\s+$/g, '');
+
+  // Fuzzy: match a known project name (or a distinctive word from it) in the text.
+  if (Array.isArray(projectNames) && projectNames.length) {
+    const lower = text.toLowerCase();
+    // Longest names first so "Andheri Live Show" beats "Andheri".
+    const sorted = [...projectNames].filter(Boolean).sort((a, b) => b.length - a.length);
+    for (const name of sorted) {
+      const nl = name.toLowerCase();
+      if (nl.length >= 3 && lower.includes(nl)) return name;
+    }
+    // Distinctive-word match: a project word (≥4 chars, not generic) present in text.
+    const GENERIC = new Set(['project', 'event', 'show', 'live', 'job', 'work', 'the', 'and', 'for']);
+    for (const name of sorted) {
+      const words = name.toLowerCase().split(/\s+/).filter((w) => w.length >= 4 && !GENERIC.has(w));
+      if (words.some((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(lower))) {
+        return name;
+      }
+    }
+  }
   return null;
 }

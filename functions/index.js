@@ -7,6 +7,9 @@
  * matching `journal_entries` doc with `scheduled_from_draft == draftId`.
  *
  * Callables:
+ *   - verifyLogin({ username, password, appId })
+ *       → Verifies credentials server-side, returns a Firebase custom token.
+ *         Removes the need for anonymous Firestore reads of employees/settings.
  *   - runScheduledDraftsNow(appIds?: string[]) → admin-only, manual trigger.
  *   - runRecurringTemplatesNow(appIds?: string[]) → admin-only, generates
  *     draft journal entries from `recurring_rules` with `template_id` set.
@@ -15,9 +18,12 @@ const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
+const { pbkdf2, timingSafeEqual, createHash, randomBytes } = require('crypto');
+const { promisify } = require('util');
 
 admin.initializeApp();
 const db = admin.firestore();
+const pbkdf2Async = promisify(pbkdf2);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fyOf(dateStr) {
@@ -43,7 +49,6 @@ async function nextVoucherNo(appId, fy) {
 }
 
 async function listAppIds() {
-  // Preferred: explicit registry doc. Schema: { ids: ['app-a', 'app-b', ...] }
   try {
     const reg = await db.doc('meta/active_apps').get();
     if (reg.exists) {
@@ -53,7 +58,6 @@ async function listAppIds() {
   } catch (err) {
     logger.warn('Failed to read meta/active_apps; falling back to scan', err);
   }
-  // Fallback: collectionGroup scan over journal_drafts.
   const cg = await db.collectionGroup('journal_drafts').limit(500).get();
   const ids = new Set();
   cg.forEach((d) => {
@@ -74,7 +78,6 @@ async function isDraftAlreadyPosted(appId, draftId) {
 
 async function processAppDrafts(appId, today) {
   const draftsCol = db.collection(`artifacts/${appId}/public/data/journal_drafts`);
-  // Drafts with non-empty schedule_post_on <= today AND not already on hold.
   const due = await draftsCol
     .where('schedule_post_on', '>', '')
     .where('schedule_post_on', '<=', today)
@@ -85,13 +88,11 @@ async function processAppDrafts(appId, today) {
   let skipped = 0;
   for (const docSnap of due.docs) {
     const draft = docSnap.data() || {};
-    // Approval gate: do not auto-post drafts that still need approval.
     if (draft.requires_approval && draft.approval_status !== 'approved') {
       skipped += 1;
       logger.info(`[${appId}] Draft ${docSnap.id} skipped — pending approval`);
       continue;
     }
-    // Idempotency: if a journal_entries doc already references this draft, skip.
     try {
       if (await isDraftAlreadyPosted(appId, docSnap.id)) {
         skipped += 1;
@@ -182,25 +183,37 @@ function rulesDueRuns(rule, asOfIso) {
   return out;
 }
 
+// PERF-01 fix: batch-fetch all needed templates in one Admin SDK getAll() call
+// before iterating rules, eliminating the O(R) per-rule template reads.
 async function processRecurringTemplates(appId, today) {
   const rulesCol = db.collection(`artifacts/${appId}/public/data/recurring_rules`);
   const tplOnly = await rulesCol.where('template_id', '>', '').get();
   if (tplOnly.empty) return { drafted: 0 };
+
+  // Collect unique template IDs and batch-fetch them in a single RPC.
+  const templateIds = [...new Set(
+    tplOnly.docs.map(d => d.data().template_id).filter(Boolean)
+  )];
+  const templateRefs = templateIds.map(id =>
+    db.doc(`artifacts/${appId}/public/data/journal_templates/${id}`)
+  );
+  const templateSnaps = await db.getAll(...templateRefs);
+  const templateMap = Object.fromEntries(
+    templateSnaps.filter(s => s.exists).map(s => [s.id, s.data()])
+  );
+
   let drafted = 0;
   for (const ruleSnap of tplOnly.docs) {
     const rule = { id: ruleSnap.id, ...ruleSnap.data() };
     if (rule.active === false) continue;
+    const tpl = templateMap[rule.template_id];
+    if (!tpl) continue;
+
     const runs = rulesDueRuns(rule, today);
     if (!runs.length) continue;
-    let tpl;
-    try {
-      const tplSnap = await db.doc(`artifacts/${appId}/public/data/journal_templates/${rule.template_id}`).get();
-      if (!tplSnap.exists) continue;
-      tpl = tplSnap.data();
-    } catch { continue; }
+
     const succeededRuns = [];
     for (const runIso of runs) {
-      // Idempotency: only one draft per (rule, runDate).
       try {
         const dup = await db
           .collection(`artifacts/${appId}/public/data/journal_drafts`)
@@ -229,8 +242,6 @@ async function processRecurringTemplates(appId, today) {
         drafted += 1;
         succeededRuns.push(runIso);
       } catch (err) {
-        // Do not advance lastRunDate past a failed run — it will be retried
-        // on the next invocation so we never silently lose a scheduled draft.
         logger.error(`[${appId}] Failed recurring draft for rule ${rule.id} @ ${runIso}`, err);
         break;
       }
@@ -244,6 +255,269 @@ async function processRecurringTemplates(appId, today) {
   }
   return { drafted };
 }
+
+// ── Password verification (Node.js crypto — mirrors Web Crypto in helpers.js) ─
+// Format: 'v2:saltHex:hashHex' (PBKDF2-SHA-256, 200 000 iterations)
+//         64-hex chars → legacy SHA-256
+//         anything else → very-old plaintext
+// v3:iterations:saltHex:hashHex — iteration count is explicit so it can change safely.
+// v2:saltHex:hashHex             — legacy 200 000 iterations (no count in format).
+// 64-hex                         — legacy SHA-256 (very old).
+// anything else                  — legacy plaintext.
+const PBKDF2_ITERS = 100000; // 100k is NIST-acceptable and ~2× faster than 200k on CF
+
+async function verifyPasswordNode(plaintext, storedHash) {
+  if (!plaintext || !storedHash) return false;
+  const plaintextBuf = Buffer.from(plaintext, 'utf8');
+
+  if (storedHash.startsWith('v3:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 4) return false;
+    const iters = parseInt(parts[1], 10);
+    const salt = Buffer.from(parts[2], 'hex');
+    const expected = Buffer.from(parts[3], 'hex');
+    const derived = await pbkdf2Async(plaintextBuf, salt, iters, 32, 'sha256');
+    if (derived.length !== expected.length) return false;
+    return timingSafeEqual(derived, expected);
+  }
+
+  if (storedHash.startsWith('v2:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const salt = Buffer.from(parts[1], 'hex');
+    const expected = Buffer.from(parts[2], 'hex');
+    const derived = await pbkdf2Async(plaintextBuf, salt, 200000, 32, 'sha256');
+    if (derived.length !== expected.length) return false;
+    return timingSafeEqual(derived, expected);
+  }
+
+  if (storedHash.length === 64 && /^[0-9a-f]+$/.test(storedHash)) {
+    const hash = createHash('sha256').update(plaintextBuf).digest('hex');
+    return hash === storedHash;
+  }
+
+  // Legacy plaintext — accepted but upgraded on next successful login
+  return plaintext === storedHash;
+}
+
+async function hashPasswordNode(plaintext) {
+  const salt = randomBytes(16);
+  const derived = await pbkdf2Async(Buffer.from(plaintext, 'utf8'), salt, PBKDF2_ITERS, 32, 'sha256');
+  return `v3:${PBKDF2_ITERS}:${salt.toString('hex')}:${derived.toString('hex')}`;
+}
+
+// ── verifyLogin callable ────────────────────────────────────────────────────
+// Replaces the client-side anonymous Firestore reads of employees/settings.
+// On success returns a Firebase custom token the client signs in with.
+exports.verifyLogin = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, minInstances: 1, serviceAccount: 'firebase-adminsdk-fbsvc@terms-a005e.iam.gserviceaccount.com' },
+  async (req) => {
+    const { username, password, appId } = req.data || {};
+    if (!username || !password || !appId) {
+      throw new HttpsError('invalid-argument', 'Missing credentials');
+    }
+
+    const usernameNorm = String(username).trim();
+
+    // ── Admin login ──────────────────────────────────────────────────────
+    if (usernameNorm.toLowerCase() === 'admin') {
+      const secRef = db.doc(`artifacts/${appId}/public/data/settings/security`);
+      const secSnap = await secRef.get();
+
+      if (!secSnap.exists || !secSnap.data().admin_password) {
+        throw new HttpsError('permission-denied', 'Invalid credentials');
+      }
+
+      const secData = secSnap.data();
+
+      // Rate-limit recovery attempts (admin login reuses the same counter)
+      const lockedUntil = secData.login_locked_until ? new Date(secData.login_locked_until) : null;
+      if (lockedUntil && lockedUntil > new Date()) {
+        throw new HttpsError('resource-exhausted', 'Too many failed attempts. Try again later.');
+      }
+
+      // Run PBKDF2 and admin employee lookup in parallel to save one Firestore RTT.
+      const [valid, empSnap] = await Promise.all([
+        verifyPasswordNode(password, secData.admin_password),
+        db.collection(`artifacts/${appId}/public/data/employees`)
+          .where('role', '==', 'admin').limit(1).get(),
+      ]);
+
+      if (!valid) {
+        const attempts = (secData.failed_login_attempts || 0) + 1;
+        const updates = { failed_login_attempts: attempts };
+        if (attempts >= 5) {
+          updates.login_locked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        }
+        await secRef.update(updates);
+        throw new HttpsError('permission-denied', 'Invalid credentials');
+      }
+
+      // Success: reset counters, upgrade legacy hash (v2 → v3 at lower iteration count)
+      const resetUpdates = { failed_login_attempts: 0, login_locked_until: null };
+      if (!secData.admin_password.startsWith('v3:')) {
+        resetUpdates.admin_password = await hashPasswordNode(password);
+        resetUpdates.password_hashed = true;
+      }
+      await secRef.update(resetUpdates);
+
+      const adminEmp = empSnap.empty ? null : { id: empSnap.docs[0].id, ...empSnap.docs[0].data() };
+      const uid = adminEmp?.id || `admin_${appId}`;
+
+      const customToken = await admin.auth().createCustomToken(uid, { role: 'admin', appId });
+      return {
+        token: customToken,
+        role: 'admin',
+        empId: adminEmp?.id || null,
+        name: adminEmp?.name || 'Administrator',
+        email: adminEmp?.email || null,
+      };
+    }
+
+    // ── Employee login ───────────────────────────────────────────────────
+    // Search by email AND username field in parallel; prefer email match.
+    const [byEmail, byUsername] = await Promise.all([
+      db.collection(`artifacts/${appId}/public/data/employees`)
+        .where('email', '==', usernameNorm)
+        .limit(1)
+        .get(),
+      db.collection(`artifacts/${appId}/public/data/employees`)
+        .where('username', '==', usernameNorm)
+        .limit(1)
+        .get(),
+    ]);
+
+    const empDoc = !byEmail.empty ? byEmail.docs[0]
+      : !byUsername.empty ? byUsername.docs[0]
+      : null;
+
+    if (!empDoc) {
+      throw new HttpsError('permission-denied', 'Invalid credentials');
+    }
+
+    const emp = { id: empDoc.id, ...empDoc.data() };
+
+    if (emp.is_locked) {
+      throw new HttpsError('permission-denied', 'Account is locked. Contact Admin.');
+    }
+    if (emp.status === 'Disabled' || emp.status === 'Deactivated') {
+      throw new HttpsError('permission-denied', 'Account is disabled. Contact Admin.');
+    }
+    if (!emp.password) {
+      throw new HttpsError('permission-denied', 'No password configured. Contact Admin.');
+    }
+
+    const valid = await verifyPasswordNode(password, emp.password);
+    if (!valid) {
+      const attempts = (emp.failed_login_attempts || 0) + 1;
+      const updates = { failed_login_attempts: attempts };
+      if (attempts >= 5) updates.is_locked = true;
+      await empDoc.ref.update(updates);
+      if (attempts >= 5) {
+        throw new HttpsError('permission-denied', 'Account locked due to too many failed attempts. Contact Admin.');
+      }
+      throw new HttpsError('permission-denied', 'Invalid credentials');
+    }
+
+    // Success: reset counters, upgrade legacy hash (v2/plaintext → v3)
+    const updates = {};
+    if (emp.failed_login_attempts > 0) updates.failed_login_attempts = 0;
+    if (!emp.password.startsWith('v3:')) {
+      updates.password = await hashPasswordNode(password);
+      updates.password_hashed = true;
+    }
+    if (Object.keys(updates).length > 0) await empDoc.ref.update(updates);
+
+    const authEmail = emp.email || `${emp.id}@rental-ops.internal`;
+    const customToken = await admin.auth().createCustomToken(emp.id, { role: emp.role, appId });
+
+    return {
+      token: customToken,
+      role: emp.role,
+      empId: emp.id,
+      name: emp.name || '',
+      email: authEmail,
+    };
+  }
+);
+
+// ── resetAdminPassword callable ────────────────────────────────────────────
+// Verifies the recovery key server-side (constant-time, rate-limited) and
+// resets the admin password.  Also handles first-time bootstrap setup.
+exports.resetAdminPassword = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, serviceAccount: 'firebase-adminsdk-fbsvc@terms-a005e.iam.gserviceaccount.com' },
+  async (req) => {
+    const { appId, recoveryKey, newPassword } = req.data || {};
+    if (!appId || !recoveryKey || !newPassword) {
+      throw new HttpsError('invalid-argument', 'appId, recoveryKey and newPassword are required');
+    }
+    if (newPassword.length < 8) {
+      throw new HttpsError('invalid-argument', 'New password must be at least 8 characters');
+    }
+
+    const secRef = db.doc(`artifacts/${appId}/public/data/settings/security`);
+    const secSnap = await secRef.get();
+
+    // Bootstrap: no security doc exists yet — create it.
+    if (!secSnap.exists) {
+      const hashedPass = await hashPasswordNode(newPassword);
+      const hashedKey = await hashPasswordNode(recoveryKey);
+      await secRef.set({
+        admin_password: hashedPass,
+        password_hashed: true,
+        recovery_key_hash: hashedKey,
+        failed_login_attempts: 0,
+      });
+      return { ok: true, mode: 'bootstrap' };
+    }
+
+    const secData = secSnap.data();
+
+    // Rate-limit recovery attempts.
+    const lockedUntil = secData.recovery_locked_until ? new Date(secData.recovery_locked_until) : null;
+    if (lockedUntil && lockedUntil > new Date()) {
+      throw new HttpsError('resource-exhausted', 'Too many failed recovery attempts. Try again later.');
+    }
+
+    // Verify recovery key — support both hashed (new) and plaintext (legacy).
+    let keyValid = false;
+    if (secData.recovery_key_hash) {
+      keyValid = await verifyPasswordNode(recoveryKey, secData.recovery_key_hash);
+    } else if (secData.recovery_key) {
+      // Legacy plaintext — constant-time compare via HMAC
+      const hmacKey = randomBytes(32);
+      const { createHmac } = require('crypto');
+      const h1 = createHmac('sha256', hmacKey).update(recoveryKey).digest();
+      const h2 = createHmac('sha256', hmacKey).update(secData.recovery_key).digest();
+      keyValid = h1.length === h2.length && timingSafeEqual(h1, h2);
+    }
+
+    if (!keyValid) {
+      const attempts = (secData.recovery_attempt_count || 0) + 1;
+      const updates = { recovery_attempt_count: attempts };
+      if (attempts >= 5) {
+        updates.recovery_locked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      }
+      await secRef.update(updates);
+      throw new HttpsError('permission-denied', 'Invalid recovery key');
+    }
+
+    // Key valid — reset password and upgrade legacy plaintext key to hash.
+    const hashedPass = await hashPasswordNode(newPassword);
+    const updates = {
+      admin_password: hashedPass,
+      password_hashed: true,
+      recovery_attempt_count: 0,
+      recovery_locked_until: null,
+    };
+    if (!secData.recovery_key_hash && secData.recovery_key) {
+      updates.recovery_key_hash = await hashPasswordNode(secData.recovery_key);
+      updates.recovery_key = admin.firestore.FieldValue.delete();
+    }
+    await secRef.update(updates);
+    return { ok: true, mode: 'reset' };
+  }
+);
 
 // ── Scheduled cron ─────────────────────────────────────────────────────────
 exports.postScheduledDrafts = onSchedule(
@@ -285,8 +559,6 @@ async function assertAdmin(auth, appId) {
   const claimRole = auth.token && auth.token.role;
   if (claimRole === 'admin') return;
   if (!appId) throw new HttpsError('invalid-argument', 'appId required');
-  // Two possible role locations: custom collection userRoles/{uid} OR the
-  // employees collection used by client-side rules.
   const [rolesSnap, empSnap] = await Promise.all([
     db.doc(`artifacts/${appId}/public/data/userRoles/${auth.uid}`).get().catch(() => null),
     db.doc(`artifacts/${appId}/public/data/employees/${auth.uid}`).get().catch(() => null),
@@ -298,9 +570,6 @@ async function assertAdmin(auth, appId) {
   }
 }
 
-// Return the subset of `appIds` where `auth` is an admin. Never throws for
-// unauthorised apps — it simply drops them so a compromised admin in one
-// tenant cannot reach data in another.
 async function filterAdminApps(auth, appIds) {
   if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
   const allowed = [];

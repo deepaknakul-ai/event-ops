@@ -3,14 +3,16 @@ import {
   AlertCircle, Truck, FileText, Plus, Edit, Trash2,
   Printer, Download, Copy, Search, FileCheck, Paperclip, X, ReceiptText
 } from 'lucide-react';
-import { updateDoc, doc, arrayUnion, arrayRemove, runTransaction, getDoc } from 'firebase/firestore';
+import { updateDoc, doc, arrayUnion, arrayRemove, runTransaction, getDoc, addDoc, collection } from 'firebase/firestore';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Modal } from '../components/Shared';
-import { formatCurrency, formatCurrencyPDF, getDaysDifference } from '../utils/helpers';
+import { formatCurrency, formatCurrencyPDF, getDaysDifference, getEffectivePOCost } from '../utils/helpers';
+import { generateBookInvoiceNumber } from '../utils/accounting';
+import { assertFYNotLocked } from '../utils/fyLock';
 import { can } from '../utils/permissions';
 
-const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction }) => {
+const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction, purchaseInvoices = [], lockedFYs = [], addToast }) => {
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [activeTab, setActiveTab] = useState('allocations');
 
@@ -57,6 +59,8 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   // Vendor Invoice States
   const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false);
   const [invoicingPO, setInvoicingPO] = useState(null);
+  const [editingPIId, setEditingPIId] = useState(null); // id of the linked purchase_invoices doc when editing
+  const [savingInvoice, setSavingInvoice] = useState(false);
   const [invoiceForm, setInvoiceForm] = useState({
     invoice_no: '',
     invoice_date: new Date().toISOString().split('T')[0],
@@ -64,9 +68,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
     gst_rate: 18,
     gst_amount: 0,
     total_amount: 0,
-    status: 'Received',
     notes: '',
-    received_date: new Date().toISOString().split('T')[0],
   });
 
   // NEW STATES FOR EDITING PO
@@ -77,6 +79,33 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
 
   const selectedProject = projects.find(p => p.id === selectedProjectId);
   const vendors = clients.filter(c => c.type === 'Vendor' || c.type === 'Both'); // Ensure vendors are filtered correctly
+
+  // ── PI linkage helpers ──────────────────────────────────────────────────────
+  // FY string from an ISO date (Apr–Mar Indian financial year), e.g. "2026-27".
+  const fyFromDate = (dateStr) => {
+    const d = dateStr ? new Date(dateStr) : new Date();
+    const y = d.getFullYear();
+    return d.getMonth() < 3 ? `${y - 1}-${String(y).slice(-2)}` : `${y}-${String(y + 1).slice(-2)}`;
+  };
+
+  // Vendor company list (primary + branches) — mirrors PurchaseInvoices.getPartyCompanies.
+  const getPartyCompanies = (party) => {
+    if (!party) return [];
+    const primary = { id: 'primary', name: party.name || 'Primary Company', gstin: party.gstin || '', address: party.address || '' };
+    const extras = (party.companies || []).map(c => ({ id: c.id, name: c.name || 'Branch', gstin: c.gstin || '', address: c.address || '' }));
+    return [primary, ...extras];
+  };
+
+  // Find the Service Purchase Invoice already linked to a PO (stable id or legacy composite key).
+  const linkedPIForPO = (po, projectId) => {
+    if (!po) return null;
+    const composite = `${projectId || ''}::${po.po_no}`;
+    return purchaseInvoices.find(pi =>
+      pi.status !== 'Rejected' && (
+        (po.id && pi.linked_po_id === po.id) || pi.linked_po_id === composite
+      )
+    ) || null;
+  };
 
   const allProjectItems = useMemo(() => {
       if (!selectedProject?.items) return [];
@@ -356,77 +385,182 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   };
 
   const openInvoiceModal = (po) => {
+    const pId = selectedProjectId || po.projectId;
+    const existingPI = linkedPIForPO(po, pId);
     setInvoicingPO(po);
-    const existing = po.vendor_invoice || {};
-    setInvoiceForm({
-      invoice_no: existing.invoice_no || '',
-      invoice_date: existing.invoice_date || new Date().toISOString().split('T')[0],
-      base_amount: existing.base_amount || 0,
-      gst_rate: existing.gst_rate !== undefined ? existing.gst_rate : 18,
-      gst_amount: existing.gst_amount || 0,
-      total_amount: existing.total_amount || 0,
-      status: existing.status || 'Received',
-      notes: existing.notes || '',
-      received_date: existing.received_date || new Date().toISOString().split('T')[0],
-    });
+
+    if (existingPI) {
+      // Edit the already-linked Service Purchase Invoice.
+      setEditingPIId(existingPI.id);
+      const base = parseFloat(existingPI.amount) || 0;
+      const gst = parseFloat(existingPI.gst_amount) || 0;
+      setInvoiceForm({
+        invoice_no: existingPI.invoice_ref || '',
+        invoice_date: existingPI.invoice_date || new Date().toISOString().split('T')[0],
+        base_amount: base,
+        gst_rate: base > 0 ? Math.round((gst / base) * 100) : 18,
+        gst_amount: gst,
+        total_amount: base + gst,
+        notes: existingPI.remarks || '',
+      });
+    } else {
+      // New PI — prefill from the PO's effective cost (or legacy embedded vendor_invoice).
+      setEditingPIId(null);
+      const eff = getEffectivePOCost(po);
+      const legacy = po.vendor_invoice || {};
+      const base = parseFloat(legacy.base_amount) || eff.base || 0;
+      const gst = parseFloat(legacy.gst_amount) || eff.gst || 0;
+      setInvoiceForm({
+        invoice_no: legacy.invoice_no || '',
+        invoice_date: legacy.invoice_date || new Date().toISOString().split('T')[0],
+        base_amount: base,
+        gst_rate: base > 0 ? Math.round((gst / base) * 100) : 18,
+        gst_amount: gst,
+        total_amount: base + gst,
+        notes: legacy.notes || '',
+      });
+    }
     setIsInvoiceModalOpen(true);
   };
 
+  // Creates (or updates) a real Service Purchase Invoice in the purchase_invoices collection,
+  // linked to the PO. Replaces the old embedded po.vendor_invoice flow so a single authoritative
+  // document feeds the PI register, vendor ledger, ITC and P&L.
   const handleSaveVendorInvoice = async () => {
-    if (!can(role, 'outsourcing', 'edit')) return alert('Access denied: insufficient permissions.');
-    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return alert('Invoice number and date required');
+    const editing = !!editingPIId;
+    if (!can(role, 'outsourcing', 'edit') || !can(role, 'purchase_invoices', editing ? 'edit' : 'create')) {
+      return alert('Access denied: insufficient permissions.');
+    }
+    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return alert('Vendor invoice number and date are required');
     const pId = selectedProjectId || invoicingPO?.projectId;
     if (!pId) return alert('Project context missing');
+    if (!assertFYNotLocked(invoiceForm.invoice_date, lockedFYs)) return;
+
     const base = parseFloat(invoiceForm.base_amount) || 0;
     const gstRate = parseFloat(invoiceForm.gst_rate) || 0;
     const gst = base * (gstRate / 100);
     const total = base + gst;
-    const vendorInvoice = {
-      invoice_no: invoiceForm.invoice_no,
-      invoice_date: invoiceForm.invoice_date,
-      base_amount: base,
-      gst_rate: gstRate,
-      gst_amount: gst,
-      total_amount: total,
-      status: invoiceForm.status,
-      notes: invoiceForm.notes,
-      received_date: invoiceForm.received_date,
-      updated_at: new Date().toISOString(),
-    };
+
+    const project = projects.find(p => p.id === pId);
+    const vendor = clients.find(c => c.id === invoicingPO.vendor_id);
+    const companies = getPartyCompanies(vendor);
+    const companyId = invoicingPO.party_company_id || project?.party_company_id || 'primary';
+    const company = companies.find(c => c.id === companyId) || companies[0] || null;
+
+    setSavingInvoice(true);
     try {
+      const piCol = collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices');
+      const now = new Date().toISOString();
+      let piNo;
+      let piId = editingPIId;
+
+      if (editing) {
+        piNo = purchaseInvoices.find(p => p.id === editingPIId)?.pi_no;
+      } else {
+        const orgSettings = (await getOrgSettings()) || {};
+        piNo = await generateBookInvoiceNumber({ db, appId, dateStr: invoiceForm.invoice_date, bookType: 'purchase', orgSettings });
+      }
+
+      const piData = {
+        type: 'Service',
+        invoice_date: invoiceForm.invoice_date,
+        invoice_ref: invoiceForm.invoice_no,
+        vendor_name: vendor?.name || invoicingPO.vendor_name || '',
+        vendor_id: invoicingPO.vendor_id || '',
+        vendor_company_id: company?.id || 'primary',
+        vendor_company_name: company?.name || (vendor?.name || ''),
+        vendor_company_gstin: company?.gstin || (vendor?.gstin || ''),
+        vendor_company_address: company?.address || (vendor?.address || ''),
+        description: invoicingPO.subject || `PO ${invoicingPO.po_no} — ${project?.project_name || ''}`,
+        amount: base,
+        gst_amount: gst,
+        linked_inventory_id: '',
+        linked_po_id: invoicingPO.id || `${pId}::${invoicingPO.po_no}`,
+        linked_po_no: invoicingPO.po_no || '',
+        include_in_ledger: true,
+        purchase_mode: 'Credit',
+        status: editing ? (purchaseInvoices.find(p => p.id === editingPIId)?.status || 'Pending') : 'Pending',
+        images: editing ? (purchaseInvoices.find(p => p.id === editingPIId)?.images || []) : [],
+        remarks: invoiceForm.notes || '',
+        pi_no: piNo,
+        fy: fyFromDate(invoiceForm.invoice_date),
+        updated_at: now,
+      };
+
+      if (editing) {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', editingPIId), piData);
+      } else {
+        piData.created_at = now;
+        const ref = await addDoc(piCol, piData);
+        piId = ref.id;
+      }
+
+      // Stamp the PO with a pointer + slim summary for quick table display; drop the legacy
+      // embedded vendor_invoice so there is no divergent second copy going forward.
       const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', pId);
       await runTransaction(db, async (transaction) => {
         const pDoc = await transaction.get(projectRef);
         if (!pDoc.exists()) throw new Error('Project not found');
         const pData = pDoc.data();
-        const updatedPOs = (pData.purchase_orders || []).map(p =>
-          p.id === invoicingPO.id ? { ...p, vendor_invoice: vendorInvoice } : p
-        );
+        const updatedPOs = (pData.purchase_orders || []).map(p => {
+          if (p.id !== invoicingPO.id) return p;
+          const { vendor_invoice, ...rest } = p;
+          return {
+            ...rest,
+            purchase_invoice_id: piId,
+            purchase_invoice_no: piNo,
+            purchase_invoice_summary: { invoice_ref: piData.invoice_ref, total, status: piData.status },
+          };
+        });
         transaction.update(projectRef, { purchase_orders: updatedPOs });
       });
-      logAction('projects', 'save_vendor_invoice', pId, { po_no: invoicingPO.po_no, invoice_no: vendorInvoice.invoice_no }, selectedProject?.project_name || 'Unknown');
+
+      logAction('purchase_invoices', editing ? 'update' : 'create', piId, { pi_no: piNo, po_no: invoicingPO.po_no, total }, piNo);
+      addToast?.(editing ? `Purchase Invoice ${piNo} updated` : `Purchase Invoice ${piNo} created from ${invoicingPO.po_no}`, 'success');
       setIsInvoiceModalOpen(false);
       setInvoicingPO(null);
+      setEditingPIId(null);
     } catch (e) {
       console.error(e);
-      alert('Error saving invoice: ' + e.message);
+      alert('Error saving purchase invoice: ' + e.message);
     }
+    setSavingInvoice(false);
   };
 
-  const getInvoiceBadge = (po) => {
-    const inv = po.vendor_invoice;
-    if (!inv || !inv.invoice_no) return <span className="text-xs text-slate-400 italic">—</span>;
-    const colors = {
-      Received: 'bg-yellow-100 text-yellow-800 border-yellow-200',
-      Verified: 'bg-blue-100 text-blue-800 border-blue-200',
-      Accepted: 'bg-green-100 text-green-800 border-green-200',
-      Disputed: 'bg-red-100 text-red-800 border-red-200',
-    };
+  const PI_STATUS_COLORS = {
+    Pending:  'bg-amber-100 text-amber-800 border-amber-200',
+    Verified: 'bg-green-100 text-green-800 border-green-200',
+    Rejected: 'bg-red-100 text-red-800 border-red-200',
+  };
+
+  // Renders the "Purchase Invoice" cell for a PO row: a linked Service PI (preferred),
+  // a legacy embedded vendor_invoice (with a Convert-to-PI action), or a Create button.
+  const renderInvoiceCell = (po, projectId) => {
+    const pi = linkedPIForPO(po, projectId);
+    if (pi) {
+      const total = (parseFloat(pi.amount) || 0) + (parseFloat(pi.gst_amount) || 0);
+      return (
+        <div className="flex flex-col items-center gap-1">
+          <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${PI_STATUS_COLORS[pi.status] || 'bg-slate-100 text-slate-600 border-slate-200'}`}>{pi.status || 'Pending'}</span>
+          <span className="text-xs font-mono text-indigo-700 truncate max-w-[110px]" title={pi.pi_no}>{pi.pi_no}</span>
+          <span className="text-xs text-slate-500">{formatCurrency(total)}</span>
+          <button onClick={() => openInvoiceModal(po)} className="text-xs text-purple-600 hover:underline flex items-center gap-1 mt-0.5"><Edit size={12}/> Edit PI</button>
+        </div>
+      );
+    }
+    const legacy = po.vendor_invoice;
+    if (legacy && legacy.invoice_no) {
+      return (
+        <div className="flex flex-col items-center gap-1">
+          <span className="text-xs px-2 py-0.5 rounded-full border font-medium bg-slate-100 text-slate-600 border-slate-200">Legacy</span>
+          <span className="text-xs text-slate-500 truncate max-w-[110px]" title={legacy.invoice_no}>{legacy.invoice_no}</span>
+          <span className="text-xs text-slate-500">{formatCurrency(legacy.total_amount || 0)}</span>
+          <button onClick={() => openInvoiceModal(po)} className="text-xs text-purple-600 hover:underline flex items-center gap-1 mt-0.5"><ReceiptText size={12}/> Convert to PI</button>
+        </div>
+      );
+    }
     return (
-      <div className="flex flex-col items-center gap-0.5">
-        <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${colors[inv.status] || 'bg-slate-100 text-slate-600 border-slate-200'}`}>{inv.status}</span>
-        <span className="text-xs text-slate-500 truncate max-w-[100px]" title={inv.invoice_no}>{inv.invoice_no}</span>
-      </div>
+      <button onClick={() => openInvoiceModal(po)} className="text-xs text-purple-600 hover:underline flex items-center gap-1 justify-center"><ReceiptText size={12}/> Create Invoice (PI)</button>
     );
   };
 
@@ -1262,13 +1396,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
                                    </select>
                                </td>
                                <td className="p-3 text-center">
-                                 <div className="flex flex-col items-center gap-1">
-                                   {getInvoiceBadge(po)}
-                                   {po.vendor_invoice?.invoice_no && (
-                                     <span className="text-xs text-slate-500">{formatCurrency(po.vendor_invoice.total_amount)}</span>
-                                   )}
-                                   <button onClick={() => openInvoiceModal(po)} className="text-xs text-purple-600 hover:underline flex items-center gap-1 mt-0.5"><ReceiptText size={12}/> {po.vendor_invoice?.invoice_no ? 'Edit' : 'Feed Invoice'}</button>
-                                 </div>
+                                 {renderInvoiceCell(po, selectedProjectId || po.projectId)}
                                </td>
                                <td className="p-3 text-center flex justify-center gap-2">
                                    <button onClick={() => generatePOPDF(po, 'print')} className="text-indigo-600 hover:underline flex items-center gap-1"><Printer size={14}/> Print</button>
@@ -1317,13 +1445,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
                                      </select>
                                  </td>
                                  <td className="p-3 text-center">
-                                   <div className="flex flex-col items-center gap-1">
-                                     {getInvoiceBadge(po)}
-                                     {po.vendor_invoice?.invoice_no && (
-                                       <span className="text-xs text-slate-500">{formatCurrency(po.vendor_invoice.total_amount)}</span>
-                                     )}
-                                     <button onClick={() => openInvoiceModal(po)} className="text-xs text-purple-600 hover:underline flex items-center gap-1 mt-0.5"><ReceiptText size={12}/> {po.vendor_invoice?.invoice_no ? 'Edit' : 'Feed Invoice'}</button>
-                                   </div>
+                                   {renderInvoiceCell(po, selectedProjectId || po.projectId)}
                                  </td>
                                  <td className="p-3 text-center flex justify-center gap-2">
                                      <button onClick={() => generatePOPDF(po, 'print')} className="text-indigo-600 hover:underline flex items-center gap-1"><Printer size={14}/> Print</button>
@@ -1357,8 +1479,8 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
         onSave={handleUpdateAllocation}
       />
 
-      {/* Vendor Invoice Modal */}
-      <Modal isOpen={isInvoiceModalOpen} onClose={() => setIsInvoiceModalOpen(false)} title={`Vendor Invoice — ${invoicingPO?.po_no || ''}`}>
+      {/* Purchase Invoice (Service) Modal — creates/updates a purchase_invoices doc linked to the PO */}
+      <Modal isOpen={isInvoiceModalOpen} onClose={() => { setIsInvoiceModalOpen(false); setEditingPIId(null); }} title={`${editingPIId ? 'Edit' : 'Create'} Purchase Invoice (Service) — PO ${invoicingPO?.po_no || ''}`}>
         <div className="space-y-4">
           {/* PO Reference */}
           <div className="bg-slate-50 p-3 rounded text-sm border border-slate-200 text-slate-800">
@@ -1371,7 +1493,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           {/* Invoice Details */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-xs font-bold text-slate-700">Invoice Number *</label>
+              <label className="text-xs font-bold text-slate-700">Vendor Invoice No. *</label>
               <input className="w-full rounded border border-slate-300 p-2 text-slate-800" value={invoiceForm.invoice_no} onChange={e => setInvoiceForm({...invoiceForm, invoice_no: e.target.value})} placeholder="INV/2025-26/001" />
             </div>
             <div>
@@ -1422,35 +1544,18 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
             </div>
           </div>
 
-          {/* Status + Date Received */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs font-bold text-slate-700">Invoice Status</label>
-              <select className="w-full rounded border border-slate-300 p-2 text-slate-800" value={invoiceForm.status} onChange={e => setInvoiceForm({...invoiceForm, status: e.target.value})}>
-                <option value="Received">Received — Under Review</option>
-                <option value="Verified">Verified — Amounts Checked (use for accounting)</option>
-                <option value="Accepted">Accepted — Final (use for accounting)</option>
-                <option value="Disputed">Disputed — On Hold</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-bold text-slate-700">Date Received</label>
-              <input type="date" className="w-full rounded border border-slate-300 p-2 text-slate-800" value={invoiceForm.received_date} onChange={e => setInvoiceForm({...invoiceForm, received_date: e.target.value})} />
-            </div>
-          </div>
-
           {/* Accounting note */}
           <div className="rounded-lg p-3 bg-amber-50 border border-amber-200 text-xs text-amber-800">
-            <strong>Accounting Impact:</strong> When status is <strong>Verified</strong> or <strong>Accepted</strong>, the invoice amount replaces the PO amount in P&amp;L and GST Input Credit calculations. If GST Rate is 0%, no ITC is claimed (unregistered vendor).
+            <strong>Creates a Service Purchase Invoice.</strong> A numbered PI is added to the Purchase Invoices register (status <strong>Pending</strong>), linked to this PO. It is included in the vendor ledger and replaces the PO's committed amount in the ledger, P&amp;L and GST Input Credit. If GST Rate is 0%, no ITC is claimed (unregistered vendor).
           </div>
 
           <div>
             <label className="text-xs font-bold text-slate-700">Notes</label>
-            <textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={2} value={invoiceForm.notes} onChange={e => setInvoiceForm({...invoiceForm, notes: e.target.value})} placeholder="Payment terms, dispute details, reference numbers..." />
+            <textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={2} value={invoiceForm.notes} onChange={e => setInvoiceForm({...invoiceForm, notes: e.target.value})} placeholder="Payment terms, reference numbers..." />
           </div>
 
-          <button onClick={handleSaveVendorInvoice} className="w-full rounded bg-indigo-600 text-white py-2 font-bold hover:bg-indigo-700">
-            Save Vendor Invoice
+          <button onClick={handleSaveVendorInvoice} disabled={savingInvoice} className="w-full rounded bg-indigo-600 text-white py-2 font-bold hover:bg-indigo-700 disabled:opacity-50">
+            {savingInvoice ? 'Saving…' : editingPIId ? 'Update Purchase Invoice' : 'Create Purchase Invoice'}
           </button>
         </div>
       </Modal>

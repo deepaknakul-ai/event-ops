@@ -8,7 +8,7 @@ import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
@@ -220,14 +220,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     setIsAddOpen(true);
   };
 
-  const generateCompanyId = () => {
-    if (window.crypto && window.crypto.getRandomValues) {
-      const bytes = new Uint8Array(8);
-      window.crypto.getRandomValues(bytes);
-      return `co_${Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')}`;
-    }
-    return `co_${Math.random().toString(36).slice(2, 12)}`;
-  };
+  const generateCompanyId = () => `co_${generateSecureToken(8)}`;
 
   const handleAddCompany = () => {
     const name = (newCompany.name || '').trim();
@@ -497,14 +490,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     });
   };
 
-  const generateLedgerToken = () => {
-    if (window.crypto && window.crypto.getRandomValues) {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    }
-    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  };
+  const generateLedgerToken = () => generateSecureToken(16);
 
   const handleLedgerLink = async (client) => {
     if (!can(role, 'clients', 'edit')) return alert('Access denied: insufficient permissions.');
@@ -595,14 +581,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     window.open(`${window.location.origin}/ledger/${token}${companyQuery}`, '_blank', 'noopener,noreferrer');
   };
 
-  const generateReimbursableToken = () => {
-    if (window.crypto && window.crypto.getRandomValues) {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    }
-    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  };
+  const generateReimbursableToken = () => generateSecureToken(16);
 
   const handleOpenReimbursablePage = async (client) => {
     // Public reimbursable view is project-token based.

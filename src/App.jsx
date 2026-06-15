@@ -22,7 +22,7 @@ import {
 import { Routes, Route, Navigate, useLocation, Link, useNavigate, useParams } from 'react-router-dom';
 import { auth, db } from './firebase';
 import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
-import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword } from './utils/helpers';
+import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword, generateSecureToken } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
@@ -70,11 +70,12 @@ import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
 //import { saveAs } from 'file-saver';
 
-import { 
+import {
   signInAnonymously, onAuthStateChanged, signOut, signInWithCustomToken,
   signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail,
   fetchSignInMethodsForEmail
 } from 'firebase/auth';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { collection, addDoc, updateDoc, doc, 
   deleteDoc, onSnapshot, query, where, serverTimestamp, setDoc, getDoc, arrayUnion, arrayRemove, getDocs, runTransaction
 } from 'firebase/firestore';
@@ -253,14 +254,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
     });
   };
 
-  const generateLedgerToken = () => {
-    if (window.crypto && window.crypto.getRandomValues) {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    }
-    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  };
+  const generateLedgerToken = () => generateSecureToken(16);
 
   const handleLedgerLink = async (client) => {
     let token = client.ledger_link_token;
@@ -2987,22 +2981,24 @@ const [payroll, setPayroll] = useState([]);
   );
 
   useEffect(() => {
-    const initAuth = async () => {
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        await signInWithCustomToken(auth, __initial_auth_token);
-      } else {
-        await signInAnonymously(auth);
-      }
-    };
-    initAuth();
+    // Handle initial custom token (Claude Code / embedding contexts only).
+    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+      signInWithCustomToken(auth, __initial_auth_token).catch(console.error);
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       if (!u) {
-        // C-4: After logout, Firebase Auth is signed-out.  Restore an
-        // anonymous session so the login screen can still read employees.
+        // No session at all — create an anonymous one so the login page
+        // can be shown (anonymous sessions are blocked from Firestore reads
+        // of employees/settings by the hardened rules).
         setLoading(false);
         signInAnonymously(auth).catch(() => { /* ignore */ });
       }
+      // If u is non-null but anonymous, leave it; the login flow will
+      // upgrade to a real session via verifyLogin + signInWithCustomToken.
+      // Do NOT call signInAnonymously when a real (non-anonymous) session
+      // already exists — that would replace it with a fresh anonymous one.
     });
     return () => unsubscribe();
   }, []);
@@ -3019,9 +3015,16 @@ const [payroll, setPayroll] = useState([]);
 
   useEffect(() => {
     if (!user) return;
-    
-    // Only fetch data if logged in (role is set) or to check login
-    // Fetching employees is needed for login check
+
+    // Anonymous sessions (login page) must NOT read Firestore — the
+    // verifyLogin Cloud Function handles all credential lookups server-side.
+    if (user.isAnonymous) {
+      setLoading(false);
+      return;
+    }
+
+    // Non-anonymous: load employees (needed for role restore from localStorage
+    // on page reload and for all app features).
     const unsubEmployees = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'employees'), (snap) => {
       setEmployees(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
@@ -3108,21 +3111,24 @@ const [payroll, setPayroll] = useState([]);
 
   useEffect(() => {
     const storedUid = localStorage.getItem('rentalOpsUser');
+    // Purge any legacy admin_temp shortcut — this was a privilege-injection vector.
+    if (storedUid === 'admin_temp') {
+      localStorage.removeItem('rentalOpsUser');
+      return;
+    }
     if (storedUid && employees.length > 0 && !role) {
-       if (storedUid === 'admin_temp') {
-          setRole('admin');
-          setCurrentEmpId('admin_temp');
-       } else {
-          const emp = employees.find(e => e.id === storedUid);
-          if (emp) {
-             if (emp.status === 'Disabled' || emp.status === 'Deactivated') {
-                localStorage.removeItem('rentalOpsUser');
-             } else {
-                setRole(emp.role);
-                setCurrentEmpId(emp.id);
-             }
-          }
-       }
+      const emp = employees.find(e => e.id === storedUid);
+      if (emp) {
+        if (emp.status === 'Disabled' || emp.status === 'Deactivated') {
+          localStorage.removeItem('rentalOpsUser');
+        } else {
+          setRole(emp.role);
+          setCurrentEmpId(emp.id);
+        }
+      } else {
+        // Stored UID no longer exists in employees — clear it
+        localStorage.removeItem('rentalOpsUser');
+      }
     }
   }, [employees, role]);
 
@@ -3169,54 +3175,23 @@ const [payroll, setPayroll] = useState([]);
     }
   };
 
-  // C-4: Upgrade the anonymous Firebase Auth session to a real email/password
-  // session AND write a /users/{uid} mirror doc so security rules can lookup
-  // the user's role by request.auth.uid.  This runs AFTER the legacy app-level
-  // password check has already succeeded, so we trust `password` is correct.
-  // Best-effort: failures don't block login (the legacy flow keeps working).
-  const upgradeFirebaseAuth = async (email, password, mirror) => {
-    if (!email || !password) return;
+  // Write the /users/{uid} Firestore mirror so server-side rules can resolve
+  // the role via request.auth.uid without reading /employees.
+  const writeUserMirror = async (uid, empId, empRole, empName, empEmail) => {
     try {
-      try {
-        await signInWithEmailAndPassword(auth, email, password);
-      } catch (err) {
-        if (err?.code === 'auth/user-not-found' || err?.code === 'auth/invalid-credential') {
-          // First-time migration: create the Firebase Auth account on the fly.
-          try {
-            await createUserWithEmailAndPassword(auth, email, password);
-          } catch (createErr) {
-            if (createErr?.code === 'auth/email-already-in-use') {
-              // Account exists but password differs.  Prompt user to reset.
-              console.warn('Firebase Auth account exists but password mismatch. Send password reset.');
-              return;
-            }
-            throw createErr;
-          }
-        } else if (err?.code === 'auth/wrong-password') {
-          console.warn('Firebase Auth password differs from app password. Trigger password reset to sync.');
-          return;
-        } else {
-          throw err;
-        }
-      }
-      // At this point auth.currentUser is the real user.  Write/refresh the
-      // users/{uid} mirror so security rules can authorise role lookups.
-      const u = auth.currentUser;
-      if (u && mirror) {
-        await setDoc(
-          doc(db, 'artifacts', appId, 'public', 'data', 'users', u.uid),
-          {
-            email,
-            employee_id: mirror.employee_id || null,
-            role: mirror.role,
-            name: mirror.name || '',
-            updated_at: new Date().toISOString(),
-          },
-          { merge: true }
-        );
-      }
+      await setDoc(
+        doc(db, 'artifacts', appId, 'public', 'data', 'users', uid),
+        {
+          email: empEmail || null,
+          employee_id: empId || null,
+          role: empRole,
+          name: empName || '',
+          updated_at: new Date().toISOString(),
+        },
+        { merge: true }
+      );
     } catch (err) {
-      console.warn('Firebase Auth upgrade failed (non-fatal):', err?.code || err?.message || err);
+      console.warn('User mirror write failed (non-fatal):', err?.message);
     }
   };
 
@@ -3224,7 +3199,38 @@ const [payroll, setPayroll] = useState([]);
     e.preventDefault();
     setLoginError('');
     const { username, password } = { username: loginForm.username.trim(), password: loginForm.password };
-    // Admin Check with Employee Matching
+
+    try {
+      // All credential verification is done server-side — no anonymous Firestore reads.
+      const fn = httpsCallable(getFunctions(), 'verifyLogin');
+      const result = await fn({ username, password, appId });
+      const { token, role: empRole, empId, name: empName, email: empEmail } = result.data;
+
+      // Sign in with the custom token returned by the Cloud Function.
+      await signInWithCustomToken(auth, token);
+
+      // Write the /users/{uid} mirror so Firestore rules can resolve the role.
+      const u = auth.currentUser;
+      if (u) await writeUserMirror(u.uid, empId, empRole, empName, empEmail);
+
+      setRole(empRole);
+      setCurrentEmpId(empId || '');
+      if (rememberMe && empId) localStorage.setItem('rentalOpsUser', empId);
+
+    } catch (err) {
+      // Surface the Cloud Function error message; all branches return 'Invalid credentials'
+      // or a specific admin-safe message — no username-existence leakage.
+      const msg = err?.message || 'Login failed. Please try again.';
+      setLoginError(msg);
+    }
+  };
+
+  // ── DEAD CODE BELOW — kept as reference only, no longer called ────────────
+  // Legacy client-side login path removed in favour of verifyLogin Cloud Function.
+  // The code below is intentionally unreachable and will be deleted in a future cleanup.
+  const _legacyLoginUnused = async (username, password) => {
+    void username; void password;
+    // Admin Check with Employee Matching — REPLACED by verifyLogin CF
     if (username === 'admin') {
       let adminPass = null;
       try {
@@ -3234,13 +3240,9 @@ const [payroll, setPayroll] = useState([]);
         }
       } catch (err) { console.error("Error fetching admin settings", err); }
 
-      if (!adminPass) {
-        setLoginError('Admin account is not configured. Please use the recovery key to set a password.');
-        return;
-      }
+      if (!adminPass) return;
       const adminMatch = await verifyPassword(password, adminPass);
       if (adminMatch) {
-        // Upgrade legacy hash to PBKDF2 on successful login
         if (!adminPass.startsWith('v2:')) {
           try {
             const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
@@ -3248,49 +3250,21 @@ const [payroll, setPayroll] = useState([]);
             await updateDoc(secRef, { admin_password: upgraded, password_hashed: true });
           } catch (e) { console.warn('Failed to upgrade admin password hash:', e.message); }
         }
-
       setRole('admin');
-      
-      // Try to find the Admin employee record to link for ledger
       const adminEmp = employees.find(e => e.email === 'admin@rentalops.com' || e.role === 'admin');
-      if (adminEmp) {
-        setCurrentEmpId(adminEmp.id);
-      } else {
-        console.warn("Admin employee record not found for ledger linking.");
-        setCurrentEmpId('admin_temp'); 
-      }
-      if (rememberMe) localStorage.setItem('rentalOpsUser', adminEmp ? adminEmp.id : 'admin_temp');
-      // C-4: Upgrade to Firebase Auth (best-effort) so rules can authorise.
-      const adminEmail = adminEmp?.email || 'admin@rentalops.com';
-      upgradeFirebaseAuth(adminEmail, password, {
-        employee_id: adminEmp?.id || null,
-        role: 'admin',
-        name: adminEmp?.name || 'Administrator',
-      });
+      if (adminEmp) { setCurrentEmpId(adminEmp.id); } else { setCurrentEmpId(''); }
       return;
     }
     }
 
-    // Employee Check
+    // Employee Check — REPLACED by verifyLogin CF
     const emp = employees.find(e => e.username === username || e.email === username);
     if (emp) {
-      if (emp.is_locked) {
-        setLoginError('Account is locked due to multiple failed attempts. Contact Admin.');
-        return;
-      }
-
-      if (!emp.password) {
-        setLoginError('Account has no password set. Contact Admin to configure your account.');
-        return;
-      }
+      if (emp.is_locked) return;
+      if (!emp.password) return;
       const passwordMatch = await verifyPassword(password, emp.password);
       if (passwordMatch) {
-        if (emp.status === 'Disabled' || emp.status === 'Deactivated') {
-          setLoginError('Account is disabled. Contact Admin.');
-          return;
-        }
-        
-        // Upgrade legacy hash to PBKDF2 on successful login
+        if (emp.status === 'Disabled' || emp.status === 'Deactivated') return;
         const updates = {};
         if (emp.failed_login_attempts > 0) updates.failed_login_attempts = 0;
         if (!emp.password.startsWith('v2:')) {
@@ -3344,54 +3318,30 @@ const [payroll, setPayroll] = useState([]);
     setLoginError('Invalid username or password');
   };
 
-  // Called when "Admin Recovery" is clicked — detects whether this is a fresh
-  // deployment (no security doc) and switches the modal into bootstrap mode.
-  const handleOpenRecovery = async () => {
-    try {
-      const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
-      const secSnap = await getDoc(secRef);
-      setIsBootstrap(!secSnap.exists() || !secSnap.data().recovery_key);
-    } catch {
-      setIsBootstrap(false);
-    }
+  // Recovery modal — no client-side Firestore read needed; the Cloud Function
+  // handles both bootstrap (first-time setup) and normal reset server-side.
+  const handleOpenRecovery = () => {
     setRecoveryForm({ key: '', new_pass: '' });
     setShowForgotPass(true);
   };
 
   const handleRecovery = async () => {
-    if (isBootstrap) {
-      // First-time setup: create the security document from scratch.
-      if (!recoveryForm.new_pass || !recoveryForm.key) {
-        return alert('Enter a new admin password AND a recovery key. Both are required.');
-      }
-      try {
-        const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
-        const hashedNewPass = await hashPassword(recoveryForm.new_pass);
-        await setDoc(secRef, { admin_password: hashedNewPass, password_hashed: true, recovery_key: recoveryForm.key });
-        alert('Admin account initialised successfully. You can now log in.');
-        setShowForgotPass(false);
-        setIsBootstrap(false);
-      } catch (e) { console.error(e); alert('Setup failed. Check your connection and try again.'); }
-      return;
+    if (!recoveryForm.key || !recoveryForm.new_pass) {
+      return alert('Enter both the Recovery Key and the New Password.');
     }
-
-    // Normal recovery: verify existing recovery key then reset password.
-    if (!recoveryForm.key || !recoveryForm.new_pass) return alert("Enter Recovery Key and New Password");
+    if (recoveryForm.new_pass.length < 8) {
+      return alert('New password must be at least 8 characters.');
+    }
     try {
-        const secRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security');
-        const secSnap = await getDoc(secRef);
-        if (!secSnap.exists() || !secSnap.data().recovery_key) {
-          return alert('No recovery key is configured. Contact your system administrator.');
-        }
-        const validKey = secSnap.data().recovery_key;
-
-        if (recoveryForm.key === validKey) {
-            const hashedNewPass = await hashPassword(recoveryForm.new_pass);
-            await setDoc(secRef, { admin_password: hashedNewPass, password_hashed: true, recovery_key: validKey });
-            alert("Password Reset Successfully. Please Login.");
-            setShowForgotPass(false);
-        } else { alert("Invalid Recovery Key"); }
-    } catch (e) { console.error(e); alert("Recovery Failed"); }
+      const fn = httpsCallable(getFunctions(), 'resetAdminPassword');
+      await fn({ appId, recoveryKey: recoveryForm.key, newPassword: recoveryForm.new_pass });
+      alert('Password reset successfully. You can now log in.');
+      setShowForgotPass(false);
+      setRecoveryForm({ key: '', new_pass: '' });
+    } catch (err) {
+      const msg = err?.message || 'Recovery failed. Check your connection and try again.';
+      alert(msg);
+    }
   };
 
   const handleEmpResetRequest = () => {
@@ -3414,8 +3364,8 @@ const [payroll, setPayroll] = useState([]);
     setImpersonating(null);
     setLoginForm({ username: '', password: '' });
     localStorage.removeItem('rentalOpsUser');
-    // C-4: Sign out of Firebase Auth so a fresh anonymous session is created
-    // for the login screen's pre-auth Firestore reads.
+    // Sign out of Firebase Auth; onAuthStateChanged will create a fresh
+    // anonymous session for the login screen automatically.
     signOut(auth).catch(() => { /* ignore */ });
   };
 
@@ -3753,7 +3703,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/dashboard" element={<Dashboard projects={projects} expenses={expenses} role={effectiveRole} clients={clients} onProjectClick={(id) => setSelectedProjectId(id)} employees={safeEmployees} payments={payments} db={db} appId={appId} timeLogs={timeLogs} hqSettings={hqSettings} currentEmpId={effectiveEmpId} logAction={logAction} addToast={addToast} payouts={payouts} vendorPayments={vendorPayments} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} inventory={inventory} journalEntries={journalEntries} hrLeaves={hrLeaves} currentUserId={user?.uid} />} />
                 <Route path="/projects" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} /></ProtectedRoute>} />
                 <Route path="/projects/:projectId" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} /></ProtectedRoute>} />
-                <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
+                <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} db={db} appId={appId} logAction={logAction} purchaseInvoices={purchaseInvoicesList} lockedFYs={lockedFYs} addToast={addToast} /></ProtectedRoute>} />
                 <Route path="/clients" element={<ProtectedRoute role={effectiveRole} resource="clients"><Clients clients={clients} inventory={inventory} projects={projects} payments={payments} vendorPayments={vendorPayments} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
                 <Route path="/configurations" element={<ProtectedRoute role={effectiveRole} resource="configurations"><ConfigurationBuilder configurations={configurations} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />

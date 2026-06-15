@@ -244,6 +244,10 @@ const VirtualAccountant = ({
   closedFYs = [],
   recentJournalEntries = [],
   getFY,
+  // Phase-2/3 grounding (all optional for backwards-compat):
+  orgGstin = '',
+  partyGstins = {},      // { 'party name (lower)': 'GSTIN' }
+  projectNames = [],
 }) => {
   const [messages, setMessages] = useState([
     {
@@ -269,13 +273,36 @@ const VirtualAccountant = ({
   }, []);
 
   const learned = useMemo(() => learnFromEntries(recentJournalEntries || []), [recentJournalEntries]);
-  const ctx = useMemo(() => ({ partyNames, allAccounts, learned }), [partyNames, allAccounts, learned]);
+  const ctx = useMemo(
+    () => ({ partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames }),
+    [partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames]
+  );
   const validatorCtx = useMemo(() => ({
     knownAccounts: allAccounts,
     closedFYs,
     recentJournalEntries,
     getFY,
   }), [allAccounts, closedFYs, recentJournalEntries, getFY]);
+
+  // Per-transaction compliance context — feeds the (previously dormant)
+  // GSTIN / TDS / cash-cap checks in compliance.js. partyGstin is resolved from
+  // the parsed party; tdsSection comes from the rulebook stamp on meta.
+  const buildValidatorCtx = useCallback((raw) => {
+    const partyName = String(raw?.party?.name || '').toLowerCase();
+    const partyGstin = partyName ? (partyGstins[partyName] || '') : '';
+    return {
+      ...validatorCtx,
+      partyGstin,
+      tdsSection: raw?.meta?.tdsSection || undefined,
+      tdsYtdAmount: 0,
+    };
+  }, [validatorCtx, partyGstins]);
+
+  // Multi-turn session memory: remember the last party / mode / project so
+  // follow-ups like "…and 5k cab for the same job" or "paid them 10k more" inherit context.
+  const sessionRef = useRef({ party: '', partyType: '', mode: null, project: '' });
+  const ANAPHORA_PARTY_RE = /\b(same|them|they|him|her|it|that\s+(party|client|vendor|guy|firm|company))\b/i;
+  const ANAPHORA_PROJECT_RE = /\b(same\s+(job|project|site|event)|for\s+the\s+same)\b/i;
 
   // Voice input state
   const [isListening, setIsListening] = useState(false);
@@ -350,6 +377,19 @@ const VirtualAccountant = ({
     return bestScore > 0 ? best : '';
   };
 
+  // Remember the resolved party / mode / project from a parsed transaction so
+  // subsequent anaphoric messages ("the same job", "pay them more") can inherit.
+  const updateSession = (parsed) => {
+    if (!parsed) return;
+    const name = parsed.party?.name;
+    if (name && parsed.party?.type !== 'internal' && parsed.party?.type !== 'unknown') {
+      sessionRef.current.party = name;
+      sessionRef.current.partyType = parsed.party.type;
+    }
+    if (parsed.mode) sessionRef.current.mode = parsed.mode;
+    if (parsed.meta?.projectTag) sessionRef.current.project = parsed.meta.projectTag;
+  };
+
   const handleSend = () => {
     const text = input.trim();
     if (!text) return;
@@ -370,13 +410,25 @@ const VirtualAccountant = ({
       return;
     }
 
-    const raw = parseMessage(text, ctx);
+    // Session memory: inherit the last party when the user uses an anaphor.
+    const sess = sessionRef.current;
+    const augCtx = (sess.party && ANAPHORA_PARTY_RE.test(text))
+      ? { ...ctx, forceParty: sess.party }
+      : ctx;
+
+    const raw = parseMessage(text, augCtx);
     if (!raw) {
       addMessage({ role: 'assistant', type: 'text', content: 'Hmm, I need at least an amount and a transaction type to create an entry. Try something like:\n- "got 50000 from Acme"\n- "paid 20k to vendor XYZ"\n- "spent 5000 on travel"\n- "salary 30000 Rahul"\n\nI understand amounts like 50k, 1.5 lakh, 2 crore. Type help for more.' });
       return;
     }
 
-    const parsed = validateTransaction({ ...raw, type: raw.intent }, validatorCtx);
+    // Inherit the last project when the user references "the same job/site".
+    if (sess.project && !raw.meta?.projectTag && ANAPHORA_PROJECT_RE.test(text)) {
+      raw.meta = { ...(raw.meta || {}), projectTag: sess.project };
+    }
+
+    const parsed = validateTransaction({ ...raw, type: raw.intent }, buildValidatorCtx(raw));
+    updateSession(parsed);
 
     // Multi-turn clarify: NLU asks for missing amount / ambiguous party
     if (parsed.intent === 'clarify') {
@@ -421,7 +473,8 @@ const VirtualAccountant = ({
       addMessage({ role: 'assistant', type: 'text', content: 'Still not clear — please rephrase the whole sentence.' });
       return;
     }
-    const parsed = validateTransaction({ ...raw, type: raw.intent }, validatorCtx);
+    const parsed = validateTransaction({ ...raw, type: raw.intent }, buildValidatorCtx(raw));
+    updateSession(parsed);
     if (parsed.intent === 'clarify') {
       addMessage({ role: 'assistant', type: 'clarify', content: parsed.meta?.question || 'One more thing…', parsed, baseText: merged });
       return;

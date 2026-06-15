@@ -8,7 +8,7 @@ import { collection, addDoc, updateDoc, doc, query, where, getDocs, deleteDoc, g
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
-import { formatCurrency } from '../utils/helpers';
+import { formatCurrency, generateSecureToken } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { STATUS_COLORS, EXPENSE_CATS } from '../utils/constants';
 import { can } from '../utils/permissions';
@@ -84,7 +84,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     setProofUploading(true);
     try {
       const ext = file.name.split('.').pop();
-      const path = `expense-proofs/${appId}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      const path = `expense-proofs/${appId}/${generateSecureToken(16)}.${ext}`;
       const storageRef = ref(storage, path);
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);

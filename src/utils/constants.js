@@ -5,11 +5,33 @@ import { Truck, Hotel, Utensils, Briefcase } from 'lucide-react';
 export const appId = 'TERMS 1.0.0';
 
 export const GST_STATE_CODES = {
-  "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+  "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
   "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
-  "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "19": "West Bengal", "27": "Maharashtra",
-  "29": "Karnataka", "33": "Tamil Nadu", "36": "Telangana"
+  "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+  "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+  "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+  "25": "Dadra & Nagar Haveli and Daman & Diu", "26": "Dadra & Nagar Haveli", "27": "Maharashtra",
+  "28": "Andhra Pradesh (New)", "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala",
+  "33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman & Nicobar Islands", "36": "Telangana",
+  "37": "Andhra Pradesh (Old)", "38": "Ladakh", "97": "Other Territory", "99": "Centre Jurisdiction"
 };
+
+// Valid GST rate slabs (%) as notified by GST Council.
+export const VALID_GST_RATES = [0, 0.1, 0.25, 1, 1.5, 2.5, 3, 5, 6, 7.5, 9, 12, 14, 18, 28];
+
+// Common SAC codes for AV/events rental business.
+export const COMMON_SAC_CODES = {
+  '997212': 'Rental of other machinery and equipment (18%)',
+  '997313': 'Sound and lighting equipment rental (18%)',
+  '998596': 'Event management and related services (18%)',
+  '996812': 'Road transport services (18%)',
+  '996311': 'Hotel/accommodation services (12%)',
+  '996331': 'Catering/food services (5%)',
+  '998399': 'Other professional and technical services (18%)',
+};
+
+// Character set used in GSTIN checksum computation (GSTN spec).
+export const GSTIN_CHECKSUM_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 export const STATUS_COLORS = {
   'Draft': 'bg-slate-100 text-slate-600 border-slate-300',
@@ -59,6 +81,7 @@ export const HR_STATUS_COLORS = {
   Approved: 'bg-green-100 text-green-800 border-green-200',
   Rejected: 'bg-red-100 text-red-800 border-red-200',
   Clarification: 'bg-purple-100 text-purple-800 border-purple-200',
+  Cancelled: 'bg-slate-100 text-slate-600 border-slate-200',
 };
 export const DEFAULT_HQ_SETTINGS = {
   lat: 28.6139, lng: 77.2090, strictMode: false, geoRadiusMeters: 400,

@@ -5,8 +5,12 @@
 // recent journal entries for duplicate detection, FY lock list).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { round2, totalOf } from './schema.js';
+import { round2, totalOf, inferAccountMeta } from './schema.js';
 import { runComplianceChecks } from './compliance.js';
+
+// Account-name patterns that look like a capitalisable fixed asset — used for the
+// capital-vs-revenue hint when a large "purchase" is booked straight to expense.
+const CAPITAL_ASSET_RE = /\b(laptop|computer|server|printer|camera|lens|projector|led\s*wall|console|mixer|vehicle|car|truck|machine|machinery|generator|furniture|equipment|building|land)\b/i;
 
 /**
  * @typedef {Object} ValidatorContext
@@ -119,16 +123,73 @@ export function validateTransaction(tx, ctx = {}) {
     }
   }
 
+  // ── 7b. Accounting-standards guardrails ───────────────────────────────────
+  const intent = tx.intent || tx.type;
+
+  // GST math: the tax must match the taxable × rate (within a small tolerance).
+  const meta = tx.meta || {};
+  if (meta.gstRate > 0 && meta.taxable > 0 && typeof meta.gst === 'number') {
+    const expected = round2((meta.taxable * meta.gstRate) / 100);
+    const tol = Math.max(1, round2(meta.taxable * 0.005));
+    if (Math.abs(expected - meta.gst) > tol) {
+      issues.push({
+        level: 'warning',
+        code: 'gst_math_mismatch',
+        message: `GST ${meta.gst} doesn't match ${meta.gstRate}% of ${meta.taxable} (expected ≈ ${expected}).`,
+      });
+    }
+  }
+
+  // Sign conventions: an Income account is normally credited and an Expense
+  // account normally debited. Flag the reverse unless it's a return/reversal.
+  const incomeDebitOk = new Set(['credit_note', 'reversal']);
+  const expenseCreditOk = new Set(['debit_note', 'reversal']);
+  (tx.entries || []).forEach((line, i) => {
+    if (!line.debitAccount || !line.creditAccount) return;
+    const drType = inferAccountMeta(line.debitAccount).type;
+    const crType = inferAccountMeta(line.creditAccount).type;
+    if (drType === 'Income' && !incomeDebitOk.has(intent)) {
+      issues.push({ level: 'warning', code: 'income_debited', message: `Line ${i + 1}: an Income account ("${line.debitAccount}") is being debited — unusual outside a sales return/credit note.` });
+    }
+    if (crType === 'Expense' && !expenseCreditOk.has(intent)) {
+      issues.push({ level: 'warning', code: 'expense_credited', message: `Line ${i + 1}: an Expense account ("${line.creditAccount}") is being credited — unusual outside a purchase return/debit note.` });
+    }
+  });
+
+  // Advance must be an asset, not an expense.
+  if (intent === 'advance') {
+    const badLine = (tx.entries || []).find((l) => /expense/i.test(l.debitAccount || ''));
+    if (badLine) {
+      issues.push({ level: 'warning', code: 'advance_as_expense', message: 'An employee advance is an asset (Employee Advances), not an expense — review the debit account.' });
+    }
+  }
+
+  // Capital-vs-revenue: a large purchase/expense that names a fixed asset should
+  // likely be capitalised rather than expensed.
+  if ((intent === 'purchase' || intent === 'expense') && CAPITAL_ASSET_RE.test(tx.rawPrompt || '')) {
+    const total = totalOf(tx.entries || []);
+    const toExpense = (tx.entries || []).some((l) => inferAccountMeta(l.debitAccount || '').type === 'Expense');
+    if (total >= 50000 && toExpense) {
+      issues.push({ level: 'info', code: 'maybe_capital', message: 'This looks like a fixed asset (₹' + total + '). Consider capitalising it instead of expensing.' });
+    }
+  }
+
   // ── 8. Compliance checks (GSTIN, TDS, round-off, cash cap, duplicates) ─────
   // All of these are opt-in via ctx keys; runComplianceChecks no-ops gracefully
   // when the relevant ctx field is missing.
-  const complianceIssues = runComplianceChecks(tx, {
+  let complianceIssues = runComplianceChecks(tx, {
     history: ctx.recentJournalEntries,
     partyGstin: ctx.partyGstin,
     section: ctx.tdsSection,
     ytdAmount: ctx.tdsYtdAmount,
     roundOff: ctx.skipRoundOff ? false : true,
   });
+  // The Sec 40A(3) cash cap applies only to cash payments to a payee — drop it
+  // for inflows and tax-deposits to avoid false positives on receipts etc.
+  const CASH_CAP_INTENTS = new Set(['payment', 'expense', 'purchase', 'rent', 'salary', 'advance']);
+  if (!CASH_CAP_INTENTS.has(intent)) {
+    complianceIssues = complianceIssues.filter((i) => i.code !== 'cash_cap_breached');
+  }
   issues.push(...complianceIssues);
 
   return { ...tx, issues };

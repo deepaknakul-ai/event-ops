@@ -151,6 +151,7 @@ export const PERMISSIONS = {
     view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
     create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
     approve:  ['admin', 'manager'],
+    cancel:   ['admin', 'manager', 'accountant'],
   },
   hr_shifts: {
     view:     ['admin', 'accountant', 'manager'],
@@ -206,7 +207,7 @@ export const RESOURCE_DEFS = {
   // HR Module
   hr_dashboard:      { label: 'HR Dashboard',        actions: ['view'] },
   hr_attendance:     { label: 'HR Attendance',       actions: ['view', 'create', 'edit', 'delete', 'close_shift'] },
-  hr_leaves:         { label: 'HR Leaves',           actions: ['view', 'view_own', 'create', 'approve'] },
+  hr_leaves:         { label: 'HR Leaves',           actions: ['view', 'view_own', 'create', 'approve', 'cancel'] },
   hr_shifts:         { label: 'HR Shift Requests',   actions: ['view', 'view_own', 'create', 'approve', 'clarify'] },
   hr_penalties:      { label: 'HR Penalties',        actions: ['view', 'create', 'bulk_apply'] },
   hr_payroll:        { label: 'HR Payroll',          actions: ['view', 'generate'] },

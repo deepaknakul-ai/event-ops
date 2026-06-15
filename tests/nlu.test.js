@@ -62,13 +62,15 @@ describe('parseMessage', () => {
   it('builds an expense with inferred account', () => {
     const tx = parseMessage('spent 5000 on travel', CTX);
     expect(tx.intent).toBe('expense');
-    expect(tx.entries[0].debitAccount).toBe('Travel Expense');
+    // Knowledge-base taxonomy: travel maps to the standard "Travelling & Conveyance" ledger.
+    expect(tx.entries[0].debitAccount).toBe('Travelling & Conveyance');
   });
 
   it('emits accountCreates for referenced accounts', () => {
     const tx = parseMessage('spent 5000 on office stationery', CTX);
     const names = tx.accountCreates.map(a => a.name);
-    expect(names).toContain('Office Supplies Expense');
+    // Stationery maps to the standard "Printing & Stationery" ledger.
+    expect(names).toContain('Printing & Stationery');
     expect(names).toContain('Cash');
   });
 

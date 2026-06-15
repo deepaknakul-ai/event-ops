@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import {
   Plus, Search, Edit, Trash2, FileText, X, CheckCircle,
-  AlertCircle, Download, Receipt, ChevronDown, Zap
+  AlertCircle, Download, Receipt, ChevronDown, Zap, XCircle, Eye
 } from 'lucide-react';
 import {
   collection, addDoc, updateDoc, doc, deleteDoc,
@@ -85,6 +85,9 @@ const TaxInvoices = ({
   const [saving, setSaving]             = useState(false);
   const [invGenLoading, setInvGenLoading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, invoice: null });
+  const [cancelConfirm, setCancelConfirm] = useState({ isOpen: false, invoice: null });
+  const [cancelReason, setCancelReason]   = useState('');
+  const [showCancelled, setShowCancelled] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
   const [clientSearch, setClientSearch] = useState('');
 
@@ -178,13 +181,14 @@ const TaxInvoices = ({
     const q = search.toLowerCase();
     return taxInvoices
       .filter(inv => {
+        if (!showCancelled && inv.status === 'Cancelled') return false;
         if (search && !`${inv.invoice_no} ${inv.client_name} ${inv.remarks || ''}`.toLowerCase().includes(q)) return false;
         if (filterClient && inv.client_id !== filterClient) return false;
         if (filterFY !== 'All' && getFYFromDate(inv.invoice_date) !== filterFY) return false;
         return true;
       })
       .sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || ''));
-  }, [taxInvoices, search, filterClient, filterFY]);
+  }, [taxInvoices, search, filterClient, filterFY, showCancelled]);
 
   const fyOptions = useMemo(() => {
     const fys = new Set(taxInvoices.map(i => getFYFromDate(i.invoice_date)));
@@ -483,6 +487,45 @@ const TaxInvoices = ({
     } catch (err) {
       console.error(err);
       addToast('Error deleting invoice', 'error');
+    }
+  };
+
+  // ── cancel & reissue ─────────────────────────────────────────────────────
+  // Soft-cancels the invoice (preserves audit trail), releases linked projects
+  // so they can be re-invoiced with a corrected invoice.
+  const handleCancel = async () => {
+    const invoice = cancelConfirm.invoice;
+    if (!invoice) return;
+    if (!cancelReason.trim()) return alert('Please enter a reason for cancellation.');
+    try {
+      const batch = writeBatch(db);
+      // Mark invoice cancelled — immutable fields (invoice_no, GST amounts) stay intact for audit.
+      batch.update(doc(db, 'artifacts', appId, 'public', 'data', 'tax_invoices', invoice.id), {
+        status: 'Cancelled',
+        cancel_reason: cancelReason.trim(),
+        cancelled_by: user?.uid || '',
+        cancelled_at: new Date().toISOString(),
+      });
+      // Release linked projects back to "Completed, not invoiced".
+      for (const pid of (invoice.project_ids || [])) {
+        batch.update(doc(db, 'artifacts', appId, 'public', 'data', 'projects', pid), {
+          tax_invoice_id: '',
+          invoice_status: 'Not Invoiced',
+          invoice_no: '',
+          invoice_date: '',
+          invoice_due_date: '',
+          invoice_label: '',
+          invoice_remarks: '',
+        });
+      }
+      await batch.commit();
+      logAction('tax_invoices', 'cancel', invoice.id, { cancel_reason: cancelReason.trim() }, invoice.invoice_no);
+      setCancelConfirm({ isOpen: false, invoice: null });
+      setCancelReason('');
+      addToast(`Invoice ${invoice.invoice_no} cancelled — projects released for re-invoicing`, 'info');
+    } catch (err) {
+      console.error(err);
+      addToast('Error cancelling invoice', 'error');
     }
   };
 
@@ -837,6 +880,12 @@ const TaxInvoices = ({
         <select className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-black bg-white" value={filterFY} onChange={e => setFilterFY(e.target.value)}>
           {fyOptions.map(fy => <option key={fy} value={fy}>{fy === 'All' ? 'All FY' : fy}</option>)}
         </select>
+        <button
+          onClick={() => setShowCancelled(v => !v)}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm transition ${showCancelled ? 'bg-red-50 border-red-200 text-red-700 font-medium' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+        >
+          <Eye size={13} /> {showCancelled ? 'Hide Cancelled' : 'Show Cancelled'}
+        </button>
       </div>
 
       {/* Summary chips */}
@@ -875,7 +924,12 @@ const TaxInvoices = ({
                 const isOverdue = inv.due_date && inv.due_date < new Date().toISOString().split('T')[0] && inv.invoice_status !== 'Paid';
                 return (
                   <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 font-mono font-bold text-slate-800">{inv.invoice_no}</td>
+                    <td className="px-4 py-3 font-mono font-bold text-slate-800">
+                      {inv.invoice_no}
+                      {inv.status === 'Cancelled' && (
+                        <span className="ml-2 text-[9px] font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-600 border border-red-200 uppercase tracking-wide">Cancelled</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-slate-600">{fmtDate(inv.invoice_date)}</td>
                     <td className={`px-4 py-3 font-medium ${isOverdue ? 'text-red-600' : 'text-slate-600'}`}>
                       {fmtDate(inv.due_date) || '—'}
@@ -908,6 +962,9 @@ const TaxInvoices = ({
                         )}
                         {can(role, 'tax_invoices', 'delete') && (
                           <button onClick={() => setDeleteConfirm({ isOpen: true, invoice: inv })} title="Delete" className="p-1.5 rounded hover:bg-red-50 text-red-500 transition"><Trash2 size={14} /></button>
+                        )}
+                        {role === 'admin' && inv.status !== 'Cancelled' && (
+                          <button onClick={() => { setCancelConfirm({ isOpen: true, invoice: inv }); setCancelReason(''); }} title="Cancel Invoice" className="p-1.5 rounded hover:bg-orange-50 text-orange-500 transition"><XCircle size={14} /></button>
                         )}
                       </div>
                     </td>
@@ -1174,8 +1231,8 @@ const TaxInvoices = ({
         </div>
       </Modal>
 
-      </> /* end invoices tab */
-      )} /* end activeTab ternary */
+      </>
+      )}
 
       {/* Delete confirm — outside tab conditional so it works from either tab */}
       <ConfirmDeleteModal
@@ -1185,6 +1242,39 @@ const TaxInvoices = ({
         onConfirm={() => handleDelete(deleteConfirm.invoice)}
         onCancel={() => setDeleteConfirm({ isOpen: false, invoice: null })}
       />
+
+      {/* Cancel Invoice modal */}
+      {cancelConfirm.isOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+            <div className="flex items-center gap-3 p-5 border-b border-slate-100">
+              <XCircle className="text-orange-500" size={20} />
+              <h2 className="font-semibold text-slate-800">Cancel Invoice</h2>
+            </div>
+            <div className="p-5 space-y-3">
+              <p className="text-sm text-slate-600">
+                Cancel <span className="font-mono font-bold">{cancelConfirm.invoice?.invoice_no}</span>?
+                The invoice will be marked Cancelled and linked projects released for re-invoicing.
+                This preserves the audit trail as required by Section 34 CGST Act.
+              </p>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Reason for cancellation <span className="text-red-500">*</span></label>
+                <textarea
+                  rows={3}
+                  value={cancelReason}
+                  onChange={e => setCancelReason(e.target.value)}
+                  placeholder="e.g. Wrong GSTIN, amount correction, duplicate invoice…"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-slate-100">
+              <button onClick={() => setCancelConfirm({ isOpen: false, invoice: null })} className="px-4 py-2 text-sm rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 transition">Keep Invoice</button>
+              <button onClick={handleCancel} disabled={!cancelReason.trim()} className="px-4 py-2 text-sm rounded-lg bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed transition">Cancel Invoice</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

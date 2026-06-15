@@ -79,12 +79,17 @@ service cloud.firestore {
     // guards below would otherwise be bypassed by this wildcard's update path.
     match /artifacts/{appId}/public/data/{collection}/{docId} {
 
-      // Reads: isAuthed() is intentionally broad — anonymous sessions need to
-      // read employees/settings for the login page.
+      // Reads: real (non-anonymous) authenticated sessions only.
       // audit_logs is explicitly excluded: its specific rule below restricts
-      // reads to admin/accountant only (and Firestore OR semantics would let
-      // the wildcard override that restriction without this exclusion).
-      allow read: if isAuthed() && collection != 'audit_logs';
+      // reads to admin/accountant only (Firestore OR semantics would let
+      // this wildcard override that restriction without the exclusion).
+      // employees and settings are also excluded — their specific rules below
+      // apply stricter checks (employees: non-anonymous; settings/security: admin).
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && collection != 'audit_logs'
+                  && collection != 'employees'
+                  && collection != 'settings';
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
@@ -121,6 +126,27 @@ service cloud.firestore {
                     .hasAny(['approval_status', 'approved_by',
                              'approved_at', 'rejection_reason']))
           )
+          // ── tax_invoices immutability guards ───────────────────────────────
+          // These fields are locked once the invoice is created (resource != null = UPDATE).
+          // invoice_no: immutable — changing a number post-issue breaks GSTR-1 continuity.
+          // org_gstin_at_issue / supply_type / *_amount: immutable — changing these
+          //   would silently corrupt the GST split already reported to the buyer.
+          // invoice_date: admin-only change — needed for rare correction scenarios
+          //   but too risky for manager-level edits (affects tax period allocation).
+          && (collection != 'tax_invoices' || resource == null || (
+            request.resource.data.invoice_no == resource.data.invoice_no
+            && request.resource.data.get('org_gstin_at_issue', '') == resource.data.get('org_gstin_at_issue', '')
+            && request.resource.data.get('supply_type', '') == resource.data.get('supply_type', '')
+            && request.resource.data.get('cgst_amount', 0) == resource.data.get('cgst_amount', 0)
+            && request.resource.data.get('sgst_amount', 0) == resource.data.get('sgst_amount', 0)
+            && request.resource.data.get('igst_amount', 0) == resource.data.get('igst_amount', 0)
+            && (request.resource.data.get('invoice_date', '') == resource.data.get('invoice_date', '')
+                || isAdmin(appId))
+            // status → 'Cancelled' is admin-only (Section 34 CGST Act workflow)
+            && (request.resource.data.get('status', '') != 'Cancelled'
+                || resource.data.get('status', '') == 'Cancelled'
+                || isAdmin(appId))
+          ))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 
       // Deletes: finance collections admin-only; everything else admin/manager.
@@ -170,21 +196,27 @@ service cloud.firestore {
     }
 
     // ── Settings ──────────────────────────────────────────────────────────────
-    // Read: isAuthed() is intentionally broad — the admin login flow reads
-    // settings/security (admin password hash) before credentials are known.
+    // settings/security: admin-read only. The verifyLogin and resetAdminPassword
+    //   Cloud Functions access it via Admin SDK (bypasses rules) so the client
+    //   never needs to read this doc directly.
+    // All other settings docs: any real (non-anonymous) authenticated session.
     // Write: admin only.
     match /artifacts/{appId}/public/data/settings/{docId} {
-      allow read: if isAuthed();
+      allow read: if docId == 'security'
+                    ? isAdmin(appId)
+                    : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
       allow write: if isAdmin(appId);
     }
 
     // ── Employees ─────────────────────────────────────────────────────────────
-    // Read: isAuthed() is intentionally broad — login page reads this collection.
+    // Read: real (non-anonymous) authenticated sessions only.
+    //   The verifyLogin Cloud Function handles all login-time credential lookups
+    //   server-side, so the login page no longer needs anonymous reads here.
     // Create/delete: admin only.
     // Update: admin full access; any role-bearing user may update their own
     //         non-role fields (profile photo, contact details, etc.).
     match /artifacts/{appId}/public/data/employees/{empId} {
-      allow read: if isAuthed();
+      allow read: if isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous';
       allow create, delete: if isAdmin(appId);
       allow update: if isAdmin(appId) ||
                     (isRoleUser(appId) && empId == userEmpId() &&

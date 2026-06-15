@@ -1228,6 +1228,20 @@ const Accounting = ({
     return Array.from(names).sort();
   }, [snapshot.ledger, clients]);
 
+  // Party-name → GSTIN map so the assistant can decide CGST/SGST vs IGST and
+  // validate the counterparty's GSTIN (keyed by lowercased name).
+  const partyGstins = useMemo(() => {
+    const map = {};
+    clients.forEach((c) => { if (c.name && c.gstin) map[c.name.toLowerCase()] = c.gstin; });
+    return map;
+  }, [clients]);
+
+  // Live project names for fuzzy project resolution in the assistant.
+  const projectNames = useMemo(
+    () => projects.map((p) => p.project_name).filter(Boolean),
+    [projects]
+  );
+
   const handleChatPostEntry = async (parsed) => {
     if (!canEditFinance) throw new Error('Access denied.');
     const dateStr = parsed?.date || new Date().toISOString().slice(0, 10);
@@ -4529,6 +4543,9 @@ const Accounting = ({
         closedFYs={fiscalYearClosings.filter((r) => r.status === 'closed').map((r) => r.fy)}
         recentJournalEntries={manualJournalEntries}
         getFY={getFYFromDate}
+        orgGstin={orgGstin}
+        partyGstins={partyGstins}
+        projectNames={projectNames}
       />
 
       <ConfirmDeleteModal
