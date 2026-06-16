@@ -63,6 +63,29 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
 
   const lockedEmployees = employees.filter(e => e.is_locked);
 
+  // ── Owner KPIs (receivables overdue, approvals, top project) ───────────────
+  const overdue60 = useMemo(() => {
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 60);
+    const list = (taxInvoices || []).filter(inv =>
+      inv.status !== 'Cancelled' && inv.due_date && new Date(inv.due_date) < cutoff
+    );
+    const amount = list.reduce((s, inv) => s + parseFloat(inv.final_amount ?? inv.computed_total ?? 0), 0);
+    return { count: list.length, amount };
+  }, [taxInvoices]);
+
+  const pendingApprovals = useMemo(() => {
+    const exp = (expenses || []).filter(e => e.status === 'Pending').length;
+    const lv = (hrLeaves || []).filter(l => l.status === 'Pending').length;
+    return { exp, lv, total: exp + lv };
+  }, [expenses, hrLeaves]);
+
+  const topProjects = useMemo(() =>
+    [...projects]
+      .filter(p => ['Confirmed', 'Ongoing', 'Completed', 'Closed'].includes(p.status) && getFYFromDate(p.end_date || p.start_date) === selectedFY)
+      .sort((a, b) => getProjectGrandTotal(b) - getProjectGrandTotal(a))
+      .slice(0, 5),
+    [projects, selectedFY]);
+
   // ── Attendance check-in/out state ─────────────────────────────────────────
   const myLogs = useMemo(() => currentEmpId ? timeLogs.filter(l => l.employeeId === currentEmpId).sort((a, b) => new Date(b.checkIn || 0) - new Date(a.checkIn || 0)) : [], [timeLogs, currentEmpId]);
   const activeShift = useMemo(() => myLogs.find(l => l.checkIn && !l.checkOut), [myLogs]);
@@ -466,6 +489,91 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
               </div>
            </div>
            <button onClick={() => navigate('/employees')} className="whitespace-nowrap bg-red-600 text-white px-4 py-2 rounded shadow-sm text-sm font-medium hover:bg-red-700">Review Accounts</button>
+        </div>
+      )}
+
+      {/* ── Quick Actions (role-aware) ───────────────────────────────────── */}
+      {(() => {
+        const actions = [];
+        if (can(role, 'hr_attendance', 'view') || role === 'tech' || role === 'user') {
+          actions.push({ label: activeShift ? 'Check Out' : 'Check In', icon: Clock, to: '/hr/attendance', cls: activeShift ? 'bg-amber-600 hover:bg-amber-700' : 'bg-green-600 hover:bg-green-700' });
+        }
+        if (can(role, 'expenses', 'create') || can(role, 'expenses', 'view_own')) {
+          actions.push({ label: 'New Expense', icon: DollarSign, to: '/expenses', cls: 'bg-indigo-600 hover:bg-indigo-700' });
+        }
+        if (can(role, 'hr_leaves', 'create') || can(role, 'hr_leaves', 'view_own')) {
+          actions.push({ label: 'Request Leave', icon: CalendarDays, to: '/hr/leaves', cls: 'bg-purple-600 hover:bg-purple-700' });
+        }
+        if (can(role, 'projects', 'create')) {
+          actions.push({ label: 'New Quote', icon: FileText, to: '/projects', cls: 'bg-blue-600 hover:bg-blue-700' });
+        }
+        if (actions.length === 0) return null;
+        return (
+          <div className="flex flex-wrap gap-2">
+            {actions.map((a) => (
+              <button key={a.label} onClick={() => navigate(a.to)} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-sm ${a.cls}`}>
+                <a.icon size={15} /> {a.label}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* ── Receivables overdue > 60 days alert ──────────────────────────── */}
+      {can(role, 'finance', 'view') && overdue60.count > 0 && (
+        <button onClick={() => navigate('/reports')} className="w-full text-left bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-center justify-between gap-4 hover:bg-amber-100/60 transition">
+          <div className="flex items-center gap-3 text-amber-800">
+            <div className="bg-amber-100 p-2 rounded-full"><AlertCircle className="text-amber-600" size={22} /></div>
+            <div>
+              <div className="font-bold">{overdue60.count} invoice{overdue60.count > 1 ? 's' : ''} overdue &gt; 60 days</div>
+              <div className="text-sm">{formatCurrency(overdue60.amount)} outstanding — follow up for collection.</div>
+            </div>
+          </div>
+          <ChevronRight className="text-amber-500 shrink-0" size={20} />
+        </button>
+      )}
+
+      {/* ── Owner / Exec summary (finance roles) ─────────────────────────── */}
+      {can(role, 'finance', 'view') && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <TrendingUp size={16} className="text-indigo-600" />
+            <h3 className="text-sm font-bold text-slate-800">Owner Summary <span className="font-normal text-slate-400">· FY {selectedFY}</span></h3>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="rounded-lg bg-green-50 border border-green-100 p-3">
+              <div className="text-[11px] font-medium text-slate-500">Revenue (delivered)</div>
+              <div className="text-lg font-bold text-slate-800 mt-0.5">{formatCurrency(revenue)}</div>
+            </div>
+            <div className="rounded-lg bg-amber-50 border border-amber-100 p-3">
+              <div className="text-[11px] font-medium text-slate-500">Overdue &gt; 60d</div>
+              <div className="text-lg font-bold text-amber-700 mt-0.5">{formatCurrency(overdue60.amount)}</div>
+              <div className="text-[10px] text-slate-400">{overdue60.count} invoice(s)</div>
+            </div>
+            <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-3">
+              <div className="text-[11px] font-medium text-slate-500">Active Projects</div>
+              <div className="text-lg font-bold text-slate-800 mt-0.5">{activeProjects}</div>
+              <div className="text-[10px] text-slate-400">{pendingQuotes} quoted</div>
+            </div>
+            <button onClick={() => navigate('/hr/leaves')} className="text-left rounded-lg bg-purple-50 border border-purple-100 p-3 hover:bg-purple-100/60 transition">
+              <div className="text-[11px] font-medium text-slate-500">Pending Approvals</div>
+              <div className="text-lg font-bold text-slate-800 mt-0.5">{pendingApprovals.total}</div>
+              <div className="text-[10px] text-slate-400">{pendingApprovals.exp} exp · {pendingApprovals.lv} leave</div>
+            </button>
+          </div>
+          {topProjects.length > 0 && (
+            <div className="mt-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Top projects by value</div>
+              <div className="space-y-1">
+                {topProjects.map((p) => (
+                  <button key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="w-full flex items-center justify-between text-xs hover:bg-slate-50 rounded px-2 py-1">
+                    <span className="truncate text-slate-600 max-w-[70%]">{p.project_name}</span>
+                    <span className="font-semibold text-slate-800">{formatCurrency(getProjectGrandTotal(p))}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
