@@ -3,6 +3,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "@e965/xlsx";
 import { formatCurrencyPDF, getLogisticsLines, calculateLEDSignalPorts } from "../helpers";
+import { LOGISTICS_TYPES } from "../constants";
 
 export const generateQuotationPDF = async (ctx) => {
   const { selectedProject, calculateProjectTotals, canViewProjectFinancials, clients, getOrgSettings, getProjectSalesGST, stateName, addToast } = ctx;
