@@ -383,6 +383,7 @@ const TaxInvoices = ({
       let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
       let supplyType = 'CGST_SGST';
       let placeOfSupply = '';
+      const rateBuckets = {}; // gstRate -> { taxable, cgst, sgst, igst } — for rate-wise GSTR-1
       try {
         for (const pid of form.project_ids) {
           const p = projects.find(x => x.id === pid);
@@ -393,6 +394,14 @@ const TaxInvoices = ({
           igstAmt += bd.totals.igstAmt || 0;
           supplyType = bd.supplyType;
           placeOfSupply = bd.placeOfSupply || placeOfSupply;
+          (bd.items || []).forEach((it) => {
+            const r = Number(it.gstRate || 0);
+            if (!rateBuckets[r]) rateBuckets[r] = { taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+            rateBuckets[r].taxable += it.taxable || 0;
+            rateBuckets[r].cgst += it.cgstAmt || 0;
+            rateBuckets[r].sgst += it.sgstAmt || 0;
+            rateBuckets[r].igst += it.igstAmt || 0;
+          });
         }
       } catch (_) { /* breakdown helper failure is non-fatal */ }
       // ── Reconcile the tax breakdown to the FINAL (gross, tax-inclusive) amount ──
@@ -412,6 +421,17 @@ const TaxInvoices = ({
         cgstFinal = round2(gstFinal / 2);
         sgstFinal = round2(gstFinal - cgstFinal);
       }
+      // Rate-wise breakup (scaled to the reconciled totals) for rate-wise GSTR-1.
+      const gstBreakup = Object.entries(rateBuckets)
+        .map(([rate, b]) => ({
+          rate: Number(rate),
+          taxable: round2((b.taxable || 0) * scale),
+          cgst: round2((b.cgst || 0) * scale),
+          sgst: round2((b.sgst || 0) * scale),
+          igst: round2((b.igst || 0) * scale),
+        }))
+        .filter(b => b.taxable > 0 || b.cgst > 0 || b.sgst > 0 || b.igst > 0)
+        .sort((a, b) => b.rate - a.rate);
       const gstSplit = {
         supply_type: supplyType,
         cgst_amount: cgstFinal,
@@ -420,6 +440,7 @@ const TaxInvoices = ({
         place_of_supply: placeOfSupply,
         org_gstin: orgGstinForSplit,
         bill_to_gstin: billGstinForSplit,
+        gst_breakup: gstBreakup,
       };
 
       const invoiceData = {
@@ -442,6 +463,7 @@ const TaxInvoices = ({
         cgst_amount: gstSplit.cgst_amount,
         sgst_amount: gstSplit.sgst_amount,
         igst_amount: gstSplit.igst_amount,
+        gst_breakup: gstSplit.gst_breakup,
         place_of_supply: gstSplit.place_of_supply,
         org_gstin_at_issue: gstSplit.org_gstin,
         bill_to_gstin_at_issue: gstSplit.bill_to_gstin,

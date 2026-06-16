@@ -607,6 +607,7 @@ const Accounting = ({
         sgst: isIntra ? gstAmt / 2 : 0,
         igst: isIntra ? 0 : gstAmt,
         total: parseFloat(inv.final_amount || inv.computed_total || (taxable + gstAmt)),
+        gst_breakup: Array.isArray(inv.gst_breakup) && inv.gst_breakup.length ? inv.gst_breakup : null,
         source: 'Tax Invoice',
       });
     });
@@ -806,22 +807,17 @@ const Accounting = ({
       const b2bMap = new Map();
       const b2cl = []; // inter-state to unregistered, invoice value > 2.5L
       const b2csMap = new Map(); // intra-state aggregated by rate
+      const blendedRate = (r) => (Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) > 0 && Number(r.taxable || 0) > 0
+        ? +(((Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) / Number(r.taxable)) * 100).toFixed(2)
+        : 0;
       rows.forEach((r) => {
         const isInter = r.placeOfSupply && stateCode && r.placeOfSupply.slice(0, 2) !== stateCode;
-        const rate = (Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) > 0 && Number(r.taxable || 0) > 0
-          ? +(((Number(r.cgst || 0) + Number(r.sgst || 0) + Number(r.igst || 0)) / Number(r.taxable)) * 100).toFixed(2)
-          : 0;
-        const itm = {
-          num: 1,
-          itm_det: {
-            txval: Number(r.taxable || 0),
-            rt: rate,
-            iamt: Number(r.igst || 0),
-            camt: Number(r.cgst || 0),
-            samt: Number(r.sgst || 0),
-            csamt: 0,
-          },
-        };
+        // Rate-wise slabs: one per GST rate when a breakup exists, else a single
+        // blended slab — so a mixed-rate invoice files correctly under each rate.
+        const slabs = (Array.isArray(r.gst_breakup) && r.gst_breakup.length)
+          ? r.gst_breakup.map(b => ({ rt: Number(b.rate || 0), txval: Number(b.taxable || 0), iamt: Number(b.igst || 0), camt: Number(b.cgst || 0), samt: Number(b.sgst || 0) }))
+          : [{ rt: blendedRate(r), txval: Number(r.taxable || 0), iamt: Number(r.igst || 0), camt: Number(r.cgst || 0), samt: Number(r.sgst || 0) }];
+        const itms = slabs.map((s, i) => ({ num: i + 1, itm_det: { txval: s.txval, rt: s.rt, iamt: s.iamt, camt: s.camt, samt: s.samt, csamt: 0 } }));
         const inv = {
           inum: r.invoiceNo || '',
           idt: r.date ? new Date(r.date).toLocaleDateString('en-GB').replace(/\//g, '-') : '',
@@ -829,23 +825,26 @@ const Accounting = ({
           pos: (r.placeOfSupply || '').slice(0, 2) || stateCode,
           rchrg: 'N',
           inv_typ: 'R',
-          itms: [itm],
+          itms,
         };
         if (r.clientGstin && classifyGstin(r.clientGstin) === 'REG') {
           if (!b2bMap.has(r.clientGstin)) b2bMap.set(r.clientGstin, { ctin: r.clientGstin, inv: [] });
           b2bMap.get(r.clientGstin).inv.push(inv);
         } else if (isInter && Number(r.total || 0) > 250000) {
-          b2cl.push({ pos: inv.pos, inv: [{ inum: inv.inum, idt: inv.idt, val: inv.val, itms: [itm] }] });
+          b2cl.push({ pos: inv.pos, inv: [{ inum: inv.inum, idt: inv.idt, val: inv.val, itms }] });
         } else {
-          const key = `${rate}|${inv.pos}|${isInter ? 'INTER' : 'INTRA'}`;
-          if (!b2csMap.has(key)) {
-            b2csMap.set(key, { sply_ty: isInter ? 'INTER' : 'INTRA', rt: rate, typ: 'OE', pos: inv.pos, txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 });
-          }
-          const bucket = b2csMap.get(key);
-          bucket.txval += Number(r.taxable || 0);
-          bucket.iamt += Number(r.igst || 0);
-          bucket.camt += Number(r.cgst || 0);
-          bucket.samt += Number(r.sgst || 0);
+          // B2CS: aggregate each rate slab into its own bucket.
+          slabs.forEach((s) => {
+            const key = `${s.rt}|${inv.pos}|${isInter ? 'INTER' : 'INTRA'}`;
+            if (!b2csMap.has(key)) {
+              b2csMap.set(key, { sply_ty: isInter ? 'INTER' : 'INTRA', rt: s.rt, typ: 'OE', pos: inv.pos, txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 });
+            }
+            const bucket = b2csMap.get(key);
+            bucket.txval += s.txval;
+            bucket.iamt += s.iamt;
+            bucket.camt += s.camt;
+            bucket.samt += s.samt;
+          });
         }
       });
       const hsn = (gstData.hsnSummary || []).map((h, i) => ({

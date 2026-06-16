@@ -7,7 +7,7 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2 } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { can } from '../utils/permissions';
@@ -954,13 +954,14 @@ const Reports = ({
           return true;
         })
         .sort((a, b) => a.invoice_date.localeCompare(b.invoice_date))
-        .map(inv => {
+        .flatMap(inv => {
           const category = getGSTR1Category(inv);
           const isIGST = (inv.supply_type || '') === 'IGST';
           const posCode = (inv.place_of_supply || '').substring(0, 2);
           const posName = GST_STATE_CODES[posCode] || posCode || '—';
           const buyerGSTIN = inv.bill_to_gstin_at_issue || inv.sale_company_gstin || '';
-          return {
+          const invoiceValue = parseFloat(inv.final_amount || inv.computed_total || 0);
+          const base = {
             'GSTR-1 Table': category,
             'FY': fyOf(inv.invoice_date),
             'Invoice No': inv.invoice_no || '—',
@@ -971,13 +972,35 @@ const Reports = ({
             'Place of Supply': posName,
             'Reverse Charge': inv.reverse_charge ? 'Y' : 'N',
             'Supply Type': isIGST ? 'IGST' : 'CGST+SGST',
-            'Taxable Value': parseFloat(inv.taxable || 0),
+          };
+          // Rate-wise: one row per GST slab when the invoice carries a breakup;
+          // Invoice Value shown only on the first slab row to avoid double-counting.
+          const breakup = Array.isArray(inv.gst_breakup) && inv.gst_breakup.length ? inv.gst_breakup : null;
+          if (breakup) {
+            return breakup.map((b, i) => ({
+              ...base,
+              'Rate %': b.rate,
+              'Taxable Value': round2(b.taxable || 0),
+              'IGST Amt': isIGST ? round2(b.igst || 0) : 0,
+              'CGST Amt': !isIGST ? round2(b.cgst || 0) : 0,
+              'SGST Amt': !isIGST ? round2(b.sgst || 0) : 0,
+              'Total GST': round2((b.cgst || 0) + (b.sgst || 0) + (b.igst || 0)),
+              'Invoice Value': i === 0 ? invoiceValue : '',
+            }));
+          }
+          // Legacy invoices (no breakup): single blended row.
+          const taxable = parseFloat(inv.taxable || 0);
+          const blendedRate = taxable > 0 ? Math.round((parseFloat(inv.gst_amount || 0) / taxable) * 100) : '';
+          return [{
+            ...base,
+            'Rate %': blendedRate,
+            'Taxable Value': taxable,
             'IGST Amt': isIGST ? parseFloat(inv.igst_amount || 0) : 0,
             'CGST Amt': !isIGST ? parseFloat(inv.cgst_amount || 0) : 0,
             'SGST Amt': !isIGST ? parseFloat(inv.sgst_amount || 0) : 0,
             'Total GST': parseFloat(inv.gst_amount || 0),
-            'Invoice Value': parseFloat(inv.final_amount || inv.computed_total || 0),
-          };
+            'Invoice Value': invoiceValue,
+          }];
         });
     }
 
