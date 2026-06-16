@@ -3442,7 +3442,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <div className="rounded-lg border border-slate-200 p-4">
                 <div className="text-sm font-semibold text-slate-700 mb-3">P&L Pie Chart</div>
                 <div className="h-48">
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height={192} minWidth={0}>
                     <PieChart>
                       <Pie data={pnlPieData} dataKey="value" nameKey="name" innerRadius={40} outerRadius={70} paddingAngle={2}>
                         {pnlPieData.map((entry, index) => (

@@ -817,7 +817,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
         <div className="rounded-xl bg-white p-6 shadow-sm border border-slate-200">
           <h3 className="mb-4 text-sm font-bold text-slate-800 uppercase tracking-wide">Revenue & Expenses — Last 6 Months</h3>
           <div className="h-80 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height={320} minWidth={0}>
               <BarChart data={revenueData} margin={{ top: 10, right: 20, left: 20, bottom: 5 }} barSize={20} barGap={2} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} />

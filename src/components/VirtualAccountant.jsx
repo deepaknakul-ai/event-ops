@@ -657,7 +657,7 @@ const VirtualAccountant = ({
                   )}
                   {msg.chart && Array.isArray(msg.chart.data) && msg.chart.data.length > 0 && (
                     <div className="h-48 w-full">
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="100%" height={192} minWidth={0}>
                         {msg.chart.kind === 'multi-bar' ? (
                           <BarChart data={msg.chart.data}>
                             <XAxis dataKey={msg.chart.xKey || 'x'} tick={{ fontSize: 10 }} />
