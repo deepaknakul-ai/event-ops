@@ -19,6 +19,7 @@ const PublicLedger = () => {
   const [payments, setPayments] = useState([]);
   const [vendorPayments, setVendorPayments] = useState([]);
   const [purchaseInvoices, setPurchaseInvoices] = useState([]);
+  const [taxInvoices, setTaxInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [fyFilter, setFyFilter] = useState('ALL');
@@ -78,12 +79,13 @@ const PublicLedger = () => {
         // This prevents other clients' data from appearing in the network payload.
         const cid = clientData.id;
         const col = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
-        const [projectsSnap, paymentsSnap, vendorPaymentsSnap, orgSnap, purchaseInvoicesSnap] = await Promise.all([
+        const [projectsSnap, paymentsSnap, vendorPaymentsSnap, orgSnap, purchaseInvoicesSnap, taxInvoicesSnap] = await Promise.all([
           getDocs(query(col('projects'),          where('client_id',  '==', cid))),
           getDocs(query(col('payments'),          where('client_id',  '==', cid))),
           getDocs(query(col('vendor_payments'),   where('vendor_id',  '==', cid))),
           getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization')),
-          getDocs(query(col('purchase_invoices'), where('vendor_id',  '==', cid)))
+          getDocs(query(col('purchase_invoices'), where('vendor_id',  '==', cid))),
+          getDocs(query(col('tax_invoices'),      where('client_id',  '==', cid)))
         ]);
 
         if (!isMounted) return;
@@ -94,6 +96,7 @@ const PublicLedger = () => {
         setVendorPayments(vendorPaymentsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
         setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
         setPurchaseInvoices(purchaseInvoicesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setTaxInvoices(taxInvoicesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch (err) {
         console.error('Public ledger load failed:', err);
         if (isMounted) setError('Failed to load ledger. Please try again later.');
@@ -145,32 +148,58 @@ const PublicLedger = () => {
     const raw = [];
 
     if (includeClientLedger) {
+      // PRECEDENCE: a raised tax invoice is the source of truth for the amount
+      // due. An invoice debits the client at its FINAL (agreed, tax-inclusive)
+      // amount and SUPERSEDES the per-project quote(s) it covers — so a clubbed
+      // invoice shows as ONE line, not N quote lines. Only completed/closed
+      // projects NOT yet covered by any invoice show as an "unbilled" quote.
+      const activeClientInvoices = (taxInvoices || []).filter(inv => inv.status !== 'Cancelled');
+      const invoicedPids = new Set();
+      activeClientInvoices.forEach(inv => {
+        const pids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
+        pids.forEach(pid => pid && invoicedPids.add(pid));
+      });
+
+      // Unbilled completed/closed projects → quoted cost
       projects
-        .filter(p => p.client_id === client.id && ['Completed', 'Closed'].includes(p.status))
+        .filter(p => p.client_id === client.id && ['Completed', 'Closed'].includes(p.status) && !invoicedPids.has(p.id))
         .forEach(p => {
           const company = resolveCompany(p.party_company_id);
-          const isInvoiced = p.invoice_status === 'Invoiced';
-          // Rule: show unbilled completed projects in the ledger too so the
-          // client sees the full picture of what is due. Flip to an invoiced
-          // line (with invoice no/date) once the tax invoice is raised.
-          const invoiceNo = p.invoice_no || '—';
-          const desc = isInvoiced
-            ? `Invoice ${invoiceNo}: ${p.project_name}`
-            : `Unbilled: ${p.project_name} (completed — awaiting invoice)`;
           raw.push({
-            date: isInvoiced ? (p.invoice_date || p.end_date) : p.end_date,
-            desc,
+            date: p.end_date,
+            desc: `Unbilled: ${p.project_name} (completed — awaiting invoice)`,
             debit: getProjectGrandTotal(p),
             credit: 0,
-            invoice_status: isInvoiced ? 'Invoiced' : 'Unbilled',
-            invoice_no: isInvoiced ? invoiceNo : '—',
-            invoice_date: isInvoiced ? (p.invoice_date || '—') : '—',
+            invoice_status: 'Unbilled',
+            invoice_no: '—',
+            invoice_date: '—',
             project_id: p.id,
             company_key: company.id,
             company_name: company.name,
             company_gstin: company.gstin,
           });
         });
+
+      // Raised tax invoices → one debit line each at the billed (final) amount
+      activeClientInvoices.forEach(inv => {
+        const company = resolveCompany(inv.sale_company_id);
+        const amount = parseFloat(inv.final_amount != null ? inv.final_amount : (inv.computed_total || 0));
+        const projNames = (Array.isArray(inv.project_names) && inv.project_names.length)
+          ? inv.project_names.join(', ')
+          : (inv.project_name || '');
+        raw.push({
+          date: inv.invoice_date,
+          desc: `Invoice ${inv.invoice_no || '—'}${projNames ? `: ${projNames}` : ''}`,
+          debit: amount,
+          credit: 0,
+          invoice_status: 'Invoiced',
+          invoice_no: inv.invoice_no || '—',
+          invoice_date: inv.invoice_date || '—',
+          company_key: company.id,
+          company_name: company.name,
+          company_gstin: company.gstin,
+        });
+      });
       payments
         .filter(p => p.client_id === client.id)
         .forEach(p => {
@@ -330,7 +359,7 @@ const PublicLedger = () => {
     });
 
     return { allRows: result, fyList: ['ALL', ...sortedFYs] };
-  }, [client, projects, payments, vendorPayments, purchaseInvoices, companyFilterId]);
+  }, [client, projects, payments, vendorPayments, purchaseInvoices, taxInvoices, companyFilterId]);
 
   // Group client's invoiced projects by invoice_no for the Invoice View panel
   const invoiceGroups = useMemo(() => {

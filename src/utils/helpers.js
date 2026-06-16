@@ -75,6 +75,44 @@ export const formatCurrency = (amount) => {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount || 0);
 };
 
+// Convert a number to Indian-system words for invoices, e.g.
+//   169431 → "One Lakh Sixty Nine Thousand Four Hundred Thirty One Rupees only"
+//   100.50 → "One Hundred Rupees and Fifty Paise only"
+export const amountToWordsINR = (amount) => {
+  const num = Math.abs(round2(amount));
+  const rupees = Math.floor(num);
+  const paise = Math.round((num - rupees) * 100);
+
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
+    'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+  const twoDigits = (n) => n < 20 ? ones[n] : `${tens[Math.floor(n / 10)]}${n % 10 ? ' ' + ones[n % 10] : ''}`;
+  const threeDigits = (n) => {
+    const h = Math.floor(n / 100);
+    const r = n % 100;
+    return `${h ? ones[h] + ' Hundred' + (r ? ' ' : '') : ''}${r ? twoDigits(r) : ''}`;
+  };
+
+  const inWords = (n) => {
+    if (n === 0) return 'Zero';
+    let words = '';
+    const crore = Math.floor(n / 10000000); n %= 10000000;
+    const lakh = Math.floor(n / 100000); n %= 100000;
+    const thousand = Math.floor(n / 1000); n %= 1000;
+    const hundred = n;
+    if (crore) words += `${inWords(crore)} Crore `;
+    if (lakh) words += `${twoDigits(lakh)} Lakh `;
+    if (thousand) words += `${twoDigits(thousand)} Thousand `;
+    if (hundred) words += threeDigits(hundred);
+    return words.trim();
+  };
+
+  let result = `${inWords(rupees)} Rupees`;
+  if (paise > 0) result += ` and ${twoDigits(paise)} Paise`;
+  return `${result} only`;
+};
+
 export const formatCurrencyPDF = (amount) => {
   return "Rs. " + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount || 0);
 };
@@ -361,21 +399,52 @@ export const getProjectGSTBreakdown = (project, orgGSTIN, clientGSTIN) => {
   const items = [];
 
   if (project.package_cost && project.package_cost > 0) {
-    const gstRate = parseFloat(project.package_cost_gst || 18);
-    const taxable = parseFloat(project.package_cost);
-    const gstAmt = taxable * (gstRate / 100);
-    items.push({
-      description: 'Package Cost',
-      hsn: project.hsn_code || '998599',
-      taxable,
-      gstRate,
-      cgstRate: isIntraState ? gstRate / 2 : 0,
-      sgstRate: isIntraState ? gstRate / 2 : 0,
-      igstRate: isIntraState ? 0 : gstRate,
-      cgstAmt: isIntraState ? gstAmt / 2 : 0,
-      sgstAmt: isIntraState ? gstAmt / 2 : 0,
-      igstAmt: isIntraState ? 0 : gstAmt,
-      total: taxable + gstAmt,
+    const pkg = parseFloat(project.package_cost);
+    // A single agreed package price is split RATE-WISE using the GST-rate mix of
+    // the underlying items + logistics, so mixed-rate packages produce a correct
+    // per-slab GST (not one blended rate). Falls back to the single package GST
+    // rate when there is no rate mix to learn from (pure lump sum, no items).
+    const buckets = {};
+    let mixBase = 0;
+    (project.items || []).forEach((it) => {
+      const b = parseFloat(it.amount || 0);
+      if (b > 0) { const r = parseFloat(it.gst_rate != null ? it.gst_rate : 18); buckets[r] = (buckets[r] || 0) + b; mixBase += b; }
+    });
+    if (project.logistics_costs) {
+      Object.entries(project.logistics_costs).forEach(([key, cost]) => {
+        if (!cost) return;
+        const labelBase = key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ');
+        getLogisticsLines(key, labelBase, cost).forEach((line) => {
+          const b = parseFloat(line.amount || 0);
+          if (b > 0) { const r = parseFloat(line.gst != null ? line.gst : 18); buckets[r] = (buckets[r] || 0) + b; mixBase += b; }
+        });
+      });
+    }
+    const rateEntries = mixBase > 0
+      ? Object.entries(buckets).map(([r, b]) => ({ rate: parseFloat(r), base: b })).sort((a, b) => b.rate - a.rate)
+      : [{ rate: parseFloat(project.package_cost_gst || 18), base: pkg }];
+    const totalBase = rateEntries.reduce((s, e) => s + e.base, 0) || 1;
+    const multiRate = rateEntries.length > 1;
+    let allocated = 0;
+    rateEntries.forEach((e, idx) => {
+      // Last slab absorbs the rounding remainder so the slabs sum exactly to the package.
+      const taxable = idx === rateEntries.length - 1 ? round2(pkg - allocated) : round2(pkg * (e.base / totalBase));
+      allocated = round2(allocated + taxable);
+      const gstRate = e.rate;
+      const gstAmt = taxable * (gstRate / 100);
+      items.push({
+        description: multiRate ? `Package Cost @ ${gstRate}%` : 'Package Cost',
+        hsn: project.hsn_code || '998599',
+        taxable,
+        gstRate,
+        cgstRate: isIntraState ? gstRate / 2 : 0,
+        sgstRate: isIntraState ? gstRate / 2 : 0,
+        igstRate: isIntraState ? 0 : gstRate,
+        cgstAmt: isIntraState ? gstAmt / 2 : 0,
+        sgstAmt: isIntraState ? gstAmt / 2 : 0,
+        igstAmt: isIntraState ? 0 : gstAmt,
+        total: taxable + gstAmt,
+      });
     });
   } else {
     // Equipment items

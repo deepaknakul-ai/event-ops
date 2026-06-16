@@ -17,7 +17,7 @@ import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc,
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 
-import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS } from '../utils/constants';
+import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS, GST_STATE_CODES } from '../utils/constants';
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
@@ -122,6 +122,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   // Expense proof policy settings
   const [expenseProofSettings, setExpenseProofSettings] = useState({ threshold: 0, maxSizeMb: 2 });
+  const [orgGstin, setOrgGstin] = useState('');
   useEffect(() => {
     const fetchSettings = async () => {
       try {
@@ -129,11 +130,58 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         if (snap.exists()) {
           const d = snap.data();
           setExpenseProofSettings({ threshold: d.expense_proof_threshold || 0, maxSizeMb: d.expense_proof_max_size_mb || 2 });
+          setOrgGstin(d.gstin || '');
         }
       } catch (_) {}
     };
     fetchSettings();
   }, [db, appId]);
+
+  // Per-project GST split (sales side) decided from client GSTIN vs org state.
+  const gstSplitLabel = (supplyType) => supplyType === 'IGST' ? 'Inter-state (IGST)' : 'Intra-state (CGST + SGST)';
+  const stateName = (code) => {
+    const c = String(code || '').slice(0, 2);
+    return GST_STATE_CODES[c] ? `${c}-${GST_STATE_CODES[c]}` : (c || '—');
+  };
+  const getProjectSalesGST = (project) => {
+    if (!project) return null;
+    const clientGstin = project.party_company_gstin || clients.find(c => c.id === project.client_id)?.gstin || '';
+    const bd = getProjectGSTBreakdown(project, orgGstin, clientGstin);
+    return { ...bd, clientGstin };
+  };
+
+  // Input-GST (cost side): split outsourcing GST per vendor, decided from each
+  // vendor's GSTIN state vs the org state.
+  const getProjectInputGST = (project) => {
+    if (!project) return null;
+    const orgState = (orgGstin || '').slice(0, 2);
+    const byVendor = {};
+    const add = (vendorId, base, gst) => {
+      const vendor = clients.find(c => c.id === vendorId);
+      const vg = vendor?.gstin || '';
+      const intra = orgState ? (vg.slice(0, 2) ? orgState === vg.slice(0, 2) : true) : false;
+      const key = vendorId || 'unknown';
+      if (!byVendor[key]) byVendor[key] = { name: vendor?.name || 'Unregistered / unknown vendor', gstin: vg, supplyType: intra ? 'CGST_SGST' : 'IGST', base: 0, gst: 0, cgst: 0, sgst: 0, igst: 0 };
+      const v = byVendor[key];
+      v.base += base; v.gst += gst;
+      if (intra) { v.cgst += gst / 2; v.sgst += gst / 2; } else { v.igst += gst; }
+    };
+    (project.purchase_orders || []).filter(po => po.status !== 'Cancelled').forEach(po => {
+      const eff = getEffectivePOCost(po); add(po.vendor_id, eff.base, eff.gst);
+    });
+    (project.vendor_allocations || []).filter(a => !a.po_id).forEach(a => {
+      const usePkg = a.package_cost && a.package_cost > 0;
+      const base = usePkg ? a.package_cost : (a.amount || 0);
+      const rate = usePkg ? (a.package_cost_gst || 0) : (a.gst || 0);
+      add(a.vendor_id, base, base * (rate / 100) || 0);
+    });
+    const vendors = Object.values(byVendor).filter(v => v.gst > 0 || v.base > 0);
+    if (!vendors.length) return null;
+    const totals = vendors.reduce((acc, v) => {
+      acc.base += v.base; acc.gst += v.gst; acc.cgst += v.cgst; acc.sgst += v.sgst; acc.igst += v.igst; return acc;
+    }, { base: 0, gst: 0, cgst: 0, sgst: 0, igst: 0 });
+    return { vendors, totals };
+  };
 
   // --- Order Confirmation State ---
   const [isConfirmOrderOpen, setIsConfirmOrderOpen] = useState(false);
@@ -629,15 +677,23 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     const selectedCompany = clientCompanies.find(c => c.id === newProj.party_company_id) || clientCompanies[0] || null;
 
     // Ensure default invoice status
-    const data = { 
-        ...newProj, 
+    const data = {
+        ...newProj,
         invoice_status: newProj.invoice_status || 'Not Invoiced',
       party_company_id: selectedCompany?.id || '',
       party_company_name: selectedCompany?.name || '',
       party_company_gstin: selectedCompany?.gstin || '',
       party_company_address: selectedCompany?.address || '',
-        updated_at: serverTimestamp() 
+        updated_at: serverTimestamp()
     };
+
+    // Persist the GST supply type (decided from client GSTIN vs org state) so the
+    // invoice, reports and clubbing checks stay consistent with the project.
+    try {
+      const bd = getProjectGSTBreakdown(data, orgGstin, selectedCompany?.gstin || '');
+      data.supply_type = bd.supplyType;          // 'CGST_SGST' | 'IGST'
+      data.place_of_supply = bd.placeOfSupply;   // 2-digit state code
+    } catch (_) { /* non-fatal */ }
 
     if (editingId) {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', editingId), data);
@@ -1100,21 +1156,32 @@ const generateQuotationPDF = async () => {
       });
     }
 
-    // Totals Table
+    // Totals Table — GST split by place of supply (client GSTIN vs org state)
+    const salesGst = getProjectSalesGST(selectedProject);
+    const gstRows = salesGst
+      ? (salesGst.supplyType === 'IGST'
+          ? [['IGST', formatCurrencyPDF(salesGst.totals.igstAmt)]]
+          : [['CGST', formatCurrencyPDF(salesGst.totals.cgstAmt)], ['SGST', formatCurrencyPDF(salesGst.totals.sgstAmt)]])
+      : [['Total GST', formatCurrencyPDF(totals.gst_output)]];
     let summaryBody;
     if (totals.use_package_cost) {
         summaryBody = [
             ['Package Cost (excl. GST)', formatCurrencyPDF(totals.package_cost)],
-            [`GST (${selectedProject.package_cost_gst || 18}%)`, formatCurrencyPDF(totals.total_revenue - totals.package_cost)],
+            ...gstRows,
             ['Grand Total', formatCurrencyPDF(grandTotal)]
         ];
     } else {
         const subtotal = totals.equipment + totals.logistics;
         summaryBody = [
             ['Subtotal', formatCurrencyPDF(subtotal)],
-            ['Total GST', formatCurrencyPDF(totals.gst_output)],
+            ...gstRows,
             ['Grand Total', formatCurrencyPDF(grandTotal)]
         ];
+    }
+    if (salesGst) {
+      doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(90, 90, 90);
+      doc.text(`Place of Supply: ${stateName(salesGst.placeOfSupply)} · ${salesGst.supplyType === 'IGST' ? 'Inter-state (IGST)' : 'Intra-state (CGST+SGST)'}`, margin, y + 8);
+      doc.setTextColor(0, 0, 0);
     }
 
     autoTable(doc, {
@@ -2756,10 +2823,11 @@ const generateQuotationPDF = async () => {
     let totalRevenueBase = 0, gstOutput = 0;
     
     if (hasPackageCost) {
-      // Use package cost
-      const gstRate = selectedProject.package_cost_gst || 18;
-      equipmentBase = selectedProject.package_cost;
-      equipmentGST = (selectedProject.package_cost * gstRate) / 100;
+      // Package cost — GST split RATE-WISE from the item/logistics rate mix
+      // (mirrors getProjectGSTBreakdown), not a single blended rate.
+      const bd = getProjectGSTBreakdown(selectedProject, '', '');
+      equipmentBase = bd.totals.taxable;
+      equipmentGST = bd.totals.cgstAmt + bd.totals.sgstAmt + bd.totals.igstAmt;
       gstOutput = equipmentGST;
       totalRevenueBase = equipmentBase;
     } else {
@@ -3577,7 +3645,7 @@ const generateQuotationPDF = async () => {
                   {totals.use_package_cost ? (
                     <>
                       <div className="flex justify-between"><span className="text-slate-600">Package Cost</span><span className="font-medium text-slate-600">{formatCurrency(totals.equipment)}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-600">GST ({selectedProject.package_cost_gst || 18}%)</span><span className="font-medium text-green-600">+{formatCurrency(totals.gst_output)}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-600">GST <span className="text-[10px] text-slate-400">(rate-wise)</span></span><span className="font-medium text-green-600">+{formatCurrency(totals.gst_output)}</span></div>
                     </>
                   ) : (
                     <>
@@ -3590,6 +3658,55 @@ const generateQuotationPDF = async () => {
                     <span>Grand Total</span>
                     <span>{formatCurrency(totals.total_revenue)}</span>
                   </div>
+                  {(() => {
+                    const g = getProjectSalesGST(selectedProject);
+                    if (!g) return null;
+                    const t = g.totals;
+                    return (
+                      <div className="border-t border-indigo-200 pt-3 mt-1">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500">GST Split (Sales)</span>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${g.supplyType === 'IGST' ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{gstSplitLabel(g.supplyType)}</span>
+                        </div>
+                        <div className="flex justify-between text-xs text-slate-600"><span>Place of Supply</span><span className="font-medium">{stateName(g.placeOfSupply)}</span></div>
+                        <div className="flex justify-between text-xs text-slate-600"><span>Taxable</span><span className="font-medium">{formatCurrency(t.taxable)}</span></div>
+                        {g.supplyType === 'IGST' ? (
+                          <div className="flex justify-between text-xs text-slate-600"><span>IGST</span><span className="font-medium">{formatCurrency(t.igstAmt)}</span></div>
+                        ) : (
+                          <>
+                            <div className="flex justify-between text-xs text-slate-600"><span>CGST</span><span className="font-medium">{formatCurrency(t.cgstAmt)}</span></div>
+                            <div className="flex justify-between text-xs text-slate-600"><span>SGST</span><span className="font-medium">{formatCurrency(t.sgstAmt)}</span></div>
+                          </>
+                        )}
+                        {!g.clientGstin && <div className="text-[10px] text-amber-600 mt-1">Client GSTIN missing — defaulted to intra-state. Add the client's GSTIN for an accurate split.</div>}
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const inp = getProjectInputGST(selectedProject);
+                    if (!inp) return null;
+                    const t = inp.totals;
+                    return (
+                      <div className="border-t border-indigo-200 pt-3 mt-1">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Input GST (Outsourcing)</span>
+                        <div className="mt-1 space-y-0.5">
+                          {inp.vendors.map((v, i) => (
+                            <div key={i} className="flex justify-between text-xs text-slate-600">
+                              <span className="truncate max-w-[60%]">{v.name} <span className={`text-[9px] font-semibold ${v.supplyType === 'IGST' ? 'text-orange-600' : 'text-emerald-600'}`}>{v.supplyType === 'IGST' ? 'IGST' : 'C+S'}</span></span>
+                              <span className="font-medium">{formatCurrency(v.gst)}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex justify-between text-xs text-slate-700 mt-1 pt-1 border-t border-indigo-100">
+                          <span className="font-semibold">Total Input GST</span>
+                          <span className="font-semibold">{formatCurrency(t.gst)}{t.igst > 0 && (t.cgst > 0 || t.sgst > 0) ? '' : ''}</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400">
+                          <span>CGST {formatCurrency(t.cgst)} · SGST {formatCurrency(t.sgst)} · IGST {formatCurrency(t.igst)}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {totals.reimbursable > 0 && (
                     <>
                       <div className="flex justify-between pt-1">

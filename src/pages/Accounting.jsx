@@ -31,6 +31,7 @@ import {
   Download,
   Clock,
   FileText,
+  Search,
 } from 'lucide-react';
 import { formatCurrency, getFYFromDate, getProjectGSTBreakdown } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
@@ -66,6 +67,7 @@ const TABS = [
   { id: 'ageing',              label: 'Ageing Report',         icon: Clock,           group: 'reports', hint: '0-30-60-90 day outstanding' },
   { id: 'gst',                 label: 'GST Reports',           icon: Receipt,         group: 'reports', hint: 'GSTR-1, GSTR-2, HSN summary' },
   { id: 'tds',                 label: 'TDS Tracker',           icon: Receipt,         group: 'reports', hint: 'TDS deducted & deductible' },
+  { id: 'ai_review',           label: 'AI Entries',            icon: Sparkles,        group: 'reports', hint: 'Entries created by the AI assistant — review with the original message (for CA/accountant)' },
   // ── Admin & Setup (accountant-level) ──
   { id: 'journal',             label: 'All Entries',           icon: BookOpen,        group: 'admin' },
   { id: 'approvals',           label: 'Approvals',             icon: ClipboardCheck,  group: 'admin', hint: 'Pending manager-created drafts' },
@@ -118,6 +120,8 @@ const Accounting = ({
   lockedFYs = [],
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
+  const [aiReviewSearch, setAiReviewSearch] = useState('');
+  const [aiReviewFilter, setAiReviewFilter] = useState('all'); // all | unreviewed | reviewed | flagged
   const [fyFilter, setFyFilter] = useState(() => getFYFromDate(new Date().toISOString().slice(0, 10)));
   const [selectedLedger, setSelectedLedger] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -1241,6 +1245,66 @@ const Accounting = ({
     () => projects.map((p) => p.project_name).filter(Boolean),
     [projects]
   );
+
+  // ── AI Entries review ──────────────────────────────────────────────────────
+  // Posted journal entries that were created by the AI assistant, surfaced with
+  // the user's original message so an accountant/CA can review their impact.
+  const isAiEntry = (e) => e?.origin === 'ai_chat' || e?.source === 'chat_entry' || e?.source === 'scheduled_post';
+
+  const aiEntries = useMemo(() => {
+    const q = aiReviewSearch.trim().toLowerCase();
+    return (manualJournalEntries || [])
+      .filter(isAiEntry)
+      .filter((e) => fyFilter === 'all' || e.fy === fyFilter)
+      .filter((e) => {
+        if (aiReviewFilter === 'reviewed') return !!e.ai_reviewed;
+        if (aiReviewFilter === 'unreviewed') return !e.ai_reviewed;
+        if (aiReviewFilter === 'flagged') return (e.ai_issues || []).some((i) => i.level === 'warning' || i.level === 'error');
+        return true;
+      })
+      .filter((e) => !q
+        || (e.ai_prompt || '').toLowerCase().includes(q)
+        || (e.narration || '').toLowerCase().includes(q)
+        || (e.voucher_no || '').toLowerCase().includes(q)
+        || (e.party_name || '').toLowerCase().includes(q))
+      .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.created_at || '').localeCompare(a.created_at || ''));
+  }, [manualJournalEntries, aiReviewSearch, aiReviewFilter, fyFilter]);
+
+  const aiReviewedCount = useMemo(() => aiEntries.filter((e) => e.ai_reviewed).length, [aiEntries]);
+
+  const toggleAiReviewed = async (entry) => {
+    if (!canEditFinance) return alert('Access denied: only finance roles can mark entries reviewed.');
+    const now = new Date().toISOString();
+    const next = !entry.ai_reviewed;
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', entry.id), next
+        ? { ai_reviewed: true, ai_reviewed_by: user?.uid || '', ai_reviewed_by_name: user?.email || user?.displayName || '', ai_reviewed_at: now }
+        : { ai_reviewed: false, ai_reviewed_by: '', ai_reviewed_by_name: '', ai_reviewed_at: '' });
+      logAction('journal_entries', next ? 'ai_review' : 'ai_unreview', entry.id, { voucher_no: entry.voucher_no }, entry.voucher_no);
+      addToast(next ? `Marked ${entry.voucher_no} reviewed` : `Reopened ${entry.voucher_no}`, next ? 'success' : 'info');
+    } catch (e) { console.error(e); addToast('Could not update review status', 'error'); }
+  };
+
+  const exportAiEntries = () => {
+    if (!aiEntries.length) return addToast('No AI entries to export', 'info');
+    const rows = aiEntries.map((e) => ({
+      Date: e.date || '',
+      'Voucher No': e.voucher_no || '',
+      'User Message': e.ai_prompt || '',
+      Narration: e.narration || '',
+      Intent: e.ai_intent || '',
+      Confidence: typeof e.ai_confidence === 'number' ? `${Math.round(e.ai_confidence * 100)}%` : '',
+      Model: e.ai_model || '',
+      Entries: (e.entries || []).map((l) => `Dr ${l.debitAccount} / Cr ${l.creditAccount} = ${l.amount}`).join(' ; '),
+      Amount: (e.entries || []).reduce((s, l) => s + (parseFloat(l.amount) || 0), 0),
+      Issues: (e.ai_issues || []).map((i) => `${i.level}: ${i.message}`).join(' | '),
+      'Created By': e.created_by || '',
+      Reviewed: e.ai_reviewed ? `Yes (${e.ai_reviewed_by_name || e.ai_reviewed_by || ''} ${e.ai_reviewed_at ? e.ai_reviewed_at.slice(0, 10) : ''})` : 'No',
+    }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'AI Entries');
+    XLSX.writeFile(wb, `AI_Entries_${fyFilter === 'all' ? 'all' : fyFilter}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
 
   const handleChatPostEntry = async (parsed) => {
     if (!canEditFinance) throw new Error('Access denied.');
@@ -3075,6 +3139,108 @@ const Accounting = ({
               </>
             );
           })()}
+        </div>
+      )}
+
+      {activeTab === 'ai_review' && (
+        <div className="space-y-3">
+          {/* Header + filters */}
+          <div className="flex flex-col gap-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="flex items-center gap-2 text-sm font-bold text-indigo-700"><Sparkles size={16} /> AI-Created Entries</h3>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Posted journal entries created via the Ask Assistant, shown with the original message so an accountant/CA can review their impact.
+                {' '}<span className="font-semibold text-slate-700">{aiReviewedCount}/{aiEntries.length} reviewed</span>.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input className="w-48 rounded-lg border border-slate-300 pl-8 pr-2 py-1.5 text-xs text-slate-800" placeholder="Search message / voucher / party…" value={aiReviewSearch} onChange={(e) => setAiReviewSearch(e.target.value)} />
+              </div>
+              <select className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs text-slate-700" value={aiReviewFilter} onChange={(e) => setAiReviewFilter(e.target.value)}>
+                <option value="all">All</option>
+                <option value="unreviewed">Unreviewed</option>
+                <option value="reviewed">Reviewed</option>
+                <option value="flagged">Flagged (has warnings)</option>
+              </select>
+              <button onClick={exportAiEntries} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Export Excel</button>
+            </div>
+          </div>
+
+          {aiEntries.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-400">No AI-created entries{aiReviewFilter !== 'all' ? ' for this filter' : ''}.</div>
+          ) : (
+            <div className="space-y-2">
+              {aiEntries.map((e) => {
+                const total = (e.entries || []).reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+                const conf = typeof e.ai_confidence === 'number' ? Math.round(e.ai_confidence * 100) : null;
+                const warnings = (e.ai_issues || []).filter((i) => i.level === 'warning' || i.level === 'error');
+                const isLlm = (e.ai_model || '').startsWith('llm:');
+                return (
+                  <div key={e.id} className={`rounded-xl border bg-white p-3 shadow-sm ${e.ai_reviewed ? 'border-green-200' : warnings.length ? 'border-amber-200' : 'border-slate-200'}`}>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="font-mono font-bold text-indigo-700">{e.voucher_no || '—'}</span>
+                      <span className="text-slate-500">{e.date || '—'}</span>
+                      <span className={`rounded-full border px-2 py-0.5 font-medium ${isLlm ? 'bg-purple-50 text-purple-700 border-purple-200' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>{isLlm ? 'AI (LLM)' : 'AI (rules)'}</span>
+                      {conf != null && <span className={`rounded-full border px-2 py-0.5 font-medium ${conf >= 80 ? 'bg-green-50 text-green-700 border-green-200' : conf >= 50 ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-red-50 text-red-700 border-red-200'}`}>conf {conf}%</span>}
+                      {e.ai_intent && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{e.ai_intent}</span>}
+                      <span className="ml-auto font-bold text-slate-800">{formatCurrency(total)}</span>
+                      {e.ai_reviewed ? (
+                        <span className="rounded-full bg-green-100 px-2 py-0.5 font-semibold text-green-700">✓ Reviewed</span>
+                      ) : (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">Pending review</span>
+                      )}
+                    </div>
+
+                    {/* User's original message */}
+                    {e.ai_prompt && (
+                      <div className="mt-2 rounded-lg border-l-4 border-indigo-300 bg-indigo-50/50 px-3 py-1.5 text-sm text-slate-700 italic">“{e.ai_prompt}”</div>
+                    )}
+
+                    {/* Resulting double-entry */}
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <tbody>
+                          {(e.entries || []).map((l, i) => (
+                            <tr key={i} className="border-b border-slate-50 last:border-0">
+                              <td className="py-1 pr-2 text-slate-700">Dr <span className="font-medium">{l.debitAccount}</span></td>
+                              <td className="py-1 pr-2 text-slate-700">Cr <span className="font-medium">{l.creditAccount}</span></td>
+                              <td className="py-1 text-right font-mono text-slate-800">{formatCurrency(l.amount)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {e.narration && <div className="mt-1 text-xs text-slate-500">{e.narration}</div>}
+
+                    {/* Issues surfaced at posting time */}
+                    {warnings.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {warnings.map((i, idx) => (
+                          <span key={idx} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${i.level === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`} title={i.message}>{i.code || i.level}</span>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[11px] text-slate-400">
+                      <span>
+                        {e.ai_reviewed
+                          ? `Reviewed by ${e.ai_reviewed_by_name || e.ai_reviewed_by || '—'}${e.ai_reviewed_at ? ` on ${e.ai_reviewed_at.slice(0, 10)}` : ''}`
+                          : `Created ${e.created_at ? e.created_at.slice(0, 10) : ''}`}
+                      </span>
+                      {canEditFinance && (
+                        <button
+                          onClick={() => toggleAiReviewed(e)}
+                          className={`rounded-lg px-3 py-1 text-xs font-semibold ${e.ai_reviewed ? 'border border-slate-300 text-slate-600 hover:bg-slate-50' : 'bg-green-600 text-white hover:bg-green-700'}`}
+                        >{e.ai_reviewed ? 'Reopen' : 'Mark reviewed'}</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

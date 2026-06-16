@@ -152,6 +152,52 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
     return logs.sort((a, b) => new Date(a.checkIn) - new Date(b.checkIn));
   }, [monthLogs, filterEmployee]);
 
+  // 0b: Calendar view for a single selected employee (date-wise shows + hours)
+  const employeeMonthCalendar = useMemo(() => {
+    if (!filterEmployee) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    const logs = monthLogs.filter(l => l.employeeId === filterEmployee && l.checkIn);
+    const byDate = {};
+    logs.forEach(l => {
+      const d = new Date(l.checkIn);
+      const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      if (!byDate[key]) byDate[key] = { totalHours: 0, sessions: 0, hasOpen: false, shows: {} };
+      const hrs = getLogHours(l);
+      byDate[key].totalHours += hrs;
+      byDate[key].sessions += 1;
+      if (l.checkIn && !l.checkOut) byDate[key].hasOpen = true;
+      const proj = l.project_id ? projMap[l.project_id] : null;
+      const name = l.project_name || proj?.project_name || proj?.name
+        || (l.location && l.location !== 'Site' ? l.location : 'General');
+      const pid = l.project_id || `loc:${name}`;
+      if (!byDate[key].shows[pid]) byDate[key].shows[pid] = { id: l.project_id || null, name, hours: 0, sessions: 0, status: proj?.status || '', location: l.location || '' };
+      byDate[key].shows[pid].hours += hrs;
+      byDate[key].shows[pid].sessions += 1;
+    });
+    const dates = Object.keys(byDate).sort();
+    const detail = dates.map(key => ({
+      date: key,
+      totalHours: Math.round(byDate[key].totalHours * 100) / 100,
+      sessions: byDate[key].sessions,
+      hasOpen: byDate[key].hasOpen,
+      shows: Object.values(byDate[key].shows)
+        .map(s => ({ ...s, hours: Math.round(s.hours * 100) / 100, completed: ['Completed', 'Closed'].includes(s.status) }))
+        .sort((a, b) => b.hours - a.hours),
+    }));
+    const distinctShows = new Set();
+    detail.forEach(dd => dd.shows.forEach(s => { if (s.id) distinctShows.add(s.id); }));
+    return {
+      byDate,
+      detail,
+      daysInMonth: new Date(y, m, 0).getDate(),
+      firstWeekday: new Date(y, m - 1, 1).getDay(),
+      totalHours: Math.round(logs.reduce((s, l) => s + getLogHours(l), 0) * 100) / 100,
+      daysPresent: dates.length,
+      distinctShows: distinctShows.size,
+      pad,
+    };
+  }, [filterEmployee, monthLogs, y, m, projMap]);
+
   // 1: Employee Hours Summary
   const hoursSummaryData = useMemo(() => {
     return activeEmployees.map(e => {
@@ -889,7 +935,109 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
       </div>
 
       {/* ═══════ REPORT 0: Monthly Attendance ═══════ */}
-      {reportType === 0 && (
+      {/* ═══════ REPORT 0 (employee selected): Calendar + date-wise shows ═══════ */}
+      {reportType === 0 && filterEmployee && employeeMonthCalendar && (() => {
+        const cal = employeeMonthCalendar;
+        const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const cells = [];
+        for (let i = 0; i < cal.firstWeekday; i++) cells.push(null);
+        for (let d = 1; d <= cal.daysInMonth; d++) cells.push(d);
+        const keyFor = (day) => `${y}-${cal.pad(m)}-${cal.pad(day)}`;
+        const bandClass = (h) => h >= 8 ? 'bg-green-100 border-green-300 text-green-800'
+          : h >= 4 ? 'bg-amber-100 border-amber-300 text-amber-800'
+          : h > 0 ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-white border-slate-100 text-slate-300';
+        const fmtKey = (key) => { const [yy, mm, dd] = key.split('-'); return new Date(Number(yy), Number(mm) - 1, Number(dd)).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }); };
+        return (
+          <div className="space-y-4">
+            {/* Summary cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: 'Days Present', value: `${cal.daysPresent} / ${cal.daysInMonth}`, color: 'bg-indigo-50 border-indigo-200' },
+                { label: 'Total Hours', value: cal.totalHours.toFixed(1), color: 'bg-green-50 border-green-200' },
+                { label: 'Shows Worked', value: cal.distinctShows, color: 'bg-purple-50 border-purple-200' },
+                { label: 'Avg Hrs / Present Day', value: cal.daysPresent ? (cal.totalHours / cal.daysPresent).toFixed(1) : '0', color: 'bg-amber-50 border-amber-200' },
+              ].map(c => (
+                <div key={c.label} className={`rounded-xl border p-3 ${c.color}`}>
+                  <div className="text-[11px] font-medium text-slate-500">{c.label}</div>
+                  <div className="text-lg font-bold text-slate-800 mt-0.5">{c.value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Calendar grid */}
+            <div className="rounded-xl border bg-white shadow-sm p-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-bold text-slate-700">{getEmpName(filterEmployee)} — {monthLabel}</h3>
+                <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded bg-green-100 border border-green-300" /> ≥8h</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded bg-amber-100 border border-amber-300" /> 4–8h</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded bg-blue-50 border border-blue-200" /> &lt;4h</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-500" /> active</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {weekdays.map(w => <div key={w} className="text-center text-[10px] font-bold uppercase text-slate-400 py-1">{w}</div>)}
+                {cells.map((day, i) => {
+                  if (day === null) return <div key={`e${i}`} />;
+                  const info = cal.byDate[keyFor(day)];
+                  const h = info ? Math.round(info.totalHours * 10) / 10 : 0;
+                  return (
+                    <div key={day} className={`min-h-[58px] rounded-lg border p-1 text-right ${bandClass(h)}`} title={info ? `${h.toFixed(1)}h · ${Object.keys(info.shows).length} show(s)` : 'No attendance'}>
+                      <div className="text-[11px] font-semibold leading-none flex items-center justify-end gap-1">
+                        {info?.hasOpen && <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                        {day}
+                      </div>
+                      {info && (
+                        <div className="mt-1 text-left">
+                          <div className="text-[11px] font-bold">{h.toFixed(1)}h</div>
+                          <div className="text-[9px] opacity-70 leading-tight truncate">{Object.keys(info.shows).length} show{Object.keys(info.shows).length > 1 ? 's' : ''}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Date-wise show & time detail */}
+            <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+              <div className="px-3 py-2 border-b bg-slate-50 text-sm font-bold text-slate-700">Date-wise detail — shows attended & time per show</div>
+              {cal.detail.length === 0 ? (
+                <p className="text-center text-sm text-slate-400 py-8">No attendance for {monthLabel}.</p>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {cal.detail.map(d => (
+                    <div key={d.date} className="p-3">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <div className="font-semibold text-slate-800 text-sm">{fmtKey(d.date)}{d.hasOpen && <span className="ml-2 text-[10px] font-semibold text-blue-600">● active shift</span>}</div>
+                        <div className="text-sm font-bold text-indigo-700">{d.totalHours.toFixed(1)}h <span className="text-[11px] font-normal text-slate-400">· {d.sessions} session{d.sessions > 1 ? 's' : ''}</span></div>
+                      </div>
+                      <div className="space-y-1">
+                        {d.shows.map((s, idx) => (
+                          <div key={idx} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5 text-sm">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="truncate text-slate-700">{s.name}</span>
+                              {s.id && (
+                                <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded ${s.completed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {s.completed ? 'Completed' : (s.status || 'Attended')}
+                                </span>
+                              )}
+                            </div>
+                            <span className="shrink-0 font-mono font-semibold text-slate-700">{s.hours.toFixed(1)}h</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════ REPORT 0 (all employees): flat table ═══════ */}
+      {reportType === 0 && !filterEmployee && (
         <div className="rounded-xl border bg-white shadow-sm overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="border-b text-left text-xs text-slate-500 uppercase bg-slate-50">

@@ -106,7 +106,13 @@ service cloud.firestore {
                        'payments', 'payouts', 'vendor_payments',
                        'tax_invoices', 'purchase_invoices']
       ) ? (
-          isFinanceWriter(appId) && (
+          // Review-only metadata update on an AI journal entry — allow any finance
+          // role (incl. accountant) to flag it reviewed without unlocking financials.
+          (collection == 'journal_entries' && resource != null
+            && hasAnyRole(appId, ['admin', 'accountant', 'manager'])
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['ai_reviewed', 'ai_reviewed_by', 'ai_reviewed_by_name', 'ai_reviewed_at']))
+          || (isFinanceWriter(appId) && (
             collection != 'journal_drafts'
             || isAdmin(appId)
             // CREATE: managers may set approval_status to 'pending' only; no approver stamps.
@@ -146,7 +152,7 @@ service cloud.firestore {
             && (request.resource.data.get('status', '') != 'Cancelled'
                 || resource.data.get('status', '') == 'Cancelled'
                 || isAdmin(appId))
-          ))
+          )))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 
       // Deletes: finance collections admin-only; everything else admin/manager.

@@ -37,7 +37,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [backupStatus, setBackupStatus] = useState('idle');
   const [restoreStatus, setRestoreStatus] = useState('idle');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
-  const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2 });
+  const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2, msme_reg: '', signature: '' });
   const [bankAccounts, setBankAccounts] = useState([]);
   const [defaultBankId, setDefaultBankId] = useState('');
   const [bankForm, setBankForm] = useState({ bank_name: '', account_name: '', account_no: '', ifsc: '', branch: '', upi_id: '' });
@@ -69,7 +69,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             const orgSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
             if (orgSnap.exists()) {
                 const orgData = orgSnap.data();
-                setOrgForm({ name: orgData.name||'', address: orgData.address||'', pan: orgData.pan||'', gstin: orgData.gstin||'', logo: orgData.logo||'', currency: orgData.currency||'INR', email: orgData.email||'', phone: orgData.phone||'', po_terms: orgData.po_terms||'', challan_terms: orgData.challan_terms||'', payment_terms: orgData.payment_terms||'', invoice_terms: orgData.invoice_terms||'', gst_api_key: orgData.gst_api_key||'', expense_proof_threshold: orgData.expense_proof_threshold || 0, expense_proof_max_size_mb: orgData.expense_proof_max_size_mb || 2 });
+                setOrgForm({ name: orgData.name||'', address: orgData.address||'', pan: orgData.pan||'', gstin: orgData.gstin||'', logo: orgData.logo||'', currency: orgData.currency||'INR', email: orgData.email||'', phone: orgData.phone||'', po_terms: orgData.po_terms||'', challan_terms: orgData.challan_terms||'', payment_terms: orgData.payment_terms||'', invoice_terms: orgData.invoice_terms||'', gst_api_key: orgData.gst_api_key||'', expense_proof_threshold: orgData.expense_proof_threshold || 0, expense_proof_max_size_mb: orgData.expense_proof_max_size_mb || 2, msme_reg: orgData.msme_reg||'', signature: orgData.signature||'' });
                 setBankAccounts(orgData.bank_accounts || []);
                 setDefaultBankId(orgData.default_bank_id || '');
                 const storedColors = orgData?.calendar_color_settings || {};
@@ -240,6 +240,18 @@ const AdminTools = ({ db, appId, logAction, role }) => {
         const reader = new FileReader();
         reader.onloadend = () => {
             setOrgForm(prev => ({ ...prev, logo: reader.result }));
+        };
+        reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSignatureUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        if (file.size > 500000) return alert("File too large. Max 500KB.");
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            setOrgForm(prev => ({ ...prev, signature: reader.result }));
         };
         reader.readAsDataURL(file);
     }
@@ -478,6 +490,17 @@ const AdminTools = ({ db, appId, logAction, role }) => {
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Challan Standard Terms</label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={3} value={orgForm.challan_terms || ''} onChange={e => setOrgForm({...orgForm, challan_terms: e.target.value})} placeholder="Default terms for Challans..." /></div>
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Default Payment Terms <span className="text-indigo-500 font-normal">(used in Proforma Invoices)</span></label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={3} value={orgForm.payment_terms || ''} onChange={e => setOrgForm({...orgForm, payment_terms: e.target.value})} placeholder="e.g. 50% advance on confirmation, balance before delivery..." /></div>
                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Invoice Terms &amp; Conditions <span className="text-indigo-500 font-normal">(printed on every Tax Invoice)</span></label><textarea className="w-full rounded border border-slate-300 p-2 bg-white text-black" rows={4} value={orgForm.invoice_terms || ''} onChange={e => setOrgForm({...orgForm, invoice_terms: e.target.value})} placeholder="e.g. Payment due within 30 days. Goods once sold are not returnable. Subject to local jurisdiction..." /></div>
+                <div><label className="block text-sm font-bold text-slate-700 mb-1">MSME / Udyam Reg. No. <span className="text-indigo-500 font-normal">(GST-format invoice)</span></label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={orgForm.msme_reg || ''} onChange={e => setOrgForm({...orgForm, msme_reg: e.target.value})} placeholder="e.g. UDYAM-DL-09-0006473" /></div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Authorized Signature <span className="text-indigo-500 font-normal">(GST-format invoice, max 500KB)</span></label>
+                  <div className="flex items-center gap-3">
+                    <div className="h-12 w-24 rounded border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden">
+                      {orgForm.signature ? <img src={orgForm.signature} alt="Signature" className="h-full w-full object-contain" /> : <Image className="text-slate-300" size={18} />}
+                    </div>
+                    <input type="file" accept="image/*" onChange={handleSignatureUpload} className="text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                    {orgForm.signature && <button type="button" onClick={() => setOrgForm(prev => ({ ...prev, signature: '' }))} className="text-xs text-red-500 hover:underline">Remove</button>}
+                  </div>
+                </div>
                 <div className="md:col-span-2">
                   <label className="block text-sm font-bold text-slate-700 mb-1">
                     GST Portal API Key
