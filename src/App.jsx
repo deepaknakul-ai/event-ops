@@ -3,7 +3,7 @@
 // version 3.5.0 challan manager search added
 
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { 
   LayoutDashboard, Box, Users, Calendar, FileText, 
   DollarSign, CheckCircle, AlertTriangle, Menu, X, 
@@ -26,37 +26,39 @@ import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN,
 import { upsertPartyAccount } from './utils/partyAccounts';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
-import Dashboard from './pages/Dashboard';
-import AuditLogs from './pages/AuditLogs';
-import ProfileSettings from './pages/ProfileSettings';
-import AdminTools from './pages/AdminTools';
-import PublicLedger from './pages/PublicLedger';
-import QuoteApproval from './pages/QuoteApproval';
-import PublicReimbursable from './pages/PublicReimbursable';
-import PublicEmployeeLedger from './pages/PublicEmployeeLedger';
-import Finance from './pages/Finance';
-import Accounting from './pages/Accounting';
 import { partitionRules } from './utils/aiAccountant';
-import ChallanManager from './pages/ChallanManager';
-import DocumentsHub from './pages/DocumentsHub';
-import PurchaseInvoices from './pages/PurchaseInvoices';
-import TaxInvoices from './pages/TaxInvoices';
-import Expenses from './pages/Expenses';
-import Employees from './pages/Employees';
-import Reports from './pages/Reports';
-import BusinessReport from './pages/BusinessReport';
-import Inventory from './pages/Inventory';
-import Projects from './pages/Projects';
-import Clients from './pages/Clients';
-import ConfigurationBuilder from './pages/ConfigurationBuilder';
-import HRDashboard from './pages/HRDashboard';
-import HRAttendance from './pages/HRAttendance';
-import HRLeaves from './pages/HRLeaves';
-import HRReports from './pages/HRReports';
-import HRSettings from './pages/HRSettings';
-import HRPortal from './pages/HRPortal';
-import HRPayroll from './pages/HRPayroll';
-import DataPortal from './pages/DataPortal';
+// Route pages are code-split (React.lazy) so heavy modules (PDF/Excel/charts and
+// the large Accounting/Projects pages) load on demand instead of in the main bundle.
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const AuditLogs = lazy(() => import('./pages/AuditLogs'));
+const ProfileSettings = lazy(() => import('./pages/ProfileSettings'));
+const AdminTools = lazy(() => import('./pages/AdminTools'));
+const PublicLedger = lazy(() => import('./pages/PublicLedger'));
+const QuoteApproval = lazy(() => import('./pages/QuoteApproval'));
+const PublicReimbursable = lazy(() => import('./pages/PublicReimbursable'));
+const PublicEmployeeLedger = lazy(() => import('./pages/PublicEmployeeLedger'));
+const Finance = lazy(() => import('./pages/Finance'));
+const Accounting = lazy(() => import('./pages/Accounting'));
+const ChallanManager = lazy(() => import('./pages/ChallanManager'));
+const DocumentsHub = lazy(() => import('./pages/DocumentsHub'));
+const PurchaseInvoices = lazy(() => import('./pages/PurchaseInvoices'));
+const TaxInvoices = lazy(() => import('./pages/TaxInvoices'));
+const Expenses = lazy(() => import('./pages/Expenses'));
+const Employees = lazy(() => import('./pages/Employees'));
+const Reports = lazy(() => import('./pages/Reports'));
+const BusinessReport = lazy(() => import('./pages/BusinessReport'));
+const Inventory = lazy(() => import('./pages/Inventory'));
+const Projects = lazy(() => import('./pages/Projects'));
+const Clients = lazy(() => import('./pages/Clients'));
+const ConfigurationBuilder = lazy(() => import('./pages/ConfigurationBuilder'));
+const HRDashboard = lazy(() => import('./pages/HRDashboard'));
+const HRAttendance = lazy(() => import('./pages/HRAttendance'));
+const HRLeaves = lazy(() => import('./pages/HRLeaves'));
+const HRReports = lazy(() => import('./pages/HRReports'));
+const HRSettings = lazy(() => import('./pages/HRSettings'));
+const HRPortal = lazy(() => import('./pages/HRPortal'));
+const HRPayroll = lazy(() => import('./pages/HRPayroll'));
+const DataPortal = lazy(() => import('./pages/DataPortal'));
 import GlobalSearch from './components/GlobalSearch';
 import AppAssistant, { AppAssistantLauncher } from './components/AppAssistant';
 import NotificationBell from './components/NotificationBell';
@@ -3375,33 +3377,41 @@ const [payroll, setPayroll] = useState([]);
 
   if (location.pathname.startsWith('/ledger/')) {
     return (
-      <Routes>
-        <Route path="/ledger/:token" element={<PublicLedger />} />
-      </Routes>
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <Routes>
+          <Route path="/ledger/:token" element={<PublicLedger />} />
+        </Routes>
+      </Suspense>
     );
   }
 
   if (location.pathname.startsWith('/quote-approval/')) {
     return (
-      <Routes>
-        <Route path="/quote-approval/:token" element={<QuoteApproval />} />
-      </Routes>
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <Routes>
+          <Route path="/quote-approval/:token" element={<QuoteApproval />} />
+        </Routes>
+      </Suspense>
     );
   }
 
   if (location.pathname.startsWith('/reimbursable/')) {
     return (
-      <Routes>
-        <Route path="/reimbursable/:token" element={<PublicReimbursable />} />
-      </Routes>
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <Routes>
+          <Route path="/reimbursable/:token" element={<PublicReimbursable />} />
+        </Routes>
+      </Suspense>
     );
   }
 
   if (location.pathname.startsWith('/employee-statement/')) {
     return (
-      <Routes>
-        <Route path="/employee-statement/:token" element={<PublicEmployeeLedger />} />
-      </Routes>
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <Routes>
+          <Route path="/employee-statement/:token" element={<PublicEmployeeLedger />} />
+        </Routes>
+      </Suspense>
     );
   }
 
@@ -3698,6 +3708,7 @@ const [payroll, setPayroll] = useState([]);
               </div>
             )}
             
+              <Suspense fallback={<div className="flex items-center justify-center py-24"><LoadingSpinner /></div>}>
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" />} />
                 <Route path="/dashboard" element={<Dashboard projects={projects} expenses={expenses} role={effectiveRole} clients={clients} onProjectClick={(id) => setSelectedProjectId(id)} employees={safeEmployees} payments={payments} db={db} appId={appId} timeLogs={timeLogs} hqSettings={hqSettings} currentEmpId={effectiveEmpId} logAction={logAction} addToast={addToast} payouts={payouts} vendorPayments={vendorPayments} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} inventory={inventory} journalEntries={journalEntries} hrLeaves={hrLeaves} currentUserId={user?.uid} />} />
@@ -3730,6 +3741,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/hr/settings" element={<ProtectedRoute role={effectiveRole} resource="hr_settings"><HRSettings hqSettings={hqSettings} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
                 <Route path="/hr/portal" element={<ProtectedRoute role={effectiveRole} resource="hr_portal"><HRPortal employees={safeEmployees} timeLogs={timeLogs} hrLeaves={hrLeaves} shiftRequests={shiftRequests} penalties={penalties} hqSettings={hqSettings} projects={projects} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
               </Routes>
+              </Suspense>
             {/* ===== ADMIN IMPERSONATION MODAL ===== */}
             {showImpersonateModal && (
               <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
