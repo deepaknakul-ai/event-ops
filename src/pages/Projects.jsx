@@ -58,7 +58,7 @@ const INVOICE_FIELD_RESET = {
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast, timeLogs = [], taxInvoices = [] }) => {
+const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast, timeLogs = [], taxInvoices = [], payments = [] }) => {
   const navigate = useNavigate();
   const { projectId } = useParams();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -148,6 +148,21 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     const clientGstin = project.party_company_gstin || clients.find(c => c.id === project.client_id)?.gstin || '';
     const bd = getProjectGSTBreakdown(project, orgGstin, clientGstin);
     return { ...bd, clientGstin };
+  };
+
+  // Project lifecycle: Quoted → Confirmed → Delivered → Invoiced → Paid.
+  const getProjectLifecycle = (p) => {
+    if (!p) return null;
+    const stages = ['Quoted', 'Confirmed', 'Delivered', 'Invoiced', 'Paid'];
+    if (p.status === 'Cancelled') return { stages, current: -1, cancelled: true };
+    let current = 0;
+    if (['Confirmed', 'Ongoing', 'Completed', 'Closed'].includes(p.status)) current = 1;
+    if (['Completed', 'Closed'].includes(p.status)) current = 2;
+    if (p.invoice_status === 'Invoiced') current = 3;
+    const grand = getProjectGrandTotal(p);
+    const paid = (payments || []).filter(pay => pay.project_id === p.id).reduce((s, pay) => s + parseFloat(pay.amount || 0), 0);
+    if (p.invoice_status === 'Invoiced' && grand > 0 && paid >= grand - 1) current = 4;
+    return { stages, current, paid, grand };
   };
 
   // Input-GST (cost side): split outsourcing GST per vendor, decided from each
@@ -2968,6 +2983,38 @@ const generateQuotationPDF = async () => {
             )}
           </div>
         </div>
+
+        {/* ===== Lifecycle strip ===== */}
+        {(() => {
+          const lc = getProjectLifecycle(selectedProject);
+          if (!lc) return null;
+          if (lc.cancelled) {
+            return <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700">Project Cancelled</div>;
+          }
+          return (
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+              <div className="flex items-center justify-between">
+                {lc.stages.map((stage, i) => {
+                  const done = i < lc.current;
+                  const active = i === lc.current;
+                  return (
+                    <React.Fragment key={stage}>
+                      <div className="flex flex-col items-center gap-1 min-w-0">
+                        <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${done ? 'bg-green-500 text-white' : active ? 'bg-indigo-600 text-white ring-4 ring-indigo-100' : 'bg-slate-100 text-slate-400'}`}>
+                          {done ? '✓' : i + 1}
+                        </div>
+                        <span className={`text-[11px] font-medium ${active ? 'text-indigo-700' : done ? 'text-green-700' : 'text-slate-400'}`}>{stage}</span>
+                      </div>
+                      {i < lc.stages.length - 1 && (
+                        <div className={`h-0.5 flex-1 mx-1 ${i < lc.current ? 'bg-green-400' : 'bg-slate-200'}`} />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ===== SECTION 3: KEY INFO CARDS ===== */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

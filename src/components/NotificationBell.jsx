@@ -3,7 +3,7 @@ import { Bell, Calendar, FileText, AlertTriangle, Package, ChevronRight, X } fro
 import { useNavigate } from 'react-router-dom';
 import { formatCurrency, getProjectGrandTotal, isDateOverlap } from '../utils/helpers';
 
-const NotificationBell = ({ projects = [], inventory = [], payments = [], clients = [], role = 'tech' }) => {
+const NotificationBell = ({ projects = [], inventory = [], payments = [], clients = [], role = 'tech', expenses = [], hrLeaves = [] }) => {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef(null);
   const navigate = useNavigate();
@@ -55,6 +55,22 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
           });
         }
       });
+
+    // 2b. Pending approvals — for approvers (always-visible nudge from any page)
+    if (['admin', 'manager', 'accountant'].includes(role)) {
+      const pendExp = expenses.filter(e => e.status === 'Pending').length;
+      if (pendExp > 0) items.push({
+        type: 'approval', priority: 'high',
+        title: `${pendExp} expense${pendExp > 1 ? 's' : ''} awaiting approval`,
+        subtitle: 'Tap to review', action: () => navigate('/expenses'),
+      });
+      const pendLv = hrLeaves.filter(l => l.status === 'Pending').length;
+      if (pendLv > 0) items.push({
+        type: 'approval', priority: 'high',
+        title: `${pendLv} leave request${pendLv > 1 ? 's' : ''} pending`,
+        subtitle: 'Tap to review', action: () => navigate('/hr/leaves'),
+      });
+    }
 
     // 3. Unpaid invoices — only for admin/manager
     if (role === 'admin' || role === 'manager') {
