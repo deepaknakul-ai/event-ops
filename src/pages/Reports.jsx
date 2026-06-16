@@ -7,7 +7,7 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { can } from '../utils/permissions';
@@ -300,6 +300,72 @@ const Reports = ({
             Outstanding: total - received
           };
         });
+    }
+
+    // --- 7b. Unbilled Shows + Reimbursables (by client) ---
+    if (reportType === 'unbilled_shows') {
+      const cid = filterId; // '' = all clients
+      const unbilled = projects
+        .filter(p => (!cid || p.client_id === cid)
+          && ['Completed', 'Closed'].includes(p.status)
+          && p.invoice_status !== 'Invoiced')
+        .sort((a, b) => new Date(a.end_date || 0) - new Date(b.end_date || 0));
+
+      const rows = [];
+      let totShow = 0, totReimb = 0;
+      unbilled.forEach(p => {
+        const clientName = clients.find(c => c.id === p.client_id)?.name || '—';
+        const grand = getProjectGrandTotal(p);
+        const gst = getProjectGST(p);
+        const taxable = Math.round((grand - gst) * 100) / 100;
+        const reimbList = p.reimbursable_expenses || [];
+        const reimbSum = reimbList.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+        totShow += grand; totReimb += reimbSum;
+        rows.push({
+          Type: 'Show',
+          Client: clientName,
+          'Show / Item': p.project_name || '—',
+          Status: p.status,
+          Start: fmtDate(p.start_date),
+          End: fmtDate(p.end_date),
+          Venue: p.venue || '—',
+          Taxable: taxable,
+          GST: gst,
+          'Show Value': grand,
+          Reimbursable: reimbSum,
+          Total: Math.round((grand + reimbSum) * 100) / 100,
+        });
+        reimbList.forEach(r => {
+          const amt = parseFloat(r.amount) || 0;
+          rows.push({
+            Type: '— Reimbursable',
+            Client: clientName,
+            'Show / Item': `${r.category ? r.category + ': ' : ''}${r.description || ''}`,
+            Status: '',
+            Start: r.date ? fmtDate(r.date) : '',
+            End: '',
+            Venue: '',
+            Taxable: '',
+            GST: '',
+            'Show Value': '',
+            Reimbursable: amt,
+            Total: amt,
+          });
+        });
+      });
+      if (rows.length === 0) return [];
+      rows.push({
+        Type: 'TOTAL',
+        Client: '',
+        'Show / Item': `${unbilled.length} unbilled show(s)`,
+        Status: '', Start: '', End: '', Venue: '',
+        Taxable: '', GST: '',
+        'Show Value': Math.round(totShow * 100) / 100,
+        Reimbursable: Math.round(totReimb * 100) / 100,
+        Total: Math.round((totShow + totReimb) * 100) / 100,
+        _isTotal: true,
+      });
+      return rows;
     }
 
     // --- 8. Vendor Ledger Report ---
@@ -1199,6 +1265,7 @@ const Reports = ({
                <option value="vendor_ledger">Vendor Ledger</option>
                <option value="employee_ledger">Employee Ledger</option>
                <option value="invoice_status">Invoiced / Non-Invoiced Projects</option>
+               <option value="unbilled_shows">Unbilled Shows + Reimbursables (by Client)</option>
                <option value="projects_summary">Revenue Summary (Date Range)</option>
                <option value="rejected_expenses">Rejected Expenses</option>
                <option value="clarification_expenses">Clarification Expenses</option>
@@ -1234,6 +1301,16 @@ const Reports = ({
                 <option value="">All (Invoiced + Non-Invoiced)</option>
                 <option value="Invoiced">Invoiced Only</option>
                 <option value="Not Invoiced">Not Invoiced Only</option>
+              </select>
+            </div>
+          )}
+
+          {reportType === 'unbilled_shows' && (
+            <div className="w-full md:w-auto">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Select Client</label>
+              <select className="w-full rounded border p-2 min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+                <option value="">All Clients</option>
+                {clients.filter(c => c.type !== 'Vendor').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
           )}
