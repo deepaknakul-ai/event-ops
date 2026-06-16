@@ -18,7 +18,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage
 import { storage } from '../firebase';
 
 import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS, GST_STATE_CODES } from '../utils/constants';
-import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExcel as generateQuotationExcelImpl } from '../utils/pdf/projectPdf';
+import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExcel as generateQuotationExcelImpl, generateFinalReportPDF as generateFinalReportPDFImpl } from '../utils/pdf/projectPdf';
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
@@ -1015,128 +1015,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const generateQuotationPDF = () => generateQuotationPDFImpl(quotationCtx());
   const generateQuotationExcel = () => generateQuotationExcelImpl(quotationCtx());
 
-  const generateFinalReportPDF = async () => {
-    if (!selectedProject) return;
-    if (!canViewProjectFinancials) {
-      addToast('Access denied: financial report is restricted.', 'error');
-      return;
-    }
-
-    const doc = new jsPDF();
-    const org = await getOrgSettings();
-    const client = clients.find(c => c.id === selectedProject.client_id);
-    const totals = calculateProjectTotals();
-    const totalRevenue = totals.equipment + totals.logistics + totals.gst_output;
-    const totalCost = totals.outsourcing + totals.direct_expense + totals.gst_input;
-    // Operating profit uses BASE amounts only — GST collected & paid cancel out for registered business
-    const margin = (totals.equipment + totals.logistics) - (totals.outsourcing + totals.direct_expense);
-
-    const pageWidth = doc.internal.pageSize.width;
-    const marginX = 14;
-    let y = 18;
-
-    doc.setFontSize(16);
-    doc.setFont('helvetica', 'bold');
-    doc.text(org?.name || 'Final Project Report', marginX, y);
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Project: ${selectedProject.project_name}`, marginX, y + 7);
-    doc.text(`Client: ${client?.name || '-'}`, marginX, y + 12);
-    doc.text(`Dates: ${selectedProject.start_date || '-'} to ${selectedProject.end_date || '-'}`, marginX, y + 17);
-    doc.text(`Generated: ${new Date().toLocaleDateString('en-IN')}`, pageWidth - marginX, y + 7, { align: 'right' });
-    y += 24;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Cost Center', 'Amount']],
-      body: [
-        ['Equipment Revenue (Base)', formatCurrencyPDF(totals.equipment)],
-        ['Logistics Revenue (Base)', formatCurrencyPDF(totals.logistics)],
-        ['Total Revenue (Base, Excl. GST)', formatCurrencyPDF(totals.equipment + totals.logistics)],
-        ['Outsourcing Cost (Base)', formatCurrencyPDF(totals.outsourcing)],
-        ['Direct Expenses', formatCurrencyPDF(totals.direct_expense)],
-        ['Total Cost (Base)', formatCurrencyPDF(totals.outsourcing + totals.direct_expense)],
-        ['Operating Profit / Loss', formatCurrencyPDF(margin)],
-        ['— GST Output (Collected)', formatCurrencyPDF(totals.gst_output)],
-        ['— GST Input / ITC (Paid)', formatCurrencyPDF(totals.gst_input)],
-        ['— Net GST Payable to Govt', formatCurrencyPDF(totals.gst_payable)],
-        ...(totals.reimbursable > 0 ? [
-          ['Client Reimbursable (As Actual)', formatCurrencyPDF(totals.reimbursable)],
-          ['Total Client Payable', formatCurrencyPDF(totals.total_client_payable)],
-        ] : []),
-      ],
-      didParseCell: (data) => {
-        if (data.section === 'body') {
-          // Bold the profit row (index 6)
-          if (data.row.index === 6) data.cell.styles.fontStyle = 'bold';
-          // Bold the total client payable row (last row when reimbursable exists)
-          if (totals.reimbursable > 0 && data.row.index === data.table.body.length - 1) {
-            data.cell.styles.fontStyle = 'bold';
-            data.cell.styles.fillColor = [240, 253, 250];
-          }
-        }
-      },
-      theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 2 },
-      headStyles: { fillColor: [37, 99, 235] }
-    });
-
-    y = doc.lastAutoTable.finalY + 8;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Vendor', 'Item', 'Qty', 'Days', 'Base', 'GST %', 'Total']],
-      body: outsourcingRows.length > 0
-        ? outsourcingRows.map(r => [
-            r.vendor,
-            r.item,
-            r.qty,
-            r.days,
-            formatCurrencyPDF(r.base),
-            `${r.gstRate}%`,
-            formatCurrencyPDF(r.total)
-          ])
-        : [['-', '-', '-', '-', '-', '-', '-']],
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [220, 38, 38] }
-    });
-
-    y = doc.lastAutoTable.finalY + 8;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Date', 'Employee', 'Category', 'Amount', 'Remarks']],
-      body: expenseDateRows.length > 0
-        ? expenseDateRows.map(r => [
-            r.date ? new Date(r.date).toLocaleDateString('en-IN') : '-',
-            r.employee,
-            r.category,
-            formatCurrencyPDF(r.amount),
-            r.remarks || '-'
-          ])
-        : [['-', '-', '-', '-', '-']],
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [14, 116, 144] }
-    });
-
-    y = doc.lastAutoTable.finalY + 8;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Employee', 'Category', 'Total']],
-      body: expenseByEmployeeCategory.length > 0
-        ? expenseByEmployeeCategory.map(r => [r.employee, r.category, formatCurrencyPDF(r.total)])
-        : [['-', '-', '-']],
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [16, 185, 129] }
-    });
-
-    doc.save(`Final_Report_${selectedProject.project_name.replace(/\s/g, '_')}.pdf`);
-  };
-
+  const generateFinalReportPDF = () => generateFinalReportPDFImpl({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseDateRows, expenseByEmployeeCategory });
 
   // --- Print Handler ---
   const printProjectDocument = async (type) => {
