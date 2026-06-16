@@ -860,15 +860,25 @@ const TaxInvoices = ({
       const subTotal = round2(allItems.reduce((s, it) => s + (it.total || 0), 0));
       const roundOff = round2(finalAmt - subTotal);
 
-      // Running balance (best-effort from prior invoices & payments)
+      // Running balance — consistent with the client ledger: the client's billed
+      // position EXCLUDING this invoice = other active tax invoices + delivered
+      // projects NOT yet covered by any tax invoice (so project-billed revenue is
+      // counted, not just tax_invoices) − all payments received.
       const cid = invoice.client_id;
-      const invMs = invoice.invoice_date ? new Date(invoice.invoice_date).getTime() : Date.now();
       const clientPays = (payments || []).filter(p => p.client_id === cid || p.party_id === cid);
-      const priorInvTotal = (taxInvoices || [])
-        .filter(i => i.client_id === cid && i.id !== invoice.id && i.status !== 'Cancelled' && i.invoice_date && new Date(i.invoice_date).getTime() < invMs)
+      const totalPaid = clientPays.reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+      const activeClientInvoices = (taxInvoices || []).filter(i => i.client_id === cid && i.status !== 'Cancelled');
+      const otherInvTotal = activeClientInvoices
+        .filter(i => i.id !== invoice.id)
         .reduce((s, i) => s + parseFloat(i.final_amount ?? i.computed_total ?? 0), 0);
-      const priorPays = clientPays.filter(p => p.date && new Date(p.date).getTime() < invMs).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-      const previousBalance = round2(priorInvTotal - priorPays);
+      const invoicedPids = new Set();
+      activeClientInvoices.forEach(i => {
+        (Array.isArray(i.project_ids) ? i.project_ids : (i.project_id ? [i.project_id] : [])).forEach(pid => pid && invoicedPids.add(pid));
+      });
+      const projBilled = (projects || [])
+        .filter(p => p.client_id === cid && ['Completed', 'Closed'].includes(p.status) && !invoicedPids.has(p.id))
+        .reduce((s, p) => s + getProjectGrandTotal(p), 0);
+      const previousBalance = round2(otherInvTotal + projBilled - totalPaid);
       const received = round2(clientPays.filter(p => p.invoice_id === invoice.id).reduce((s, p) => s + parseFloat(p.amount || 0), 0));
       const balance = round2(finalAmt - received);
       const currentBalance = round2(previousBalance + balance);
