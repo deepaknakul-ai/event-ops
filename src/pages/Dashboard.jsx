@@ -473,7 +473,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
   }, [projects]);
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-4 animate-fade-in">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-slate-800">Dashboard</h2>
         <span className="text-xs text-slate-400">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</span>
@@ -519,43 +519,40 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
         );
       })()}
 
-      {/* ── Receivables overdue > 60 days alert ──────────────────────────── */}
-      {can(role, 'finance', 'view') && overdue60.count > 0 && (
-        <button onClick={() => navigate('/reports')} className="w-full text-left bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-center justify-between gap-4 hover:bg-amber-100/60 transition">
-          <div className="flex items-center gap-3 text-amber-800">
-            <div className="bg-amber-100 p-2 rounded-full"><AlertCircle className="text-amber-600" size={22} /></div>
-            <div>
-              <div className="font-bold">{overdue60.count} invoice{overdue60.count > 1 ? 's' : ''} overdue &gt; 60 days</div>
-              <div className="text-sm">{formatCurrency(overdue60.amount)} outstanding — follow up for collection.</div>
-            </div>
-          </div>
-          <ChevronRight className="text-amber-500 shrink-0" size={20} />
-        </button>
-      )}
-
-      {/* ── Owner / Exec summary (finance roles) ─────────────────────────── */}
+      {/* ── Owner / Exec summary (finance roles) — single consolidated KPI block ─ */}
       {can(role, 'finance', 'view') && (
         <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <TrendingUp size={16} className="text-indigo-600" />
-            <h3 className="text-sm font-bold text-slate-800">Owner Summary <span className="font-normal text-slate-400">· FY {selectedFY}</span></h3>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <TrendingUp size={16} className="text-indigo-600" />
+              <h3 className="text-sm font-bold text-slate-800">Owner Summary</h3>
+            </div>
+            <select
+              value={selectedFY}
+              onChange={e => setSelectedFY(e.target.value)}
+              className="text-xs font-semibold bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-slate-600 cursor-pointer"
+            >
+              {availableFYs.map(fy => <option key={fy} value={fy}>FY {fy}</option>)}
+            </select>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="rounded-lg bg-green-50 border border-green-100 p-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+            <div className="rounded-lg bg-green-50 border border-green-100 p-2.5">
               <div className="text-[11px] font-medium text-slate-500">Revenue (delivered)</div>
               <div className="text-lg font-bold text-slate-800 mt-0.5">{formatCurrency(revenue)}</div>
             </div>
-            <div className="rounded-lg bg-amber-50 border border-amber-100 p-3">
+            <button onClick={() => navigate('/reports')} className="text-left rounded-lg bg-amber-50 border border-amber-100 p-2.5 hover:bg-amber-100/60 transition">
               <div className="text-[11px] font-medium text-slate-500">Overdue &gt; 60d</div>
               <div className="text-lg font-bold text-amber-700 mt-0.5">{formatCurrency(overdue60.amount)}</div>
-              <div className="text-[10px] text-slate-400">{overdue60.count} invoice(s)</div>
-            </div>
-            <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-3">
+              <div className="text-[10px] text-slate-400">{overdue60.count} invoice(s) · tap to follow up</div>
+            </button>
+            <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-2.5">
               <div className="text-[11px] font-medium text-slate-500">Active Projects</div>
               <div className="text-lg font-bold text-slate-800 mt-0.5">{activeProjects}</div>
-              <div className="text-[10px] text-slate-400">{pendingQuotes} quoted</div>
+              <div className="text-[10px] text-slate-400">
+                {pendingQuotes} quoted{overdueProjects > 0 && <span className="text-red-500 font-semibold"> · {overdueProjects} overdue return{overdueProjects > 1 ? 's' : ''}</span>}
+              </div>
             </div>
-            <button onClick={() => navigate('/hr/leaves')} className="text-left rounded-lg bg-purple-50 border border-purple-100 p-3 hover:bg-purple-100/60 transition">
+            <button onClick={() => navigate('/hr/leaves')} className="text-left rounded-lg bg-purple-50 border border-purple-100 p-2.5 hover:bg-purple-100/60 transition">
               <div className="text-[11px] font-medium text-slate-500">Pending Approvals</div>
               <div className="text-lg font-bold text-slate-800 mt-0.5">{pendingApprovals.total}</div>
               <div className="text-[10px] text-slate-400">{pendingApprovals.exp} exp · {pendingApprovals.lv} leave</div>
@@ -696,6 +693,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
         </div>
       )}
 
+      {!can(role, 'finance', 'view') && (
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-200 flex items-start gap-3">
           <div className="p-2 rounded-lg bg-blue-50 text-blue-600"><CalendarDays size={18} /></div>
@@ -731,25 +729,8 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
             </div>
           </div>
         )}
-        {can(role, 'finance', 'view') && (
-          <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-200 flex items-start gap-3">
-            <div className="p-2 rounded-lg bg-emerald-50 text-emerald-600"><TrendingUp size={18} /></div>
-            <div>
-              <div className="text-xs text-slate-500 font-semibold uppercase tracking-wide flex items-center gap-2">
-                Gross Revenue
-                <select
-                  value={selectedFY}
-                  onChange={e => setSelectedFY(e.target.value)}
-                  className="text-xs font-semibold bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-emerald-700 cursor-pointer"
-                >
-                  {availableFYs.map(fy => <option key={fy} value={fy}>FY {fy}</option>)}
-                </select>
-              </div>
-              <div className="mt-0.5 text-xl font-bold text-slate-800">{formatCurrency(revenue)}</div>
-            </div>
-          </div>
-        )}
       </div>
+      )}
 
       {/* ===== MY WORK — visible to tech role only ===== */}
       {role === 'tech' && (
