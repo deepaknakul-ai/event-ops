@@ -9,6 +9,7 @@
  *    via setLiveConfig() — no page reload needed
  */
 import React, { useState, useEffect } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import {
@@ -205,8 +206,8 @@ const RBACManager = ({ db, appId, logAction }) => {
   };
 
   // ── Reset to system defaults ─────────────────────────────────────────────────
-  const handleReset = () => {
-    if (!confirm('Reset ALL permissions to system defaults? Custom roles will be removed and all custom changes lost.'))
+  const handleReset = async () => {
+    if (!await confirmDialog('Reset ALL permissions to system defaults? Custom roles will be removed and all custom changes lost.'))
       return;
     setConfig(buildDefaultConfig());
     setIsDirty(true);
@@ -239,9 +240,9 @@ const RBACManager = ({ db, appId, logAction }) => {
   };
 
   // ── Delete custom role ───────────────────────────────────────────────────────
-  const handleDeleteRole = (roleId) => {
+  const handleDeleteRole = async (roleId) => {
     const label = config.rolesMeta[roleId]?.label;
-    if (!confirm(`Delete role "${label}"?\n\nEmployees assigned this role must be reassigned manually.`))
+    if (!await confirmDialog(`Delete role "${label}"?\n\nEmployees assigned this role must be reassigned manually.`))
       return;
     const newMeta = { ...config.rolesMeta };
     const newPerms = { ...config.permissions };

@@ -4,6 +4,7 @@
 
 
 import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
+import { confirmDialog } from './utils/dialog';
 import { 
   LayoutDashboard, Box, Users, Calendar, FileText, 
   DollarSign, CheckCircle, AlertTriangle, Menu, X, 
@@ -25,6 +26,7 @@ import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXP
 import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword, generateSecureToken } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
 import { registerToast, notify } from './utils/toast';
+import DialogHost from './components/DialogHost';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
 import { partitionRules } from './utils/aiAccountant';
@@ -606,7 +608,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleDelete = async (id) => {
-//     if(!confirm("Are you sure? This will delete the project and all associated data.")) return;
+//     if(!await confirmDialog("Are you sure? This will delete the project and all associated data.")) return;
 //     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id));
 //   };
 
@@ -655,7 +657,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //     if(!allocationForm.item_id) return addToast("Select an item", 'error');
 //     const item = inventory.find(i => i.id === allocationForm.item_id);
 //     if (allocationForm.qty > allocationForm.available_qty) {
-//       if(!confirm(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
+//       if(!await confirmDialog(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
 //     }
 //     const amount = allocationForm.qty * allocationForm.rate * allocationForm.days;
 //     const newItem = { id: Date.now().toString(), item_id: item.id, item_name: item.name, category: item.category, is_external: item.is_external || false, qty: parseInt(allocationForm.qty), rate: parseFloat(allocationForm.rate), days: parseInt(allocationForm.days), gst_rate: parseFloat(allocationForm.gst_rate), amount, gst_amount: amount * (allocationForm.gst_rate/100), total: amount * (1 + allocationForm.gst_rate/100) };
@@ -664,7 +666,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleRemoveAllocation = async (item) => {
-//     if(confirm("Remove this item?")) await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
+//     if(await confirmDialog("Remove this item?")) await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
 //   };
 
 //   const calculateProjectTotals = () => {
@@ -892,7 +894,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleDelete = async (id) => {
-//     if(!confirm("Are you sure? This will delete the project and all associated data.")) return;
+//     if(!await confirmDialog("Are you sure? This will delete the project and all associated data.")) return;
 //     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id));
 //   };
 
@@ -941,7 +943,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //     if(!allocationForm.item_id) return addToast("Select an item", 'error');
 //     const item = inventory.find(i => i.id === allocationForm.item_id);
 //     if (allocationForm.qty > allocationForm.available_qty) {
-//       if(!confirm(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
+//       if(!await confirmDialog(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
 //     }
 //     const amount = allocationForm.qty * allocationForm.rate * allocationForm.days;
 //     const newItem = { id: Date.now().toString(), item_id: item.id, item_name: item.name, category: item.category, is_external: item.is_external || false, qty: parseInt(allocationForm.qty), rate: parseFloat(allocationForm.rate), days: parseInt(allocationForm.days), gst_rate: parseFloat(allocationForm.gst_rate), amount, gst_amount: amount * (allocationForm.gst_rate/100), total: amount * (1 + allocationForm.gst_rate/100) };
@@ -950,7 +952,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleRemoveAllocation = async (item) => {
-//     if(confirm("Remove this item?")) await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
+//     if(await confirmDialog("Remove this item?")) await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
 //   };
 
 //   const calculateProjectTotals = () => {
@@ -1405,7 +1407,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   };
 
   const handleRemove = async (alloc) => {
-    if(confirm("Remove this vendor allocation?")) {
+    if(await confirmDialog("Remove this vendor allocation?")) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProjectId), {
           vendor_allocations: arrayRemove(alloc)
         });
@@ -1662,7 +1664,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           
           logAction('projects', 'create_po', pId, { po_no: newPO.po_no }, selectedProject?.project_name || 'Unknown Project');
           setIsPOModalOpen(false);
-          if(confirm("PO Created. Print now?")) generatePOPDF(newPO, 'print');
+          if(await confirmDialog("PO Created. Print now?")) generatePOPDF(newPO, 'print');
       } catch (e) {
           console.error(e);
           notify("Error creating PO: " + e.message, 'error');
@@ -1755,7 +1757,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           
           logAction('projects', 'update_po', pId, { po_no: updatedPO.po_no }, selectedProject?.project_name || 'Unknown Project');
           setIsPOModalOpen(false);
-          if(confirm("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
+          if(await confirmDialog("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
       } catch (e) {
           console.error(e);
           notify("Error updating PO: " + e.message, 'error');
@@ -1792,7 +1794,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
       if (!pId) return;
 
       if (newStatus === 'Cancelled') {
-          if (!confirm("Are you sure you want to cancel this PO? This will release the allocated inventory for re-allocation.")) return;
+          if (!await confirmDialog("Are you sure you want to cancel this PO? This will release the allocated inventory for re-allocation.")) return;
       }
 
       try {
@@ -3539,6 +3541,7 @@ const [payroll, setPayroll] = useState([]);
           <Toast key={t.id} message={t.msg} type={t.type} onClose={() => setToasts(p => p.filter(x => x.id !== t.id))} />
         ))}
       </div>
+      <DialogHost />
       <aside className="hidden w-[260px] flex-col bg-white md:flex shadow-[1px_0_0_0_#e2e8f0] z-10">
         <div className="flex h-16 items-center gap-2 px-5 border-b border-slate-100">
           <div className="h-8 w-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">T</div>

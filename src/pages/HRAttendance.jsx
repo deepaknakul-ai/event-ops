@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { confirmDialog, promptDialog } from '../utils/dialog';
 import { Clock, Search, Filter, Users, MapPin, AlertTriangle, CheckCircle, XCircle, MessageSquare, Trash2, Plus, Edit2 } from 'lucide-react';
 import { doc, addDoc, updateDoc, deleteDoc, collection } from 'firebase/firestore';
 import { getLogHours } from '../utils/helpers';
@@ -65,7 +66,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   // Delete time log
   const handleDeleteLog = async (logId) => {
     if (!can(role, 'hr_attendance', 'delete')) return addToast('Access denied.', 'error');
-    if (!window.confirm('Delete this attendance record?')) return;
+    if (!await confirmDialog('Delete this attendance record?')) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', logId));
       logAction('timeLogs', 'delete', logId, null, 'Deleted attendance record');
@@ -166,7 +167,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
 
   const handleDeletePenalty = async (pId) => {
     if (!can(role, 'hr_penalties', 'create')) return addToast('Access denied.', 'error');
-    if (!window.confirm('Remove this penalty?')) return;
+    if (!await confirmDialog('Remove this penalty?')) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'penalties', pId));
       logAction('penalties', 'delete', pId, null, 'Removed penalty');
@@ -334,7 +335,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
                     <>
                       <button onClick={() => handleShiftAction(sr, 'Approved')} className="text-green-600 hover:text-green-800" title="Approve"><CheckCircle size={18} /></button>
                       <button onClick={() => handleShiftAction(sr, 'Rejected')} className="text-red-600 hover:text-red-800" title="Reject"><XCircle size={18} /></button>
-                      <button onClick={() => { const c = prompt('Enter clarification message:'); if (c) handleShiftAction(sr, 'Clarification', c); }} className="text-purple-600 hover:text-purple-800" title="Ask Clarification"><MessageSquare size={18} /></button>
+                      <button onClick={async () => { const c = await promptDialog('Enter clarification message:'); if (c) handleShiftAction(sr, 'Clarification', c); }} className="text-purple-600 hover:text-purple-800" title="Ask Clarification"><MessageSquare size={18} /></button>
                     </>
                   )}
                 </div>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { confirmDialog, promptDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import { Link } from 'react-router-dom';
 import {
@@ -212,14 +213,14 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     // FY is already locked.
     const exp = expenses.find(e => e.id === id);
     if (exp && !assertFYNotLocked(exp.date, lockedFYs)) return;
-    if (!confirm("Approve this expense?")) return;
+    if (!await confirmDialog("Approve this expense?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' });
     logAction('expenses', 'approve', id, {}, 'Expense Approved');
   };
 
   const handleRequestClarification = async (id) => {
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
-    const note = prompt('Request clarification (required):');
+    const note = await promptDialog('Request clarification (required):');
     if (!note) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
       status: 'Clarification',
@@ -231,8 +232,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
 
   const handleDisapprove = async (id) => {
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
-    const note = prompt('Disapprove reason (optional):');
-    if (!confirm("Disapprove this expense?")) return;
+    const note = await promptDialog('Disapprove reason (optional):');
+    if (!await confirmDialog("Disapprove this expense?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
       status: 'Disapproved',
       disapproved_reason: note || '',
@@ -244,7 +245,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const handleBulkApprove = async () => {
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
-    if (!confirm(`Approve ${selectedApprovalIds.length} expense(s)?`)) return;
+    if (!await confirmDialog(`Approve ${selectedApprovalIds.length} expense(s)?`)) return;
     await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' })));
     selectedApprovalIds.forEach(id => logAction('expenses', 'approve', id, {}, 'Expense Approved'));
     setSelectedApprovalIds([]);
@@ -253,9 +254,9 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const handleBulkClarify = async () => {
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
-    const note = prompt('Request clarification (required):');
+    const note = await promptDialog('Request clarification (required):');
     if (!note) return;
-    if (!confirm(`Request clarification for ${selectedApprovalIds.length} expense(s)?`)) return;
+    if (!await confirmDialog(`Request clarification for ${selectedApprovalIds.length} expense(s)?`)) return;
     await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
       status: 'Clarification',
       clarification_request: note,
@@ -268,8 +269,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const handleBulkDisapprove = async () => {
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
-    const note = prompt('Disapprove reason (optional):');
-    if (!confirm(`Disapprove ${selectedApprovalIds.length} expense(s)?`)) return;
+    const note = await promptDialog('Disapprove reason (optional):');
+    if (!await confirmDialog(`Disapprove ${selectedApprovalIds.length} expense(s)?`)) return;
     await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
       status: 'Disapproved',
       disapproved_reason: note || '',
@@ -280,7 +281,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleSubmitClarification = async (exp) => {
-    const response = prompt('Add clarification (required):', exp.clarification_response || '');
+    const response = await promptDialog('Add clarification (required):', exp.clarification_response || '');
     if (!response) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', exp.id), {
       status: 'Clarification',

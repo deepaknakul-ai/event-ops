@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { promptDialog } from '../utils/dialog';
 import { UserCheck, Clock, MapPin, CalendarDays, FileText, AlertTriangle, CheckCircle } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection } from 'firebase/firestore';
 import { getLogHours, getDistance, calculateLeaveBalance } from '../utils/helpers';
@@ -200,7 +201,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
 
   // ── CLARIFICATION RESPONSE ────────────────────────────────────────────────
   const handleClarificationResponse = async (sr) => {
-    const response = prompt('Enter your clarification response:');
+    const response = await promptDialog('Enter your clarification response:');
     if (!response) return;
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shiftRequests', sr.id), { clarificationResponse: response, status: 'Pending' });

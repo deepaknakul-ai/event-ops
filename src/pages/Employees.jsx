@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import {
   Plus, Edit, User, Key, Wallet, History, Camera, FileCheck, FileText, MapPin, Link2, Copy, ExternalLink, Printer, TrendingUp
@@ -156,7 +157,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
 
   const handleUnlock = async (id) => {
     if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
-    if(!confirm("Unlock this account?")) return;
+    if(!await confirmDialog("Unlock this account?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', id), {
         is_locked: false,
         failed_login_attempts: 0

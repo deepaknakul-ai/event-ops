@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { promptDialog } from '../utils/dialog';
 import { CalendarDays, Plus, Search, CheckCircle, XCircle, Eye, Ban } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection } from 'firebase/firestore';
 import { calculateLeaveBalance } from '../utils/helpers';
@@ -99,7 +100,7 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
   // the employee's balance automatically, since balances count only 'Approved'.
   const handleCancelApproved = async (leave) => {
     if (!can(role, 'hr_leaves', 'cancel')) return addToast('Access denied.', 'error');
-    const reason = window.prompt(`Cancel approved ${leave.type} leave for ${getEmpName(leave.employeeId)} (${fmtDate(leave.startDate)} — ${fmtDate(leave.endDate)})?\n\nReason (required):`, '');
+    const reason = await promptDialog(`Cancel approved ${leave.type} leave for ${getEmpName(leave.employeeId)} (${fmtDate(leave.startDate)} — ${fmtDate(leave.endDate)})?\n\nReason (required):`, '');
     if (reason === null) return;           // user dismissed
     if (!reason.trim()) return addToast('A reason is required to cancel a leave', 'error');
     try {

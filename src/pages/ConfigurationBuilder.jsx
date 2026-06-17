@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { collection, addDoc, updateDoc, deleteDoc, doc, getDoc } from 'firebase/firestore';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -865,7 +866,7 @@ const ConfigurationBuilder = ({ configurations = [], inventory = [], clients = [
   };
 
   const handleDeleteConfig = async (config) => {
-    if (!window.confirm('Delete configuration "' + config.config_name + '"?')) return;
+    if (!await confirmDialog('Delete configuration "' + config.config_name + '"?')) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'configurations', config.id));
       await logAction('configurations', 'delete', config.id, {}, config.config_name);

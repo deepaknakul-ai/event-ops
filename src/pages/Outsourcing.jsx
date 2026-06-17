@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import {
   AlertCircle, Truck, FileText, Plus, Edit, Trash2,
   Printer, Download, Copy, Search, FileCheck, Paperclip, X, ReceiptText
@@ -284,7 +285,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
 
   const handleRemove = async (alloc) => {
     if (!can(role, 'outsourcing', 'delete')) return addToast('Access denied: only Admin can delete outsourcing allocations.', 'error');
-    if(confirm("Remove this vendor allocation?")) {
+    if(await confirmDialog("Remove this vendor allocation?")) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProjectId), {
           vendor_allocations: arrayRemove(alloc)
         });
@@ -648,7 +649,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
 
           logAction('projects', 'create_po', pId, { po_no: newPO.po_no }, selectedProject?.project_name || 'Unknown Project');
           setIsPOModalOpen(false);
-          if(confirm("PO Created. Print now?")) generatePOPDF(newPO, 'print');
+          if(await confirmDialog("PO Created. Print now?")) generatePOPDF(newPO, 'print');
       } catch (e) {
           console.error(e);
           addToast("Error creating PO: " + e.message, 'error');
@@ -742,7 +743,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
 
           logAction('projects', 'update_po', pId, { po_no: updatedPO.po_no }, selectedProject?.project_name || 'Unknown Project');
           setIsPOModalOpen(false);
-          if(confirm("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
+          if(await confirmDialog("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
       } catch (e) {
           console.error(e);
           addToast("Error updating PO: " + e.message, 'error');
@@ -780,7 +781,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
       if (!pId) return;
 
       if (newStatus === 'Cancelled') {
-          if (!confirm("Are you sure you want to cancel this PO? This will release the allocated inventory for re-allocation.")) return;
+          if (!await confirmDialog("Are you sure you want to cancel this PO? This will release the allocated inventory for re-allocation.")) return;
       }
 
       try {

@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import { confirmDialog, promptDialog } from '../utils/dialog';
 import {
   addDoc,
   collection,
@@ -1249,7 +1250,7 @@ const Accounting = ({
   };
   const handleRejectDraft = async (draft) => {
     if (role !== 'admin') { addToast('Admin only', 'error'); return; }
-    const reason = window.prompt('Reason for rejection (optional)');
+    const reason = await promptDialog('Reason for rejection (optional)');
     if (reason === null) return;
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id), {
@@ -1348,7 +1349,7 @@ const Accounting = ({
   ));
   const handleBulkPostDrafts = async () => {
     if (!canEditFinance || selectedDraftIds.size === 0) return;
-    if (!window.confirm(`Post ${selectedDraftIds.size} selected draft(s) to the ledger?`)) return;
+    if (!await confirmDialog(`Post ${selectedDraftIds.size} selected draft(s) to the ledger?`)) return;
     const selected = journalDrafts.filter((d) => selectedDraftIds.has(d.id));
     let ok = 0; let fail = 0;
     for (const d of selected) {
@@ -1376,7 +1377,7 @@ const Accounting = ({
   };
   const handleBulkDeleteDrafts = async () => {
     if (!canEditFinance || selectedDraftIds.size === 0) return;
-    if (!window.confirm(`Discard ${selectedDraftIds.size} draft(s)? This cannot be undone.`)) return;
+    if (!await confirmDialog(`Discard ${selectedDraftIds.size} draft(s)? This cannot be undone.`)) return;
     let ok = 0; let fail = 0;
     for (const id of selectedDraftIds) {
       try {
@@ -1392,9 +1393,9 @@ const Accounting = ({
   // ── Templates ─────────────────────────────────────────────────────────────
   const handleSaveDraftAsTemplate = async (draft) => {
     if (!canEditFinance) return;
-    const name = (window.prompt('Template name?', draft.narration || draft.party_name || 'Template') || '').trim();
+    const name = (await promptDialog('Template name?', draft.narration || draft.party_name || 'Template') || '').trim();
     if (!name) return;
-    const varName = (window.prompt(
+    const varName = (await promptDialog(
       'Optional: variable name for the amount (leave blank to drop amounts).\n' +
       'Tip: also use {{var}} or {{var:default}} in narration / party.',
       'amount',
@@ -1520,7 +1521,7 @@ const Accounting = ({
 
   const handleDeleteTemplate = async (tpl) => {
     if (!canEditFinance) return;
-    if (!window.confirm(`Delete template "${tpl.name}"?`)) return;
+    if (!await confirmDialog(`Delete template "${tpl.name}"?`)) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_templates', tpl.id));
       logAction('journal_templates', 'delete', tpl.id, {}, `Deleted template: ${tpl.name}`);
@@ -1608,7 +1609,7 @@ const Accounting = ({
     if (!canEditFinance || selectedTemplateIds.size === 0) return;
     const n = selectedTemplateIds.size;
     // Destructive + irreversible — require explicit typed confirmation.
-    const typed = window.prompt(
+    const typed = await promptDialog(
       `You are about to DELETE ${n} template(s). This cannot be undone.\nType DELETE to confirm.`
     );
     if (typed !== 'DELETE') { addToast('Delete cancelled', 'info'); return; }
@@ -2218,7 +2219,7 @@ const Accounting = ({
       return addToast('Only an Admin can undo a financial year closing. Managers cannot reverse a closed FY because it deletes journal entries, rolled-over opening balances, and the closing record.', 'error');
     }
     if (!closingRow || closingRow.status !== 'closed') return;
-    const confirmed = window.confirm(
+    const confirmed = await confirmDialog(
       `Are you sure you want to UNDO the closing of FY ${closingRow.fy}?\n\n` +
       `This will:\n` +
       `• Delete the closing journal entry (${closingRow.voucher_no || 'N/A'})\n` +

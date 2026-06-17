@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { DollarSign, Search, Download, FileText, CheckCircle, Clock, AlertTriangle, Users, Filter } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection, deleteDoc } from 'firebase/firestore';
 import { getLogHours, getHourlyRateForDate } from '../utils/helpers';
@@ -229,7 +230,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
   // ── Generate All ──
   const handleGenerateAll = async () => {
     if (!can(role, 'hr_payroll', 'generate')) return addToast('Access denied', 'error');
-    if (!confirm(`Generate payroll for all ${activeEmployees.length} employees for ${MONTHS[selectedMonth - 1]} ${selectedYear}?`)) return;
+    if (!await confirmDialog(`Generate payroll for all ${activeEmployees.length} employees for ${MONTHS[selectedMonth - 1]} ${selectedYear}?`)) return;
     let count = 0;
     for (const row of payrollData) {
       try {
@@ -274,7 +275,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
   const handleFinalize = async (row) => {
     if (!can(role, 'hr_payroll', 'generate')) return addToast('Access denied', 'error');
     if (!row.payrollId) return addToast('Generate payroll first', 'error');
-    if (!confirm(`Finalize payroll for ${row.name}? This marks it as approved.`)) return;
+    if (!await confirmDialog(`Finalize payroll for ${row.name}? This marks it as approved.`)) return;
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'payroll', row.payrollId), {
         status: 'Finalized',
@@ -291,7 +292,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
     if (!can(role, 'hr_payroll', 'generate')) return addToast('Access denied', 'error');
     if (!row.payrollId) return;
     if (row.status === 'Finalized') return addToast('Cannot delete finalized payroll', 'error');
-    if (!confirm(`Delete payroll record for ${row.name}?`)) return;
+    if (!await confirmDialog(`Delete payroll record for ${row.name}?`)) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'payroll', row.payrollId));
       logAction('payroll', 'delete', row.payrollId, null, `Deleted payroll for ${row.name}`);

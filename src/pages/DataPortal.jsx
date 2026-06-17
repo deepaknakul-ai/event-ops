@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { collection, getDocs, doc, writeBatch } from 'firebase/firestore';
 import {
   Download, Upload, Package, Users, Calendar, ShoppingBag,
@@ -147,7 +148,7 @@ const DataPortal = ({ db, appId, role, logAction, addToast }) => {
         count: data[k].length,
       }));
 
-      const confirmed = window.confirm(
+      const confirmed = await confirmDialog(
         `Import ${collections.length} collection(s)?\n\n` +
         preview.map((p) => `• ${p.label}: ${p.count} records`).join('\n') +
         `\n\nThis will ADD records (not replace existing). Duplicate IDs will be skipped.`

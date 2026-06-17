@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, memo } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertCircle, ArrowDownRight, ArrowLeft, ArrowUpRight, Calculator, CheckCircle, ChevronDown, ChevronUp,
@@ -347,7 +348,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     if (bulkInvoiceSelected.size === 0) return addToast('Select at least one project.', 'error');
     if (!bulkInvoiceForm.invoice_no.trim()) return addToast('Enter an Invoice Number.', 'error');
     if (!bulkInvoiceForm.invoice_date) return addToast('Enter an Invoice Date.', 'error');
-    const confirmed = window.confirm(`Apply invoice #${bulkInvoiceForm.invoice_no} to ${bulkInvoiceSelected.size} project(s)?`);
+    const confirmed = await confirmDialog(`Apply invoice #${bulkInvoiceForm.invoice_no} to ${bulkInvoiceSelected.size} project(s)?`);
     if (!confirmed) return;
     const updates = [...bulkInvoiceSelected].map(id =>
       updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id), {
@@ -761,7 +762,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     if (demotionFromInvoiced) {
       Object.assign(payload, INVOICE_FIELD_RESET);
       // Tell the user we're un-invoicing
-      if (!confirm(`Demoting an Invoiced project to ${newStatus} will clear its invoice number, date and tax-invoice link. Continue?`)) return;
+      if (!await confirmDialog(`Demoting an Invoiced project to ${newStatus} will clear its invoice number, date and tax-invoice link. Continue?`)) return;
     }
     // Cancellation: also clear invoice fields and release allocations are not auto-released
     // (data integrity left to user) but mark a cancellation timestamp.
@@ -897,7 +898,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   const handleDeleteReimbursable = async (idx) => {
     if (!can(role, 'projects', 'edit')) return addToast('Access denied.', 'error');
-    if (!confirm('Delete this reimbursable expense?')) return;
+    if (!await confirmDialog('Delete this reimbursable expense?')) return;
     const existing = [...(selectedProject.reimbursable_expenses || [])];
     const removed = existing.splice(idx, 1)[0];
     if (removed?.proof_path) { try { await deleteObject(ref(storage, removed.proof_path)); } catch (_) {} }
@@ -925,8 +926,8 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     return selectedProject.reimbursable_expenses.reduce((acc, e) => acc + (parseFloat(e.amount) || 0), 0);
   }, [selectedProject?.reimbursable_expenses]);
 
-  const handleDuplicate = (project) => {
-    if(!confirm(`Duplicate "${project.project_name}" to create a new quote?`)) return;
+  const handleDuplicate = async (project) => {
+    if(!await confirmDialog(`Duplicate "${project.project_name}" to create a new quote?`)) return;
     
     // Deep copy items to ensure new IDs
     const itemsCopy = (project.items || []).map(item => ({...item, id: Date.now() + Math.random().toString()}));
@@ -1333,7 +1334,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             console.warn('inventory_movements mirror write failed (non-fatal):', mvErr.message);
         }
 
-        if (confirm("Challan Saved. Print now?")) {
+        if (await confirmDialog("Challan Saved. Print now?")) {
             printChallanPDF(challanData);
         }
         setIsChallanModalOpen(false);
@@ -1443,7 +1444,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       });
       logAction('projects', 'create_proforma_invoice', selectedProject.id, { pi_no: newPiNo }, selectedProject.project_name);
 
-      if (confirm(`Proforma Invoice ${newPiNo} saved. Print now?`)) {
+      if (await confirmDialog(`Proforma Invoice ${newPiNo} saved. Print now?`)) {
         generateProformaInvoicePDF(piData);
       }
       setIsProformaModalOpen(false);
@@ -1612,11 +1613,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       finalQty = ledSpecs?.logistics?.totalTilesNeeded || (w * h);
       // Use availability check against total tiles owned
       if (finalQty > (allocationForm.tileModelData?.inventory?.totalTiles || item.total || 0)) {
-        if (!confirm(`Warning: You are allocating ${finalQty} tiles but only ${allocationForm.tileModelData?.inventory?.totalTiles || item.total || 0} are available. Proceed?`)) return;
+        if (!await confirmDialog(`Warning: You are allocating ${finalQty} tiles but only ${allocationForm.tileModelData?.inventory?.totalTiles || item.total || 0} are available. Proceed?`)) return;
       }
     } else {
       if (allocationForm.qty > allocationForm.available_qty) {
-        if(!confirm(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
+        if(!await confirmDialog(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
       }
     }
 
@@ -1673,7 +1674,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   const handleRemoveAllocation = async (item) => {
     if (!can(role, 'projects', 'allocation')) return addToast('Access denied: insufficient permissions.', 'error');
-    if(confirm("Remove this item?")) {
+    if(await confirmDialog("Remove this item?")) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
         logAction('projects', 'remove_item', selectedProject.id, item, selectedProject.project_name);
     }

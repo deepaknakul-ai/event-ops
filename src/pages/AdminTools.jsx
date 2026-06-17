@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
@@ -122,7 +123,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    if (!confirm("WARNING: This will overwrite existing data with the same IDs. Continue?")) {
+    if (!await confirmDialog("WARNING: This will overwrite existing data with the same IDs. Continue?")) {
         e.target.value = null;
         return;
     }
@@ -270,12 +271,12 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     return fys;
   };
 
-  const handleToggleFYLock = (fy) => {
+  const handleToggleFYLock = async (fy) => {
     if (lockedFYs.includes(fy)) {
       setLockedFYs(prev => prev.filter(f => f !== fy));
     } else {
       if (fy === getFinancialYear()) {
-        if (!confirm(`You are about to lock the CURRENT financial year (${fy}). This will prevent any new transactions until unlocked. Continue?`)) return;
+        if (!await confirmDialog(`You are about to lock the CURRENT financial year (${fy}). This will prevent any new transactions until unlocked. Continue?`)) return;
       }
       setLockedFYs(prev => [...prev, fy]);
     }
