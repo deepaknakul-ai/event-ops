@@ -1,6 +1,7 @@
 // version 1.3.0 finance implementation
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import { TrendingUp, TrendingDown, Edit, Trash2, Download, Lock, Filter } from 'lucide-react';
 import { addDoc, updateDoc, deleteDoc, doc, collection } from 'firebase/firestore';
 import * as XLSX from '@e965/xlsx';
@@ -65,7 +66,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   };
 
   const handleEdit = (item) => {
-    if (isFYLocked(item.date)) return alert(`FY ${getFYFromDate(item.date)} is locked. Cannot edit transactions in a locked financial year.`);
+    if (isFYLocked(item.date)) return notify(`FY ${getFYFromDate(item.date)} is locked. Cannot edit transactions in a locked financial year.`, 'error');
     setEditingId(item.id);
     setForm({
         entity_id: item.client_id || item.employee_id || item.vendor_id,
@@ -80,8 +81,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   };
 
   const handleDelete = async (item) => {
-    if (!can(role, 'finance', 'delete')) return alert('Access denied: only Admin and Accountant can delete financial records.');
-    if (isFYLocked(item.date)) return alert(`FY ${getFYFromDate(item.date)} is locked. Cannot delete transactions in a locked financial year.`);
+    if (!can(role, 'finance', 'delete')) return notify('Access denied: only Admin and Accountant can delete financial records.', 'error');
+    if (isFYLocked(item.date)) return notify(`FY ${getFYFromDate(item.date)} is locked. Cannot delete transactions in a locked financial year.`, 'error');
     let col = '';
     if (activeTab === 'client_in') col = 'payments';
     else if (activeTab === 'emp_out') col = 'payouts';
@@ -114,11 +115,11 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   };
 
   const handleClientPayment = async () => {
-    if (!can(role, 'finance', 'create')) return alert('Access denied: only Admin, Accountant and Manager can record payments.');
-    if (!form.entity_id || !form.amount) return alert("Select Client and Amount");
+    if (!can(role, 'finance', 'create')) return notify('Access denied: only Admin, Accountant and Manager can record payments.', 'error');
+    if (!form.entity_id || !form.amount) return notify("Select Client and Amount", 'error');
     if (role === 'manager' && !['Cash', 'UPI / Online'].includes(form.mode))
-      return alert('Managers can only record Cash or UPI / Online payments on-site.');
-    if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
+      return notify('Managers can only record Cash or UPI / Online payments on-site.', 'info');
+    if (isFYLocked(form.date)) return notify(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`, 'error');
     const client = clients.find(c => c.id === form.entity_id);
     const companies = getEntityCompanies(client);
     const selectedCompany = companies.find(c => c.id === (form.party_company_id || 'primary')) || companies[0] || null;
@@ -144,7 +145,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'payments', editingId), data);
         logAction('payments', 'update', editingId, data, `Updated Payment from ${client.name}`);
-        alert("Payment Updated");
+        notify("Payment Updated", 'success');
         cancelEdit();
     } else {
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), {
@@ -153,16 +154,16 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
             created_by: user.uid
         });
         logAction('payments', 'receive_payment', docRef.id, data, `Payment from ${client.name}`);
-        alert("Payment Received Recorded");
+        notify("Payment Received Recorded", 'success');
         setForm({ ...form, amount: '', reference: '', remarks: '' });
     }
   };
 
   // --- Employee Payout Logic ---
   const handleEmpPayout = async () => {
-    if (!can(role, 'finance', 'create')) return alert('Access denied: only Admin and Accountant can record payouts.');
-    if (!form.entity_id || !form.amount) return alert("Select Employee and Amount");
-    if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
+    if (!can(role, 'finance', 'create')) return notify('Access denied: only Admin and Accountant can record payouts.', 'error');
+    if (!form.entity_id || !form.amount) return notify("Select Employee and Amount", 'error');
+    if (isFYLocked(form.date)) return notify(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`, 'error');
     const emp = employees.find(e => e.id === form.entity_id);
 
     const data = {
@@ -179,7 +180,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'payouts', editingId), data);
         logAction('payouts', 'update', editingId, data, `Updated Payout to ${emp.name}`);
-        alert("Payout Updated");
+        notify("Payout Updated", 'success');
         cancelEdit();
     } else {
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'payouts'), {
@@ -188,16 +189,16 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
             created_by: user.uid
         });
         logAction('payouts', 'make_payout', docRef.id, data, `Payout to ${emp.name}`);
-        alert("Employee Payout Recorded");
+        notify("Employee Payout Recorded", 'success');
         setForm({ ...form, amount: '', reference: '', remarks: '' });
     }
   };
 
   // --- Vendor Payment Logic ---
   const handleVendorPayment = async () => {
-    if (!can(role, 'finance', 'create')) return alert('Access denied: only Admin and Accountant can record vendor payments.');
-    if (!form.entity_id || !form.amount) return alert("Select Vendor and Amount");
-    if (isFYLocked(form.date)) return alert(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`);
+    if (!can(role, 'finance', 'create')) return notify('Access denied: only Admin and Accountant can record vendor payments.', 'error');
+    if (!form.entity_id || !form.amount) return notify("Select Vendor and Amount", 'error');
+    if (isFYLocked(form.date)) return notify(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`, 'error');
     const vendor = clients.find(c => c.id === form.entity_id);
     const companies = getEntityCompanies(vendor);
     const selectedCompany = companies.find(c => c.id === (form.party_company_id || 'primary')) || companies[0] || null;
@@ -221,7 +222,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'vendor_payments', editingId), data);
         logAction('vendor_payments', 'update', editingId, data, `Updated Payment to ${vendor.name}`);
-        alert("Vendor Payment Updated");
+        notify("Vendor Payment Updated", 'success');
         cancelEdit();
     } else {
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments'), {
@@ -230,7 +231,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
             created_by: user.uid
         });
         logAction('vendor_payments', 'pay_vendor', docRef.id, data, `Payment to ${vendor.name}`);
-        alert("Vendor Payment Recorded");
+        notify("Vendor Payment Recorded", 'success');
         setForm({ ...form, amount: '', reference: '', remarks: '' });
     }
   };
@@ -314,7 +315,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   }, [activeTab, fyFilter]);
 
   const exportCSV = () => {
-    if (filteredList.length === 0) return alert('No records to export');
+    if (filteredList.length === 0) return notify('No records to export', 'error');
     const label = activeTab === 'client_in' ? 'Client_Payments' : activeTab === 'vendor_out' ? 'Vendor_Payments' : 'Employee_Payouts';
     const rows = filteredList.map(item => ({
       Date: item.date,

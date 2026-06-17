@@ -40,7 +40,7 @@ const HRSettings = ({ hqSettings, role, db, logAction, addToast }) => {
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
-    if (!can(role, 'hr_settings', 'edit')) return alert('Access denied.');
+    if (!can(role, 'hr_settings', 'edit')) return addToast('Access denied.', 'error');
     setSaving(true);
     try {
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'hq'), form);

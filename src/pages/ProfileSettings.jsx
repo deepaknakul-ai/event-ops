@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { notify } from '../utils/toast';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { hashPassword, verifyPassword } from '../utils/helpers';
 
@@ -22,18 +23,18 @@ const ProfileSettings = ({ employee, db, appId, logAction }) => {
         name: formData.name, mobile1: formData.mobile1, mobile2: formData.mobile2, address: formData.address, updated_at: serverTimestamp()
       });
       logAction('employees', 'profile_update', employee.id, formData, employee.name);
-      alert("Profile updated successfully.");
-    } catch (e) { console.error(e); alert("Error updating profile."); }
+      notify("Profile updated successfully.", 'success');
+    } catch (e) { console.error(e); notify("Error updating profile.", 'error'); }
   };
 
   const handleChangePassword = async () => {
-    if (!passForm.current || !passForm.new || !passForm.confirm) return alert("All fields required");
-    if (passForm.new !== passForm.confirm) return alert("New passwords do not match");
+    if (!passForm.current || !passForm.new || !passForm.confirm) return notify("All fields required", 'error');
+    if (passForm.new !== passForm.confirm) return notify("New passwords do not match", 'info');
     
     const storedPass = employee.password;
-    if (!storedPass) return alert('No password on record. Ask admin to set your password first.');
+    if (!storedPass) return notify('No password on record. Ask admin to set your password first.', 'error');
     const currentMatch = await verifyPassword(passForm.current, storedPass);
-    if (!currentMatch) return alert('Incorrect current password');
+    if (!currentMatch) return notify('Incorrect current password', 'info');
 
     try {
       const hashedNew = await hashPassword(passForm.new);
@@ -41,9 +42,9 @@ const ProfileSettings = ({ employee, db, appId, logAction }) => {
         password: hashedNew, password_hashed: true, password_updated_at: serverTimestamp()
       });
       logAction('employees', 'password_change_self', employee.id, {}, employee.name);
-      alert("Password changed successfully.");
+      notify("Password changed successfully.", 'success');
       setPassForm({ current: '', new: '', confirm: '' });
-    } catch (e) { console.error(e); alert("Error changing password."); }
+    } catch (e) { console.error(e); notify("Error changing password.", 'error'); }
   };
 
   if (!employee) return <div className="p-8 text-center text-slate-500">Profile not available. Please contact admin.</div>;

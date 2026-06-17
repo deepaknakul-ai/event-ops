@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { notify } from '../utils/toast';
 import {
   Plus, Search, Edit, Trash2, Upload, Eye, X, FileText,
   CheckCircle, Clock, XCircle, Download, Filter, ChevronDown,
@@ -206,9 +207,9 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
 
   // ── Save ──
   const handleSave = async () => {
-    if (editingId ? !can(role, 'purchase_invoices', 'edit') : !can(role, 'purchase_invoices', 'create')) return alert('Access denied: insufficient permissions.');
-    if (!form.invoice_date) return alert('Invoice date is required.');
-    if (!form.vendor_name && !form.vendor_id) return alert('Vendor / Supplier name is required.');
+    if (editingId ? !can(role, 'purchase_invoices', 'edit') : !can(role, 'purchase_invoices', 'create')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!form.invoice_date) return notify('Invoice date is required.', 'error');
+    if (!form.vendor_name && !form.vendor_id) return notify('Vendor / Supplier name is required.', 'error');
     // C-2 fix: enforce FY lock on PI save (was Finance.jsx-only).
     if (!assertFYNotLocked(form.invoice_date, lockedFYs)) return;
     if (editingId) {
@@ -274,14 +275,14 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       setIsModalOpen(false);
     } catch (e) {
       console.error(e);
-      alert('Save failed: ' + e.message);
+      notify('Save failed: ' + e.message, 'error');
     }
     setLoading(false);
   };
 
   // ── Delete ──
   const handleDelete = (rec) => {
-    if (!can(role, 'purchase_invoices', 'delete')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'purchase_invoices', 'delete')) return notify('Access denied: insufficient permissions.', 'error');
     if (!assertFYNotLocked(rec?.invoice_date, lockedFYs)) return;
     setDeleteConfirm({
       isOpen: true,
@@ -302,7 +303,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
             return next;
           });
           logAction('purchase_invoices', 'delete', rec.id, {}, rec.pi_no);
-        } catch (e) { alert('Delete failed: ' + e.message); }
+        } catch (e) { notify('Delete failed: ' + e.message, 'error'); }
       }
     });
   };
@@ -325,7 +326,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       const uploaded = await handleImageUpload(files, piNo);
       setForm(f => ({ ...f, images: [...(f.images || []), ...uploaded] }));
     } catch (err) {
-      alert('Upload failed: ' + err.message);
+      notify('Upload failed: ' + err.message, 'error');
     }
     e.target.value = '';
   };

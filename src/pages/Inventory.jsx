@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import {
   Box, Plus, Search, Edit, Trash2, Layers, Users, DollarSign,
   Truck, Settings, Hammer, CalendarDays, Printer, Tag, ChevronDown, X,
@@ -95,7 +96,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
   };
 
   const handleArchive = async (id, archive) => {
-    if (!can(role, 'inventory', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'inventory', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     const item = inventory.find(i => i.id === id);
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory', id), {
       is_archived: archive,
@@ -105,7 +106,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
   };
 
   const handleDelete = async (id) => {
-    if (!can(role, 'inventory', 'delete')) return alert('Access denied: only Admin can delete inventory.');
+    if (!can(role, 'inventory', 'delete')) return notify('Access denied: only Admin can delete inventory.', 'error');
     const itemName = inventory.find(i => i.id === id)?.name || 'this item';
     setDeleteConfirm({
       isOpen: true,
@@ -119,12 +120,12 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
   };
 
   const handleSave = async () => {
-    if (editingId ? !can(role, 'inventory', 'edit') : !can(role, 'inventory', 'create')) return alert('Access denied: insufficient permissions.');
+    if (editingId ? !can(role, 'inventory', 'edit') : !can(role, 'inventory', 'create')) return notify('Access denied: insufficient permissions.', 'error');
     const totalQty = parseInt(formData.total) || 0;
     const serialDetails = formData.serial_details || [];
 
     if (serialDetails.length > totalQty) {
-      alert(`Serial count (${serialDetails.length}) exceeds total qty (${totalQty}). Please remove extra entries first.`);
+      notify(`Serial count (${serialDetails.length}) exceeds total qty (${totalQty}). Please remove extra entries first.`, 'error');
       return;
     }
 
@@ -167,8 +168,8 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
   const addComponent = () => {
       if (!compForm.item_id || !compForm.qty) return;
-      if (compForm.item_id === editingId) return alert("Cannot add self as component");
-      if (formData.composition && formData.composition.some(c => c.item_id === compForm.item_id)) return alert("Item already in composition");
+      if (compForm.item_id === editingId) return notify("Cannot add self as component", 'error');
+      if (formData.composition && formData.composition.some(c => c.item_id === compForm.item_id)) return notify("Item already in composition", 'error');
 
       setFormData({
           ...formData,
@@ -178,7 +179,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
   };
 
   const addSupplier = () => {
-      if (!supplierForm.vendor_id) return alert("Select a vendor");
+      if (!supplierForm.vendor_id) return notify("Select a vendor", 'error');
       setFormData(prev => ({
           ...prev,
           suppliers: [...(prev.suppliers || []), { ...supplierForm }]
@@ -216,7 +217,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
   const handleAutoGenerate = () => {
     const tQty = parseInt(formData.total) || 0;
-    if (tQty === 0) { alert('Set Total Qty first.'); return; }
+    if (tQty === 0) { notify('Set Total Qty first.', 'error'); return; }
     const existing = [...(formData.serial_details || [])];
     let counter = parseInt(autoGen.startFrom) || 1;
     const result = [];
@@ -566,7 +567,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                                     <button
                                         disabled={totalQty > 0 && serialCount >= totalQty}
                                         onClick={() => {
-                                            if (totalQty === 0) { alert('Set Total Qty first.'); return; }
+                                            if (totalQty === 0) { notify('Set Total Qty first.', 'error'); return; }
                                             setFormData({ ...formData, serial_details: [...(formData.serial_details || []), { serial: '', purchase_date: '', invoice_no: '', warranty_start: '', warranty_end: '' }] });
                                         }}
                                         className="flex items-center gap-1 text-xs bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { notify } from '../utils/toast';
 import {
   Plus, Edit, User, Key, Wallet, History, Camera, FileCheck, FileText, MapPin, Link2, Copy, ExternalLink, Printer, TrendingUp
 } from 'lucide-react';
@@ -89,7 +90,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const handleSave = async () => {
-    if (editingId ? !can(role, 'employees', 'edit') : !can(role, 'employees', 'create')) return alert('Access denied: insufficient permissions.');
+    if (editingId ? !can(role, 'employees', 'edit') : !can(role, 'employees', 'create')) return notify('Access denied: insufficient permissions.', 'error');
     // Only admin (Owner) can assign/change roles; non-admins always retain the employee's existing role
     const resolvedRole = can(role, 'employees', 'manage_roles')
       ? formData.role
@@ -141,8 +142,8 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const handlePasswordChange = async () => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
-    if (!newPassword) return alert("Enter password");
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!newPassword) return notify("Enter password", 'error');
     const hashedPw = await hashPassword(newPassword);
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', selectedEmp.id), {
       password: hashedPw,
@@ -150,11 +151,11 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       password_updated_at: serverTimestamp()
     });
     logAction('employees', 'password_change', selectedEmp.id, {}, selectedEmp.name);
-    alert("Password updated"); setPasswordModalOpen(false); setNewPassword('');
+    notify("Password updated", 'success'); setPasswordModalOpen(false); setNewPassword('');
   };
 
   const handleUnlock = async (id) => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if(!confirm("Unlock this account?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', id), {
         is_locked: false,
@@ -164,13 +165,13 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const updateStatus = async (id, status) => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', id), { status });
     logAction('employees', 'status_change', id, { status }, `Status: ${status}`);
   };
 
   const handleDelete = async (emp) => {
-    if (!can(role, 'employees', 'delete')) return alert('Access denied: only Admin can delete employees.');
+    if (!can(role, 'employees', 'delete')) return notify('Access denied: only Admin can delete employees.', 'error');
     setDeleteConfirm({
       isOpen: true,
       title: `Delete Employee: ${emp.name}`,
@@ -183,8 +184,8 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const submitAdvance = async () => {
-    if (!can(role, 'finance', 'create')) return alert('Access denied: insufficient permissions.');
-    if(!advanceForm.amount) return alert("Enter amount");
+    if (!can(role, 'finance', 'create')) return notify('Access denied: insufficient permissions.', 'error');
+    if(!advanceForm.amount) return notify("Enter amount", 'error');
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'advances'), {
         employee_id: selectedEmp.id,
@@ -195,22 +196,22 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
         created_at: new Date().toISOString()
       });
       logAction('advances', 'create', selectedEmp.id, { amount: advanceForm.amount }, `Advance to ${selectedEmp.name}`);
-      alert(`Advance of ${advanceForm.amount} recorded for ${selectedEmp.name}`);
+      notify(`Advance of ${advanceForm.amount} recorded for ${selectedEmp.name}`, 'success');
       setIsAdvanceModalOpen(false);
       setAdvanceForm({ amount: '', date: new Date().toISOString().split('T')[0], remarks: '' });
     } catch (e) {
       console.error(e);
-      alert("Error saving advance");
+      notify("Error saving advance", 'error');
     }
   };
 
   const submitPromotionUpdate = async () => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
-    if (!promotionEmployee?.id) return alert('Select an employee first.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!promotionEmployee?.id) return notify('Select an employee first.', 'error');
 
     const rateValue = parseFloat(promotionForm.hourlyRate);
-    if (!promotionForm.effectiveFrom) return alert('Please select effective date.');
-    if (!Number.isFinite(rateValue) || rateValue < 0) return alert('Please enter a valid hourly rate.');
+    if (!promotionForm.effectiveFrom) return notify('Please select effective date.', 'error');
+    if (!Number.isFinite(rateValue) || rateValue < 0) return notify('Please enter a valid hourly rate.', 'error');
 
     const existingHistory = normalizeHourlyRateHistory(promotionEmployee);
     const nextEntry = {
@@ -246,7 +247,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
         historySize: hourlyRateHistory.length,
       }, promotionEmployee.name);
 
-      alert(`Promotion/rate update saved for ${promotionEmployee.name}.`);
+      notify(`Promotion/rate update saved for ${promotionEmployee.name}.`, 'success');
       setIsPromotionModalOpen(false);
       setPromotionEmployee(null);
       setPromotionForm({
@@ -257,7 +258,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       });
     } catch (error) {
       console.error(error);
-      alert('Failed to save promotion/rate update. Please try again.');
+      notify('Failed to save promotion/rate update. Please try again.', 'error');
     }
   };
 
@@ -388,7 +389,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   const generateStatementToken = () => generateSecureToken(16);
 
   const handleStatementLink = async (emp) => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     let token = emp.statement_link_token;
     if (!token) {
       token = generateStatementToken();
@@ -420,7 +421,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
 
   const openEmployeeLedger = async (emp) => {
     if (!can(role, 'employees', 'edit') && !emp.statement_link_token) {
-      alert('Employee ledger link is not generated yet. Please ask admin/manager to generate it first.');
+      notify('Employee ledger link is not generated yet. Please ask admin/manager to generate it first.', 'error');
       return;
     }
     const token = await ensureEmployeeLedgerToken(emp);
@@ -428,7 +429,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const toggleStatementLink = async (emp, enabled) => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', emp.id), {
       statement_link_enabled: enabled
     });
@@ -437,13 +438,13 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   };
 
   const setStatementExpiry = async (emp, days) => {
-    if (!can(role, 'employees', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'employees', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     const expiresAt = days ? new Date(Date.now() + days * 86400000).toISOString() : null;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', emp.id), {
       statement_link_expires_at: expiresAt
     });
     logAction('employees', 'set_statement_expiry', emp.id, { days }, emp.name);
-    alert(days ? `Link will expire in ${days} days.` : 'Expiry removed. Link is now permanent.');
+    notify(days ? `Link will expire in ${days} days.` : 'Expiry removed. Link is now permanent.', 'success');
   };
 
   return (
@@ -671,7 +672,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
           <p className="text-sm text-slate-500">Share this link with the employee so they can view their public ledger (payouts &amp; advances) anytime.</p>
           <div className="flex items-center gap-2">
             <input readOnly value={statementLinkModal.link} className="flex-1 rounded border border-slate-300 p-2 text-sm text-black bg-slate-50 truncate" />
-            <button onClick={() => { navigator.clipboard.writeText(statementLinkModal.link); alert('Link copied!'); }} className="rounded bg-indigo-600 text-white px-3 py-2 text-sm hover:bg-indigo-700 flex items-center gap-1"><Copy size={14} /> Copy</button>
+            <button onClick={() => { navigator.clipboard.writeText(statementLinkModal.link); notify('Link copied!', 'success'); }} className="rounded bg-indigo-600 text-white px-3 py-2 text-sm hover:bg-indigo-700 flex items-center gap-1"><Copy size={14} /> Copy</button>
             <a href={statementLinkModal.link} target="_blank" rel="noopener noreferrer" className="rounded bg-slate-100 text-slate-700 px-3 py-2 text-sm hover:bg-slate-200 flex items-center gap-1"><ExternalLink size={14} /></a>
           </div>
           <div className="flex items-center justify-between border-t pt-3">

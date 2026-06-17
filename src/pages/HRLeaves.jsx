@@ -86,7 +86,7 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
   };
 
   const handleAction = async (leave, action) => {
-    if (!can(role, 'hr_leaves', 'approve')) return alert('Access denied.');
+    if (!can(role, 'hr_leaves', 'approve')) return addToast('Access denied.', 'error');
     try {
       const update = { status: action, approvedBy: currentEmpId, approvedAt: new Date().toISOString() };
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaves', leave.id), update);
@@ -98,7 +98,7 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
   // Cancel an already-approved leave (admin/manager/HR). Restores the day(s) to
   // the employee's balance automatically, since balances count only 'Approved'.
   const handleCancelApproved = async (leave) => {
-    if (!can(role, 'hr_leaves', 'cancel')) return alert('Access denied.');
+    if (!can(role, 'hr_leaves', 'cancel')) return addToast('Access denied.', 'error');
     const reason = window.prompt(`Cancel approved ${leave.type} leave for ${getEmpName(leave.employeeId)} (${fmtDate(leave.startDate)} — ${fmtDate(leave.endDate)})?\n\nReason (required):`, '');
     if (reason === null) return;           // user dismissed
     if (!reason.trim()) return addToast('A reason is required to cancel a leave', 'error');

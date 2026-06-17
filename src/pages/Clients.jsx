@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import {
   Users, Plus, Search, Edit, Trash2, MapPin, Copy, Box,
   BarChart2, TrendingUp, TrendingDown, X, ArrowLeft, AlertTriangle,
@@ -226,11 +227,11 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const name = (newCompany.name || '').trim();
     const gstin = (newCompany.gstin || '').trim().toUpperCase();
     const address = (newCompany.address || '').trim();
-    if (!name || !gstin || !address) return alert('Company/Branch Name, GSTIN and Address are required.');
+    if (!name || !gstin || !address) return notify('Company/Branch Name, GSTIN and Address are required.', 'error');
 
     const dupInForm = (formData.companies || []).some(c => (c.gstin || '').trim().toUpperCase() === gstin);
     if (dupInForm || (formData.gstin || '').trim().toUpperCase() === gstin) {
-      return alert('This GSTIN is already added in this client record.');
+      return notify('This GSTIN is already added in this client record.', 'error');
     }
 
     setFormData(prev => ({
@@ -257,7 +258,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleDelete = async (id) => {
-    if (!can(role, 'clients', 'delete')) return alert('Access denied: only Admin can delete clients.');
+    if (!can(role, 'clients', 'delete')) return notify('Access denied: only Admin can delete clients.', 'error');
     const clientName = clients.find(c => c.id === id)?.name || 'this client';
     setConfirmModal({
       isOpen: true,
@@ -287,7 +288,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleAddContact = () => {
-    if (!newContact.name || !newContact.phone) return alert("Name and Phone are required.");
+    if (!newContact.name || !newContact.phone) return notify("Name and Phone are required.", 'error');
     setFormData({ ...formData, contacts: [...formData.contacts, newContact] });
     setNewContact({ name: '', role: '', phone: '', email: '' });
   };
@@ -299,11 +300,11 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleSave = async () => {
-    if (editingId ? !can(role, 'clients', 'edit') : !can(role, 'clients', 'create')) return alert('Access denied: insufficient permissions.');
+    if (editingId ? !can(role, 'clients', 'edit') : !can(role, 'clients', 'create')) return notify('Access denied: insufficient permissions.', 'error');
     const normalizedPrimaryGST = (formData.gstin || '').trim().toUpperCase();
     if (normalizedPrimaryGST) {
       const val = validateGSTIN(normalizedPrimaryGST, formData.state);
-      if (!val.valid) return alert(`GST Error: ${val.msg}`);
+      if (!val.valid) return notify(`GST Error: ${val.msg}`, 'error');
     }
 
     const normalizedCompanies = (formData.companies || []).map(c => ({
@@ -316,14 +317,14 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
     for (const company of normalizedCompanies) {
       const val = validateGSTIN(company.gstin, company.state);
-      if (!val.valid) return alert(`GST Error in company/branch "${company.name}": ${val.msg}`);
+      if (!val.valid) return notify(`GST Error in company/branch "${company.name}": ${val.msg}`, 'error');
     }
 
     const ownGstSet = new Set();
     if (normalizedPrimaryGST) ownGstSet.add(normalizedPrimaryGST);
     for (const company of normalizedCompanies) {
       if (ownGstSet.has(company.gstin)) {
-        return alert(`Duplicate GSTIN inside this client: ${company.gstin}`);
+        return notify(`Duplicate GSTIN inside this client: ${company.gstin}`, 'error');
       }
       ownGstSet.add(company.gstin);
     }
@@ -428,7 +429,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         if (collidingGst.length > 0) parts.push(`same GSTIN: ${collidingGst.join(', ')}`);
         return `"${d.name}" (${parts.join(' & ')})`;
       }).join('; ');
-      return alert(`GSTIN must be unique across all clients and branches. Conflicts found: ${reasons}`);
+      return notify(`GSTIN must be unique across all clients and branches. Conflicts found: ${reasons}`, 'error');
     }
 
     const phoneDuplicates = clients.filter(c => {
@@ -456,8 +457,8 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleSaveVendorAsset = async () => {
-    if (!can(role, 'inventory', 'create')) return alert('Access denied: insufficient permissions.');
-    if (!vendorAssetForm.name || !vendorAssetForm.qty) return alert("Name and Qty required");
+    if (!can(role, 'inventory', 'create')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!vendorAssetForm.name || !vendorAssetForm.qty) return notify("Name and Qty required", 'error');
 
     const newItem = {
       name: vendorAssetForm.name,
@@ -477,7 +478,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleDeleteAsset = async (assetId) => {
-    if (!can(role, 'inventory', 'delete')) return alert('Access denied: only Admin can delete assets.');
+    if (!can(role, 'inventory', 'delete')) return notify('Access denied: only Admin can delete assets.', 'error');
     setConfirmModal({
       isOpen: true,
       requireTyped: false,
@@ -493,7 +494,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   const generateLedgerToken = () => generateSecureToken(16);
 
   const handleLedgerLink = async (client) => {
-    if (!can(role, 'clients', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     let token = client.ledger_link_token;
     if (!token) {
       token = generateLedgerToken();
@@ -511,7 +512,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleRegenerateLedgerLink = async () => {
-    if (!can(role, 'clients', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if (!ledgerLinkModal.client) return;
     const token = generateLedgerToken();
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', ledgerLinkModal.client.id), {
@@ -526,7 +527,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   };
 
   const handleSetLedgerExpiry = async () => {
-    if (!can(role, 'clients', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if (!ledgerLinkModal.client) return;
     const days = parseInt(ledgerExpiryDays, 10);
     const payload = {
@@ -549,13 +550,13 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   const handleCopyLedgerLink = async () => {
     if (!ledgerLinkModal.link) return;
     await navigator.clipboard.writeText(ledgerLinkModal.link);
-    alert('Ledger link copied to clipboard.');
+    notify('Ledger link copied to clipboard.', 'success');
   };
 
   const handleCopyLedgerLinkValue = async (link) => {
     if (!link) return;
     await navigator.clipboard.writeText(link);
-    alert('Ledger link copied to clipboard.');
+    notify('Ledger link copied to clipboard.', 'success');
   };
 
   const handleOpenLedgerPage = async (client) => {
@@ -565,7 +566,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     // Reuse existing token when available.
     if (!token) {
       if (!can(role, 'clients', 'edit')) {
-        alert('Ledger link is not generated yet. Please ask admin/manager to generate it first.');
+        notify('Ledger link is not generated yet. Please ask admin/manager to generate it first.', 'error');
         return;
       }
       token = generateLedgerToken();
@@ -591,7 +592,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       .sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''));
 
     if (clientProjects.length === 0) {
-      alert('No reimbursable entries found for this client.');
+      notify('No reimbursable entries found for this client.', 'error');
       return;
     }
 
@@ -600,7 +601,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
     if (!token) {
       if (!can(role, 'projects', 'edit')) {
-        alert('Reimbursable link is not generated yet. Please ask admin/manager to generate it first.');
+        notify('Reimbursable link is not generated yet. Please ask admin/manager to generate it first.', 'error');
         return;
       }
       token = generateReimbursableToken();

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { notify } from '../utils/toast';
 import { Link } from 'react-router-dom';
 import {
   Utensils, Hotel, Hammer, Briefcase, AlertCircle, Wallet,
@@ -79,7 +80,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     if (!file) return;
     const maxBytes = (expenseProofSettings.maxSizeMb || 2) * 1024 * 1024;
     if (file.size > maxBytes) {
-      return alert(`File too large. Maximum allowed size is ${expenseProofSettings.maxSizeMb} MB.`);
+      return notify(`File too large. Maximum allowed size is ${expenseProofSettings.maxSizeMb} MB.`, 'info');
     }
     setProofUploading(true);
     try {
@@ -90,7 +91,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
       const url = await getDownloadURL(storageRef);
       setter({ url, name: file.name, path });
     } catch (err) {
-      alert('Upload failed: ' + err.message);
+      notify('Upload failed: ' + err.message, 'error');
     }
     setProofUploading(false);
   };
@@ -133,10 +134,10 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const filteredProjects = useMemo(() => availableProjects.filter(p => p.project_name.toLowerCase().includes(projectSearch.toLowerCase())), [availableProjects, projectSearch]);
 
   const handleAddToBatch = () => {
-    if (!expenseForm.amount || (!expenseForm.is_general && !expenseForm.project_id)) return alert("Fill required fields");
+    if (!expenseForm.amount || (!expenseForm.is_general && !expenseForm.project_id)) return notify("Fill required fields", 'error');
     const amt = parseFloat(expenseForm.amount);
     if (expenseProofSettings.threshold > 0 && amt > expenseProofSettings.threshold && !proofFile) {
-      return alert(`Proof is required for expenses above ${formatCurrency(expenseProofSettings.threshold)}. Please attach an invoice/bill/receipt.`);
+      return notify(`Proof is required for expenses above ${formatCurrency(expenseProofSettings.threshold)}. Please attach an invoice/bill/receipt.`, 'error');
     }
     setBatchList([...batchList, { ...expenseForm, amount: amt, id: Date.now(), proof_url: proofFile?.url || '', proof_path: proofFile?.path || '', proof_name: proofFile?.name || '' }]);
     setExpenseForm({ ...expenseForm, amount: '', remarks: '' });
@@ -146,7 +147,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const removeBatchItem = (id) => setBatchList(batchList.filter(i => i.id !== id));
 
   const handleSubmitBatch = async () => {
-    if (!can(role, 'expenses', 'create')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'expenses', 'create')) return notify('Access denied: insufficient permissions.', 'error');
     if (batchList.length === 0) return;
     // C-2 fix: every batched item's date must be in an unlocked FY.
     for (const it of batchList) {
@@ -201,12 +202,12 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     }
 
     if (alertMessage) {
-      alert(alertMessage);
+      notify(alertMessage, 'info');
     }
   };
 
   const handleApprove = async (id) => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: only Admin, Accountant, or Manager can approve expenses.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: only Admin, Accountant, or Manager can approve expenses.', 'error');
     // C-2 / H-7 fix: Approval makes the expense post to P&L — block when its
     // FY is already locked.
     const exp = expenses.find(e => e.id === id);
@@ -217,7 +218,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleRequestClarification = async (id) => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     const note = prompt('Request clarification (required):');
     if (!note) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
@@ -229,7 +230,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleDisapprove = async (id) => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     const note = prompt('Disapprove reason (optional):');
     if (!confirm("Disapprove this expense?")) return;
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
@@ -241,8 +242,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleBulkApprove = async () => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: insufficient permissions.');
-    if (selectedApprovalIds.length === 0) return alert('Select at least one expense.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
+    if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
     if (!confirm(`Approve ${selectedApprovalIds.length} expense(s)?`)) return;
     await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' })));
     selectedApprovalIds.forEach(id => logAction('expenses', 'approve', id, {}, 'Expense Approved'));
@@ -250,8 +251,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleBulkClarify = async () => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: insufficient permissions.');
-    if (selectedApprovalIds.length === 0) return alert('Select at least one expense.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
+    if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
     const note = prompt('Request clarification (required):');
     if (!note) return;
     if (!confirm(`Request clarification for ${selectedApprovalIds.length} expense(s)?`)) return;
@@ -265,8 +266,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleBulkDisapprove = async () => {
-    if (!can(role, 'expenses', 'approve')) return alert('Access denied: insufficient permissions.');
-    if (selectedApprovalIds.length === 0) return alert('Select at least one expense.');
+    if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
+    if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
     const note = prompt('Disapprove reason (optional):');
     if (!confirm(`Disapprove ${selectedApprovalIds.length} expense(s)?`)) return;
     await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), {
@@ -307,17 +308,17 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleSaveEdit = async () => {
-    if (!can(role, 'expenses', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'expenses', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if (!editingExpenseId) return;
     if (!editForm.amount || (!editForm.is_general && !editForm.project_id)) {
-      return alert('Fill required fields');
+      return notify('Fill required fields', 'error');
     }
     if (!assertFYNotLocked(editForm.date, lockedFYs)) return;
     const orig = expenses.find(e => e.id === editingExpenseId);
     if (orig?.date && orig.date !== editForm.date && !assertFYNotLocked(orig.date, lockedFYs)) return;
     const editAmt = parseFloat(editForm.amount);
     if (expenseProofSettings.threshold > 0 && editAmt > expenseProofSettings.threshold && !editProofFile) {
-      return alert(`Proof is required for expenses above ${formatCurrency(expenseProofSettings.threshold)}. Please attach an invoice/bill/receipt.`);
+      return notify(`Proof is required for expenses above ${formatCurrency(expenseProofSettings.threshold)}. Please attach an invoice/bill/receipt.`, 'error');
     }
     const payload = {
       date: editForm.date,
@@ -338,7 +339,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   };
 
   const handleDeleteExpense = async (exp) => {
-    if (!can(role, 'expenses', 'delete')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'expenses', 'delete')) return notify('Access denied: insufficient permissions.', 'error');
     if (!isEditableExpense(exp)) return;
     if (!assertFYNotLocked(exp?.date, lockedFYs)) return;
     setDeleteConfirm({

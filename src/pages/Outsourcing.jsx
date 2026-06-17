@@ -184,11 +184,11 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
 
   // Handlers
   const handleSaveWizardAllocation = async () => {
-      if (!can(role, 'outsourcing', 'create')) return alert('Access denied: only Admin and Project Manager can create outsourcing allocations.');
-      if (!vendorForm.vendor_id) return alert("Select Vendor first");
+      if (!can(role, 'outsourcing', 'create')) return addToast('Access denied: only Admin and Project Manager can create outsourcing allocations.', 'error');
+      if (!vendorForm.vendor_id) return addToast("Select Vendor first", 'error');
 
       const selectedItemIds = Object.keys(allocWizardSelection).filter(id => allocWizardSelection[id]?.selected);
-      if (selectedItemIds.length === 0) return alert("Select at least one item to allocate");
+      if (selectedItemIds.length === 0) return addToast("Select at least one item to allocate", 'error');
 
       const vendor = clients.find(c => c.id === vendorForm.vendor_id);
       const newAllocations = [];
@@ -240,16 +240,16 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
           setAllocWizardSelection({});
       } catch (e) {
           console.error(e);
-          alert("Failed to allocate");
+          addToast("Failed to allocate", 'error');
       }
   };
 
   const handleUpdateAllocation = async (updatedAllocation) => {
-    if (!can(role, 'outsourcing', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'outsourcing', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
     try {
       // Check if linked to PO
       if (updatedAllocation.po_id) {
-          alert("Notice: This item is linked to a PO. Please update the PO if necessary.");
+          addToast("Notice: This item is linked to a PO. Please update the PO if necessary.", 'error');
       }
 
       // Recalculate totals
@@ -278,12 +278,12 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
       setIsEditModalOpen(false);
     } catch (err) {
       console.error(err);
-      alert("Failed to update allocation: " + err.message);
+      addToast("Failed to update allocation: " + err.message, 'error');
     }
   };
 
   const handleRemove = async (alloc) => {
-    if (!can(role, 'outsourcing', 'delete')) return alert('Access denied: only Admin can delete outsourcing allocations.');
+    if (!can(role, 'outsourcing', 'delete')) return addToast('Access denied: only Admin can delete outsourcing allocations.', 'error');
     if(confirm("Remove this vendor allocation?")) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProjectId), {
           vendor_allocations: arrayRemove(alloc)
@@ -429,11 +429,11 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
   const handleSaveVendorInvoice = async () => {
     const editing = !!editingPIId;
     if (!can(role, 'outsourcing', 'edit') || !can(role, 'purchase_invoices', editing ? 'edit' : 'create')) {
-      return alert('Access denied: insufficient permissions.');
+      return addToast('Access denied: insufficient permissions.', 'error');
     }
-    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return alert('Vendor invoice number and date are required');
+    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return addToast('Vendor invoice number and date are required', 'error');
     const pId = selectedProjectId || invoicingPO?.projectId;
-    if (!pId) return alert('Project context missing');
+    if (!pId) return addToast('Project context missing', 'error');
     if (!assertFYNotLocked(invoiceForm.invoice_date, lockedFYs)) return;
 
     const base = parseFloat(invoiceForm.base_amount) || 0;
@@ -522,7 +522,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
       setEditingPIId(null);
     } catch (e) {
       console.error(e);
-      alert('Error saving purchase invoice: ' + e.message);
+      addToast('Error saving purchase invoice: ' + e.message, 'error');
     }
     setSavingInvoice(false);
   };
@@ -565,10 +565,10 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
   };
 
   const handleCreatePO = async () => {
-      if (!can(role, 'outsourcing', 'create')) return alert('Access denied: only Admin and Project Manager can create Purchase Orders.');
-      if (!poForm.po_no || !poForm.date) return alert("PO Number and Date required");
+      if (!can(role, 'outsourcing', 'create')) return addToast('Access denied: only Admin and Project Manager can create Purchase Orders.', 'error');
+      if (!poForm.po_no || !poForm.date) return addToast("PO Number and Date required", 'error');
       const pId = selectedProjectId || poVendorData?.projectId;
-      if (!pId) return alert("Project context missing");
+      if (!pId) return addToast("Project context missing", 'error');
 
       // Use package cost if specified, otherwise sum all costs
       let subtotal = 0;
@@ -651,15 +651,15 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
           if(confirm("PO Created. Print now?")) generatePOPDF(newPO, 'print');
       } catch (e) {
           console.error(e);
-          alert("Error creating PO: " + e.message);
+          addToast("Error creating PO: " + e.message, 'error');
       }
   };
 
   const handleUpdatePO = async () => {
-      if (!can(role, 'outsourcing', 'edit')) return alert('Access denied: only Admin and Project Manager can update Purchase Orders.');
-      if (!poForm.po_no || !poForm.date) return alert("PO Number and Date required");
+      if (!can(role, 'outsourcing', 'edit')) return addToast('Access denied: only Admin and Project Manager can update Purchase Orders.', 'error');
+      if (!poForm.po_no || !poForm.date) return addToast("PO Number and Date required", 'error');
       const pId = selectedProjectId || editingPO?.projectId;
-      if (!pId) return alert("Project context missing");
+      if (!pId) return addToast("Project context missing", 'error');
 
       // Use package cost if specified, otherwise sum all costs
       let subtotal = 0;
@@ -745,7 +745,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
           if(confirm("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
       } catch (e) {
           console.error(e);
-          alert("Error updating PO: " + e.message);
+          addToast("Error updating PO: " + e.message, 'error');
       }
   };
 
@@ -753,7 +753,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
       const files = Array.from(e.target.files);
       files.forEach(file => {
           if (file.size > 1024 * 1024) { // 1MB limit per file
-              alert(`File ${file.name} is too large (max 1MB)`);
+              addToast(`File ${file.name} is too large (max 1MB)`, 'info');
               return;
           }
           const reader = new FileReader();
@@ -775,7 +775,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
   };
 
   const updatePOStatus = async (po, newStatus) => {
-      if (!can(role, 'outsourcing', 'edit')) return alert('Access denied: insufficient permissions.');
+      if (!can(role, 'outsourcing', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
       const pId = selectedProjectId || po.projectId;
       if (!pId) return;
 
@@ -807,7 +807,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
           logAction('projects', 'update_po_status', pId, { po_no: po.po_no, status: newStatus }, "PO Status Update");
       } catch (e) {
           console.error(e);
-          alert("Error updating status: " + e.message);
+          addToast("Error updating status: " + e.message, 'error');
       }
   };
 
@@ -1079,7 +1079,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
       }
       } catch (e) {
           console.error("PDF Generation Error", e);
-          alert("Failed to generate PDF. Check console for details.");
+          addToast("Failed to generate PDF. Check console for details.", 'error');
       }
   };
 
@@ -1221,7 +1221,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction,
         doc.save(`Outsourcing_Summary_${selectedProject.project_name.replace(/\s+/g, '_')}.pdf`);
       } catch (e) {
           console.error(e);
-          alert("Failed to generate PDF");
+          addToast("Failed to generate PDF", 'error');
       }
   };
 

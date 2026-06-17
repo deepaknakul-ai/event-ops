@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, ComposedChart
@@ -1208,7 +1209,7 @@ const Reports = ({
        if (isConsolidated) doc.text(`(Consolidated View)`, 14, 40);
     }
 
-    if (reportData.length === 0) return alert("No data to export");
+    if (reportData.length === 0) return notify("No data to export", 'info');
 
     // Filter out internal keys like _isTotal
     const headers = Object.keys(reportData[0]).filter(k => !k.startsWith('_'));
@@ -1236,7 +1237,7 @@ const Reports = ({
   };
 
   const exportExcel = () => {
-    if (reportData.length === 0) return alert("No data to export");
+    if (reportData.length === 0) return notify("No data to export", 'info');
     // Clean data for excel (remove _isTotal)
     const cleanData = reportData.map(({ _isTotal, ...rest }) => rest);
     const ws = XLSX.utils.json_to_sheet(cleanData);
@@ -1270,7 +1271,7 @@ const Reports = ({
     exportPDF();
     setTimeout(() => {
         window.location.href = `mailto:${recipientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-        alert("Report downloaded. Please attach the file to the email draft.");
+        notify("Report downloaded. Please attach the file to the email draft.", 'error');
     }, 500);
   };
 

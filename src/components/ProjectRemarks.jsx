@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import { formatDate } from '../utils/helpers';
 
 // Initial state for project remarks
@@ -86,7 +87,7 @@ export function ProjectRemarks({
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!remarkForm.remark.trim()) {
-      alert('Please enter a remark');
+      notify('Please enter a remark', 'error');
       return;
     }
 
@@ -117,7 +118,7 @@ export function ProjectRemarks({
       setRemarkForm(initialRemarkForm);
     } catch (error) {
       console.error('Error saving remark:', error);
-      alert('Failed to save remark');
+      notify('Failed to save remark', 'error');
     } finally {
       setIsSubmitting(false);
     }

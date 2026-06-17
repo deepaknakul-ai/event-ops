@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import {
   Search, FileText, Truck, RotateCcw, ShoppingBag, Receipt,
   Filter, X, ChevronDown, ChevronUp, Eye, Printer,
@@ -245,7 +246,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, db, appId, logAction 
 
   // ─── PO Status update ─────────────────────────────────────────────────────────
   const handleUpdatePOStatus = async (docEntry, newStatus) => {
-    if (!can(role, 'documents', 'edit')) return alert('Permission denied.');
+    if (!can(role, 'documents', 'edit')) return notify('Permission denied.', 'error');
     try {
       const projRef   = doc(db, 'artifacts', appId, 'public', 'data', 'projects', docEntry.projectId);
       const projSnap  = await getDoc(projRef);
@@ -261,7 +262,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, db, appId, logAction 
       if (detailDoc?.id === docEntry.id) setDetailDoc(d => ({ ...d, status: newStatus }));
     } catch (e) {
       console.error(e);
-      alert('Error updating PO status.');
+      notify('Error updating PO status.', 'error');
     }
   };
 

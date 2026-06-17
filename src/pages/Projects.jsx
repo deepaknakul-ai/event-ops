@@ -343,10 +343,10 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   }, [selectedProject?.remarks]);
 
   const handleBulkInvoiceApply = async () => {
-    if (!can(role, 'projects', 'edit')) return alert('Access denied: insufficient permissions.');
-    if (bulkInvoiceSelected.size === 0) return alert('Select at least one project.');
-    if (!bulkInvoiceForm.invoice_no.trim()) return alert('Enter an Invoice Number.');
-    if (!bulkInvoiceForm.invoice_date) return alert('Enter an Invoice Date.');
+    if (!can(role, 'projects', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
+    if (bulkInvoiceSelected.size === 0) return addToast('Select at least one project.', 'error');
+    if (!bulkInvoiceForm.invoice_no.trim()) return addToast('Enter an Invoice Number.', 'error');
+    if (!bulkInvoiceForm.invoice_date) return addToast('Enter an Invoice Date.', 'error');
     const confirmed = window.confirm(`Apply invoice #${bulkInvoiceForm.invoice_no} to ${bulkInvoiceSelected.size} project(s)?`);
     if (!confirmed) return;
     const updates = [...bulkInvoiceSelected].map(id =>
@@ -362,7 +362,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setBulkInvoiceSelected(new Set());
     setBulkInvoiceForm({ invoice_no: '', invoice_date: new Date().toISOString().split('T')[0], invoice_status: 'Invoiced' });
     setBulkFilter({ clientId: '', status: '', dateFrom: '', dateTo: '' });
-    alert(`Invoice applied to ${updates.length} project(s).`);
+    addToast(`Invoice applied to ${updates.length} project(s).`, 'info');
   };
 
   const handleSaveRemark = async (projectId, newRemark) => {
@@ -447,7 +447,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   const exportFilteredProjects = () => {
     if (!canViewProjectFinancials) return addToast('Access denied: financial export is restricted.', 'error');
-    if (sortedProjects.length === 0) return alert("No projects to export");
+    if (sortedProjects.length === 0) return addToast("No projects to export", 'info');
     const data = sortedProjects.map(p => ({
         "Project Name": p.project_name,
         "Client": clients.find(c => c.id === p.client_id)?.name || '',
@@ -675,7 +675,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       title: 'Delete Project',
       message: `Permanently delete "${projName}" and all its associated data (items, challans, invoices)? This cannot be undone.`,
       onConfirm: async () => {
-        if (!can(role, 'projects', 'delete')) return alert('Access denied: only Admin can delete projects.');
+        if (!can(role, 'projects', 'delete')) return addToast('Access denied: only Admin can delete projects.', 'error');
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id));
         logAction('projects', 'delete', id, {}, projName);
       }
@@ -725,13 +725,13 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const updateStatus = async (pid, newStatus) => {
-    if (!can(role, 'projects', 'edit')) return alert('Access denied: insufficient permissions.');
-    if (newStatus === 'Closed' && !can(role, 'projects', 'close')) return alert("Only Admin can close projects.");
+    if (!can(role, 'projects', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
+    if (newStatus === 'Closed' && !can(role, 'projects', 'close')) return addToast("Only Admin can close projects.", 'info');
     const proj = projects.find(p => p.id === pid);
     const fromStatus = proj?.status || 'Quoted';
     // M-1 fix: enforce state machine. Block illegal transitions like Closed → Quoted.
     if (!isValidProjectTransition(fromStatus, newStatus)) {
-      return alert(`Invalid transition: ${fromStatus} → ${newStatus}. Allowed next states: ${(PROJECT_STATE_TRANSITIONS[fromStatus] || []).join(', ') || 'none'}.`);
+      return addToast(`Invalid transition: ${fromStatus} → ${newStatus}. Allowed next states: ${(PROJECT_STATE_TRANSITIONS[fromStatus] || []).join(', ') || 'none'}.`, 'error');
     }
     if (newStatus === 'Confirmed') {
       const today = new Date().toISOString().split('T')[0];
@@ -775,7 +775,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleSaveConfirmation = async (skip = false) => {
-    if (!can(role, 'projects', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
     if (!pendingConfirmPid) return;
     const payload = { status: 'Confirmed', updated_at: serverTimestamp() };
     if (!skip) {
@@ -1196,7 +1196,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             }
 
             if (qty > maxQty) {
-                alert(`Error: Item "${item.item_name}" exceeds available quantity. Max: ${maxQty}, Requested: ${qty}`);
+                addToast(`Error: Item "${item.item_name}" exceeds available quantity. Max: ${maxQty}, Requested: ${qty}`, 'error');
                 return;
             }
 
@@ -1208,11 +1208,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             if (pickedSerials.length) {
                 const dupes = pickedSerials.filter((s, i) => pickedSerials.indexOf(s) !== i);
                 if (dupes.length) {
-                    alert(`Error: duplicate serial(s) on "${item.item_name}": ${[...new Set(dupes)].join(', ')}`);
+                    addToast(`Error: duplicate serial(s) on "${item.item_name}": ${[...new Set(dupes)].join(', ')}`, 'error');
                     return;
                 }
                 if (pickedSerials.length > qty) {
-                    alert(`Error: ${pickedSerials.length} serials selected for "${item.item_name}" but qty is ${qty}.`);
+                    addToast(`Error: ${pickedSerials.length} serials selected for "${item.item_name}" but qty is ${qty}.`, 'error');
                     return;
                 }
                 if (challanType === 'return') {
@@ -1221,12 +1221,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                     const returnedSerials = getChallanedSerials(item.id, 'return', excludeId);
                     const invalid = pickedSerials.filter(s => !deliveredSerials.has(s));
                     if (invalid.length) {
-                        alert(`Error: serial(s) on "${item.item_name}" were never delivered: ${invalid.join(', ')}`);
+                        addToast(`Error: serial(s) on "${item.item_name}" were never delivered: ${invalid.join(', ')}`, 'error');
                         return;
                     }
                     const reReturned = pickedSerials.filter(s => returnedSerials.has(s));
                     if (reReturned.length) {
-                        alert(`Error: serial(s) on "${item.item_name}" already returned on a prior challan: ${reReturned.join(', ')}`);
+                        addToast(`Error: serial(s) on "${item.item_name}" already returned on a prior challan: ${reReturned.join(', ')}`, 'error');
                         return;
                     }
                 }
@@ -1236,8 +1236,8 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         }
     }
 
-    if (itemsToShip.length === 0) return alert("Please select at least one item.");
-    if (!can(role, 'challans', 'create')) return alert('Access denied: insufficient permissions.');
+    if (itemsToShip.length === 0) return addToast("Please select at least one item.", 'error');
+    if (!can(role, 'challans', 'create')) return addToast('Access denied: insufficient permissions.', 'error');
 
     try {
         // H-13: counter key derived from the challan's document date,
@@ -1339,12 +1339,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         setIsChallanModalOpen(false);
     } catch (e) {
         console.error(e);
-        alert(`Error saving challan: ${e.message}`);
+        addToast(`Error saving challan: ${e.message}`, 'error');
     }
   };
 
   const handleDeleteChallan = async (challan) => {
-    if (!can(role, 'challans', 'delete')) return alert('Access denied: only Admin can delete challans.');
+    if (!can(role, 'challans', 'delete')) return addToast('Access denied: only Admin can delete challans.', 'error');
     setDeleteConfirm({
       isOpen: true,
       requireTyped: false,
@@ -1396,7 +1396,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             }
         } catch(e) {
             console.error(e);
-            alert("Failed to delete challan");
+            addToast("Failed to delete challan", 'error');
         }
       }
     });
@@ -1407,7 +1407,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   // ==========================================
 
   const handleSaveProformaInvoice = async () => {
-    if (!can(role, 'projects', 'invoice')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'invoice')) return addToast('Access denied: insufficient permissions.', 'error');
     if (!selectedProject) return;
     try {
       const fy = getFinancialYear();
@@ -1456,7 +1456,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleDeleteProformaInvoice = async (piRecord) => {
-    if (!can(role, 'projects', 'delete')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'delete')) return addToast('Access denied: insufficient permissions.', 'error');
     setDeleteConfirm({
       isOpen: true,
       requireTyped: false,
@@ -1484,13 +1484,13 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   // --- NEW INVOICE HANDLER ---
   const updateInvoiceDetails = async (field, value) => {
-    if (!can(role, 'projects', 'invoice')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'invoice')) return addToast('Access denied: insufficient permissions.', 'error');
     // Constraint: Can only update if Completed or Closed
     const isCompleted = selectedProject.status === 'Completed' || selectedProject.status === 'Closed';
     
     // Allow Admin to force edit even if not completed, otherwise block
     if (!isCompleted && role !== 'admin') {
-        return alert("Project must be 'Completed' before invoicing.");
+        return addToast("Project must be 'Completed' before invoicing.", 'error');
     }
 
     const updates = { [field]: value };
@@ -1507,7 +1507,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   // ... (Keep existing toggleEmployee, updateLogisticsCost, Modal handlers) ...
   const toggleEmployee = async (empId) => {
-    if (!can(role, 'projects', 'team_manage')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'team_manage')) return addToast('Access denied: insufficient permissions.', 'error');
     const currentAssigned = selectedProject.assigned_employees || [];
     const newAssigned = currentAssigned.includes(empId) ? currentAssigned.filter(id => id !== empId) : [...currentAssigned, empId];
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { assigned_employees: newAssigned });
@@ -1584,15 +1584,15 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleSaveAllocation = async () => {
-    if (!can(role, 'projects', 'allocation')) return alert('Access denied: insufficient permissions.');
-    if(!allocationForm.item_id) return alert("Select an item");
+    if (!can(role, 'projects', 'allocation')) return addToast('Access denied: insufficient permissions.', 'error');
+    if(!allocationForm.item_id) return addToast("Select an item", 'error');
     const item = inventory.find(i => i.id === allocationForm.item_id);
     // If LED allocation, compute tile-based quantities from tilesWide/tilesHigh
     let finalQty = parseInt(allocationForm.qty);
     let ledSpecs = null;
     if (allocationForm.is_led) {
       // Ensure tile model data exists
-      if (!allocationForm.tileModelData) return alert('Selected LED item is missing technical tile details. Please add tile specs to inventory.');
+      if (!allocationForm.tileModelData) return addToast('Selected LED item is missing technical tile details. Please add tile specs to inventory.', 'error');
       // Build a LEDTileModel instance from inventory tileModelData
       const tileModel = new LEDTileModel({
         modelName: allocationForm.tileModelData.modelName || allocationForm.tileModelData.name || item.name,
@@ -1606,7 +1606,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
       const w = parseInt(allocationForm.tilesWide) || 0;
       const h = parseInt(allocationForm.tilesHigh) || 0;
-      if (w <= 0 || h <= 0) return alert('Enter valid Tile Width (tiles) and Tile Height (tiles) for LED wall.');
+      if (w <= 0 || h <= 0) return addToast('Enter valid Tile Width (tiles) and Tile Height (tiles) for LED wall.', 'error');
 
       ledSpecs = calculateWallSpecs(tileModel, w, h, 230);
       finalQty = ledSpecs?.logistics?.totalTilesNeeded || (w * h);
@@ -1621,11 +1621,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     }
 
     // H-11 fix: server-side qty validation; UI "min=0" is bypassable.
-    if (!Number.isFinite(finalQty) || finalQty <= 0) return alert('Quantity must be greater than zero.');
+    if (!Number.isFinite(finalQty) || finalQty <= 0) return addToast('Quantity must be greater than zero.', 'error');
     const rate = parseFloat(allocationForm.rate) || 0;
     const days = parseInt(allocationForm.days) || 0;
     const gst_rate = parseFloat(allocationForm.gst_rate) || 0;
-    if (rate < 0 || days <= 0 || gst_rate < 0) return alert('Invalid rate, days or GST rate.');
+    if (rate < 0 || days <= 0 || gst_rate < 0) return addToast('Invalid rate, days or GST rate.', 'error');
 
     // M-8 fix: round all currency math to paise so total = amount + gst_amount.
     const amount = round2(finalQty * rate * days);
@@ -1645,13 +1645,13 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleUpdateItemAllocation = async (updatedItem) => {
-    if (!can(role, 'projects', 'allocation')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'allocation')) return addToast('Access denied: insufficient permissions.', 'error');
     const qty = parseInt(updatedItem.qty) || 0;
     const rate = parseFloat(updatedItem.rate) || 0;
     const days = parseInt(updatedItem.days) || 0;
     const gst_rate = parseFloat(updatedItem.gst_rate) || 0;
-    if (qty <= 0) return alert('Quantity must be greater than zero.');
-    if (rate < 0 || days <= 0 || gst_rate < 0) return alert('Invalid rate, days or GST rate.');
+    if (qty <= 0) return addToast('Quantity must be greater than zero.', 'error');
+    if (rate < 0 || days <= 0 || gst_rate < 0) return addToast('Invalid rate, days or GST rate.', 'error');
 
     // M-8 fix: round each leg, derive total from amount+gst_amount (consistent with PDF).
     const amount = round2(qty * rate * days);
@@ -1672,7 +1672,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleRemoveAllocation = async (item) => {
-    if (!can(role, 'projects', 'allocation')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'projects', 'allocation')) return addToast('Access denied: insufficient permissions.', 'error');
     if(confirm("Remove this item?")) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
         logAction('projects', 'remove_item', selectedProject.id, item, selectedProject.project_name);

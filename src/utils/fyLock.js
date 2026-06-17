@@ -7,6 +7,7 @@
 // Shape of lockedFYs: array of FY strings like '2024-25' (matches getFYFromDate format).
 
 import { getFYFromDate } from './helpers';
+import { notify } from './toast';
 
 /**
  * Returns true when the given date falls inside a locked FY.
@@ -22,7 +23,7 @@ export const isFYLocked = (dateStr, lockedFYs = []) => {
  * Use as: `if (!assertFYNotLocked(date, lockedFYs)) return;`
  */
 export const assertFYNotLocked = (dateStr, lockedFYs = [], opts = {}) => {
-  const { alertFn = (msg) => { if (typeof alert === 'function') alert(msg); } } = opts;
+  const { alertFn = (msg) => { if (typeof alert === 'function') notify(msg, 'info'); } } = opts;
   if (!isFYLocked(dateStr, lockedFYs)) return true;
   const fy = getFYFromDate(dateStr);
   alertFn(`Cannot save: financial year ${fy} is locked. Unlock it from Admin → FY Locking before posting backdated entries.`);

@@ -24,6 +24,7 @@ import { auth, db } from './firebase';
 import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
 import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword, generateSecureToken } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
+import { registerToast, notify } from './utils/toast';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
 import { partitionRules } from './utils/aiAccountant';
@@ -192,7 +193,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
   };
 
   const handleAddContact = () => {
-    if (!newContact.name || !newContact.phone) return alert("Name and Phone are required.");
+    if (!newContact.name || !newContact.phone) return notify("Name and Phone are required.", 'error');
     setFormData({ ...formData, contacts: [...formData.contacts, newContact] });
     setNewContact({ name: '', role: '', phone: '', email: '' });
   };
@@ -206,7 +207,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
   const handleSave = async () => {
     if (formData.gstin) {
       const val = validateGSTIN(formData.gstin, formData.state);
-      if (!val.valid) return alert(`GST Error: ${val.msg}`);
+      if (!val.valid) return notify(`GST Error: ${val.msg}`, 'error');
     }
     const data = { ...formData, updated_at: serverTimestamp() };
     
@@ -224,7 +225,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
   };
 
   const handleSaveVendorAsset = async () => {
-    if (!vendorAssetForm.name || !vendorAssetForm.qty) return alert("Name and Qty required");
+    if (!vendorAssetForm.name || !vendorAssetForm.qty) return notify("Name and Qty required", 'error');
     
     const newItem = {
       name: vendorAssetForm.name,
@@ -312,13 +313,13 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
   const handleCopyLedgerLink = async () => {
     if (!ledgerLinkModal.link) return;
     await navigator.clipboard.writeText(ledgerLinkModal.link);
-    alert('Ledger link copied to clipboard.');
+    notify('Ledger link copied to clipboard.', 'success');
   };
 
   const handleCopyLedgerLinkValue = async (link) => {
     if (!link) return;
     await navigator.clipboard.writeText(link);
-    alert('Ledger link copied to clipboard.');
+    notify('Ledger link copied to clipboard.', 'success');
   };
 
   const filteredClients = clients.filter(client => 
@@ -610,7 +611,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleSaveProject = async () => {
-//     if(!newProj.client_id || !newProj.project_name) return alert("Missing fields");
+//     if(!newProj.client_id || !newProj.project_name) return addToast("Missing fields", 'error');
 //     const data = { ...newProj, updated_at: serverTimestamp() };
 //     if (editingId) {
 //       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', editingId), data);
@@ -621,7 +622,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const updateStatus = async (pid, newStatus) => {
-//     if (newStatus === 'Closed' && role !== 'admin') return alert("Only Admin can close projects.");
+//     if (newStatus === 'Closed' && role !== 'admin') return addToast("Only Admin can close projects.", 'info');
 //     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', pid), { status: newStatus });
 //   };
 
@@ -651,7 +652,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleSaveAllocation = async () => {
-//     if(!allocationForm.item_id) return alert("Select an item");
+//     if(!allocationForm.item_id) return addToast("Select an item", 'error');
 //     const item = inventory.find(i => i.id === allocationForm.item_id);
 //     if (allocationForm.qty > allocationForm.available_qty) {
 //       if(!confirm(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
@@ -896,7 +897,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleSaveProject = async () => {
-//     if(!newProj.client_id || !newProj.project_name) return alert("Missing fields");
+//     if(!newProj.client_id || !newProj.project_name) return addToast("Missing fields", 'error');
 //     const data = { ...newProj, updated_at: serverTimestamp() };
 //     if (editingId) {
 //       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', editingId), data);
@@ -907,7 +908,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const updateStatus = async (pid, newStatus) => {
-//     if (newStatus === 'Closed' && role !== 'admin') return alert("Only Admin can close projects.");
+//     if (newStatus === 'Closed' && role !== 'admin') return addToast("Only Admin can close projects.", 'info');
 //     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', pid), { status: newStatus });
 //   };
 
@@ -937,7 +938,7 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 //   };
 
 //   const handleSaveAllocation = async () => {
-//     if(!allocationForm.item_id) return alert("Select an item");
+//     if(!allocationForm.item_id) return addToast("Select an item", 'error');
 //     const item = inventory.find(i => i.id === allocationForm.item_id);
 //     if (allocationForm.qty > allocationForm.available_qty) {
 //       if(!confirm(`Warning: You are allocating ${allocationForm.qty} but only ${allocationForm.available_qty} are available. Proceed?`)) return;
@@ -1307,10 +1308,10 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
 
   // Handlers
   const handleSaveWizardAllocation = async () => {
-      if (!vendorForm.vendor_id) return alert("Select Vendor first");
+      if (!vendorForm.vendor_id) return notify("Select Vendor first", 'error');
       
       const selectedItemIds = Object.keys(allocWizardSelection).filter(id => allocWizardSelection[id]?.selected);
-      if (selectedItemIds.length === 0) return alert("Select at least one item to allocate");
+      if (selectedItemIds.length === 0) return notify("Select at least one item to allocate", 'error');
 
       const vendor = clients.find(c => c.id === vendorForm.vendor_id);
       const newAllocations = [];
@@ -1362,7 +1363,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           setAllocWizardSelection({});
       } catch (e) {
           console.error(e);
-          alert("Failed to allocate");
+          notify("Failed to allocate", 'error');
       }
   };
 
@@ -1370,7 +1371,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
     try {
       // Check if linked to PO
       if (updatedAllocation.po_id) {
-          alert("Notice: This item is linked to a PO. Please update the PO if necessary.");
+          notify("Notice: This item is linked to a PO. Please update the PO if necessary.", 'error');
       }
 
       // Recalculate totals
@@ -1399,7 +1400,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
       setIsEditModalOpen(false);
     } catch (err) {
       console.error(err);
-      alert("Failed to update allocation: " + err.message);
+      notify("Failed to update allocation: " + err.message, 'error');
     }
   };
 
@@ -1522,9 +1523,9 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   };
 
   const handleSaveVendorInvoice = async () => {
-    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return alert('Invoice number and date required');
+    if (!invoiceForm.invoice_no || !invoiceForm.invoice_date) return notify('Invoice number and date required', 'error');
     const pId = selectedProjectId || invoicingPO?.projectId || invoicingPO?.project_id;
-    if (!pId) return alert('Project context missing');
+    if (!pId) return notify('Project context missing', 'error');
     const base = parseFloat(invoiceForm.base_amount) || 0;
     const gstRate = parseFloat(invoiceForm.gst_rate) || 0;
     const gst = base * (gstRate / 100);
@@ -1557,7 +1558,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
       setInvoicingPO(null);
     } catch (e) {
       console.error(e);
-      alert('Error saving invoice: ' + e.message);
+      notify('Error saving invoice: ' + e.message, 'error');
     }
   };
 
@@ -1579,9 +1580,9 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   };
 
   const handleCreatePO = async () => {
-      if (!poForm.po_no || !poForm.date) return alert("PO Number and Date required");
+      if (!poForm.po_no || !poForm.date) return notify("PO Number and Date required", 'error');
       const pId = selectedProjectId || poVendorData?.projectId;
-      if (!pId) return alert("Project context missing");
+      if (!pId) return notify("Project context missing", 'error');
       
       // Use package cost if specified, otherwise sum all costs
       let subtotal = 0;
@@ -1664,14 +1665,14 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           if(confirm("PO Created. Print now?")) generatePOPDF(newPO, 'print');
       } catch (e) {
           console.error(e);
-          alert("Error creating PO: " + e.message);
+          notify("Error creating PO: " + e.message, 'error');
       }
   };
 
   const handleUpdatePO = async () => {
-      if (!poForm.po_no || !poForm.date) return alert("PO Number and Date required");
+      if (!poForm.po_no || !poForm.date) return notify("PO Number and Date required", 'error');
       const pId = selectedProjectId || editingPO?.projectId;
-      if (!pId) return alert("Project context missing");
+      if (!pId) return notify("Project context missing", 'error');
 
       // Use package cost if specified, otherwise sum all costs
       let subtotal = 0;
@@ -1757,7 +1758,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           if(confirm("PO Updated. Print now?")) generatePOPDF(updatedPO, 'print');
       } catch (e) {
           console.error(e);
-          alert("Error updating PO: " + e.message);
+          notify("Error updating PO: " + e.message, 'error');
       }
   };
 
@@ -1765,7 +1766,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
       const files = Array.from(e.target.files);
       files.forEach(file => {
           if (file.size > 1024 * 1024) { // 1MB limit per file
-              alert(`File ${file.name} is too large (max 1MB)`);
+              notify(`File ${file.name} is too large (max 1MB)`, 'info');
               return;
           }
           const reader = new FileReader();
@@ -1818,7 +1819,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           logAction('projects', 'update_po_status', pId, { po_no: po.po_no, status: newStatus }, "PO Status Update");
       } catch (e) {
           console.error(e);
-          alert("Error updating status: " + e.message);
+          notify("Error updating status: " + e.message, 'error');
       }
   };
 
@@ -2056,7 +2057,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
       }
       } catch (e) {
           console.error("PDF Generation Error", e);
-          alert("Failed to generate PDF. Check console for details.");
+          notify("Failed to generate PDF. Check console for details.", 'error');
       }
   };
 
@@ -2198,7 +2199,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
         doc.save(`Outsourcing_Summary_${selectedProject.project_name.replace(/\s+/g, '_')}.pdf`);
       } catch (e) {
           console.error(e);
-          alert("Failed to generate PDF");
+          notify("Failed to generate PDF", 'error');
       }
   };
 
@@ -3139,6 +3140,10 @@ const [payroll, setPayroll] = useState([]);
     setToasts(prev => [...prev, { id, msg, type }]);
   };
 
+  // Expose addToast to the global notify() bridge so non-prop modules
+  // (other pages, util/pdf generators) can raise toasts too.
+  useEffect(() => { registerToast(addToast); }, []);
+
   // One-shot notification: after login + first Firestore snapshot, alert the
   // user if any recurring rules have pending runs. Only admin/manager see it.
   const recurringNoticeShownRef = useRef(false);
@@ -3329,28 +3334,28 @@ const [payroll, setPayroll] = useState([]);
 
   const handleRecovery = async () => {
     if (!recoveryForm.key || !recoveryForm.new_pass) {
-      return alert('Enter both the Recovery Key and the New Password.');
+      return addToast('Enter both the Recovery Key and the New Password.', 'error');
     }
     if (recoveryForm.new_pass.length < 8) {
-      return alert('New password must be at least 8 characters.');
+      return addToast('New password must be at least 8 characters.', 'error');
     }
     try {
       const fn = httpsCallable(getFunctions(), 'resetAdminPassword');
       await fn({ appId, recoveryKey: recoveryForm.key, newPassword: recoveryForm.new_pass });
-      alert('Password reset successfully. You can now log in.');
+      addToast('Password reset successfully. You can now log in.', 'success');
       setShowForgotPass(false);
       setRecoveryForm({ key: '', new_pass: '' });
     } catch (err) {
       const msg = err?.message || 'Recovery failed. Check your connection and try again.';
-      alert(msg);
+      addToast(msg, 'info');
     }
   };
 
   const handleEmpResetRequest = () => {
-    if (!resetRequestEmail) return alert("Please enter your email or username");
+    if (!resetRequestEmail) return addToast("Please enter your email or username", 'error');
     const emp = employees.find(e => e.email === resetRequestEmail || e.username === resetRequestEmail);
     
-    if (!emp) return alert("No employee found with this email/username.");
+    if (!emp) return addToast("No employee found with this email/username.", 'info');
     
     const admin = employees.find(e => e.role === 'admin') || { email: 'admin@rentalops.com' };
     const subject = `Password Reset Request: ${emp.name}`;

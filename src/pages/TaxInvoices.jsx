@@ -314,13 +314,13 @@ const TaxInvoices = ({
 
   // ── save ──────────────────────────────────────────────────────────────────
   const handleSave = async () => {
-    if (!can(role, 'tax_invoices', 'create')) return alert('Access denied.');
-    if (!form.client_id) return alert('Select a client.');
-    if (form.project_ids.length === 0) return alert('Select at least one project.');
-    if (!form.invoice_no.trim()) return alert('Invoice number is required.');
-    if (!form.invoice_date) return alert('Invoice date is required.');
+    if (!can(role, 'tax_invoices', 'create')) return addToast('Access denied.', 'error');
+    if (!form.client_id) return addToast('Select a client.', 'error');
+    if (form.project_ids.length === 0) return addToast('Select at least one project.', 'error');
+    if (!form.invoice_no.trim()) return addToast('Invoice number is required.', 'error');
+    if (!form.invoice_date) return addToast('Invoice date is required.', 'error');
     if (lastInvoiceDate && form.invoice_date < lastInvoiceDate)
-      return alert(`Invoice date cannot be before last invoice date: ${fmtDate(lastInvoiceDate)}`);
+      return addToast(`Invoice date cannot be before last invoice date: ${fmtDate(lastInvoiceDate)}`, 'error');
     // C-2 fix: enforce FY lock here too — was previously only in Finance.jsx.
     if (!assertFYNotLocked(form.invoice_date, lockedFYs)) return;
     // H-2 fix: prevent silent edit of an issued invoice in a locked FY by also
@@ -561,7 +561,7 @@ const TaxInvoices = ({
   const handleCancel = async () => {
     const invoice = cancelConfirm.invoice;
     if (!invoice) return;
-    if (!cancelReason.trim()) return alert('Please enter a reason for cancellation.');
+    if (!cancelReason.trim()) return addToast('Please enter a reason for cancellation.', 'error');
     try {
       const batch = writeBatch(db);
       // Mark invoice cancelled — immutable fields (invoice_no, GST amounts) stay intact for audit.

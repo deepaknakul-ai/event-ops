@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { notify } from '../utils/toast';
 import { Search, Printer, Edit, Trash2, Truck } from 'lucide-react';
 import { updateDoc, doc, arrayRemove, arrayUnion, addDoc, collection, getDoc, runTransaction } from 'firebase/firestore';
 import { formatCurrency, formatCurrencyPDF } from '../utils/helpers';
@@ -76,7 +77,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
   };
 
   const handleDelete = async (challan) => {
-    if (!can(role, 'challans', 'delete')) return alert('Access denied: only Admin can delete challans.');
+    if (!can(role, 'challans', 'delete')) return notify('Access denied: only Admin can delete challans.', 'error');
     setDeleteConfirm({
       isOpen: true,
       title: `Delete Challan ${challan.challan_no}`,
@@ -129,7 +130,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
             }
         } catch(e) {
             console.error(e);
-            alert("Failed to delete challan");
+            notify("Failed to delete challan", 'error');
         }
       }
     });
@@ -155,7 +156,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
   };
 
   const handleSaveChallan = async () => {
-    if (!can(role, 'challans', 'edit')) return alert('Access denied: insufficient permissions.');
+    if (!can(role, 'challans', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if (!targetProject) return;
     const itemsToShip = [];
 
@@ -175,14 +176,14 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
             }
 
             if (qty > maxQty) {
-                alert(`Error: Item "${item.item_name}" exceeds available quantity. Max: ${maxQty}, Requested: ${qty}`);
+                notify(`Error: Item "${item.item_name}" exceeds available quantity. Max: ${maxQty}, Requested: ${qty}`, 'error');
                 return;
             }
             itemsToShip.push({ ...item, qty, serial_numbers: challanSerials[item.id] || [] });
         }
     }
 
-    if (itemsToShip.length === 0) return alert("Please select at least one item.");
+    if (itemsToShip.length === 0) return notify("Please select at least one item.", 'error');
 
     try {
         const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', targetProject.id);
@@ -242,7 +243,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
         setEditingChallan(null);
     } catch (e) {
         console.error(e);
-        alert(`Error saving challan: ${e.message}`);
+        notify(`Error saving challan: ${e.message}`, 'error');
     }
   };
 
@@ -393,7 +394,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
         pdfDoc.save(`${isReturn ? 'Return' : 'Delivery'}_Challan_${displayChallanNo.replace('/','-')}.pdf`);
     } catch (error) {
         console.error("Challan PDF Error:", error);
-        alert("Failed to generate Challan PDF. See console for details.");
+        notify("Failed to generate Challan PDF. See console for details.", 'error');
     }
   };
 

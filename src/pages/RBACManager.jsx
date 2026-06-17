@@ -9,6 +9,7 @@
  *    via setLiveConfig() — no page reload needed
  */
 import React, { useState, useEffect } from 'react';
+import { notify } from '../utils/toast';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import {
   Shield, Plus, Trash2, Save, RefreshCw, X,
@@ -198,7 +199,7 @@ const RBACManager = ({ db, appId, logAction }) => {
       setTimeout(() => setSavedOk(false), 3000);
     } catch (e) {
       console.error(e);
-      alert('Failed to save permissions. Check console.');
+      notify('Failed to save permissions. Check console.', 'error');
     }
     setSaving(false);
   };
@@ -214,8 +215,8 @@ const RBACManager = ({ db, appId, logAction }) => {
   // ── Add custom role ──────────────────────────────────────────────────────────
   const handleAddRole = () => {
     const id = newRole.id.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-    if (!id || !newRole.label.trim()) return alert('Role ID and Display Name are required.');
-    if (config.rolesMeta[id]) return alert(`Role ID "${id}" already exists.`);
+    if (!id || !newRole.label.trim()) return notify('Role ID and Display Name are required.', 'error');
+    if (config.rolesMeta[id]) return notify(`Role ID "${id}" already exists.`, 'error');
 
     // New role starts with all permissions denied
     const emptyPerms = {};

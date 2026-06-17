@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { notify } from '../utils/toast';
 import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
@@ -146,12 +147,12 @@ const AdminTools = ({ db, appId, logAction, role }) => {
           }
         }
         setRestoreStatus('success');
-        alert("Restore completed successfully. Please refresh the page.");
+        notify("Restore completed successfully. Please refresh the page.", 'error');
         logAction('admin', 'restore', 'system', {}, 'Full System Restore');
       } catch (error) {
         console.error(error);
         setRestoreStatus('error');
-        alert("Error during restore. Check console.");
+        notify("Error during restore. Check console.", 'error');
       }
       e.target.value = null;
       setTimeout(() => setRestoreStatus('idle'), 3000);
@@ -160,21 +161,21 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   };
 
   const handleUpdateSecurity = async () => {
-    if (!securityForm.admin_password || !securityForm.recovery_key) return alert("Both Password and Recovery Key are required.");
+    if (!securityForm.admin_password || !securityForm.recovery_key) return notify("Both Password and Recovery Key are required.", 'error');
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security'), securityForm);
     logAction('admin', 'update_security', 'security', {}, 'Updated Admin Credentials');
-    alert("Admin Security Settings Updated Successfully.");
+    notify("Admin Security Settings Updated Successfully.", 'success');
   };
 
   const handleSaveOrgSettings = async () => {
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), orgForm, { merge: true });
     logAction('admin', 'update_org', 'organization', {}, 'Updated Organization Details');
-    alert("Organization Details Updated.");
+    notify("Organization Details Updated.", 'success');
   };
 
   const handleAddOrUpdateBank = () => {
     const { bank_name, account_name, account_no, ifsc } = bankForm;
-    if (!bank_name || !account_name || !account_no || !ifsc) return alert('Bank Name, Account Name, Account Number, and IFSC are required.');
+    if (!bank_name || !account_name || !account_no || !ifsc) return notify('Bank Name, Account Name, Account Number, and IFSC are required.', 'error');
     if (editingBankId) {
       setBankAccounts(prev => prev.map(b => b.id === editingBankId ? { ...bankForm, id: editingBankId } : b));
       setEditingBankId(null);
@@ -212,7 +213,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const handleSaveBankSettings = async () => {
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), { bank_accounts: bankAccounts, default_bank_id: defaultBankId }, { merge: true });
     logAction('admin', 'update_banks', 'organization', {}, 'Updated Bank Accounts');
-    alert('Bank account settings saved.');
+    notify('Bank account settings saved.', 'success');
   };
 
   const handleSaveCalendarColors = async () => {
@@ -224,10 +225,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
         { merge: true }
       );
       logAction('admin', 'update_calendar_colors', 'organization', {}, 'Updated Calendar Colors');
-      alert('Calendar colors saved.');
+      notify('Calendar colors saved.', 'success');
     } catch (error) {
       console.error(error);
-      alert('Failed to save calendar colors.');
+      notify('Failed to save calendar colors.', 'error');
     } finally {
       setIsSavingCalendarColors(false);
     }
@@ -236,7 +237,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const handleLogoUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
-        if (file.size > 500000) return alert("File too large. Max 500KB.");
+        if (file.size > 500000) return notify("File too large. Max 500KB.", 'info');
         const reader = new FileReader();
         reader.onloadend = () => {
             setOrgForm(prev => ({ ...prev, logo: reader.result }));
@@ -248,7 +249,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const handleSignatureUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
-        if (file.size > 500000) return alert("File too large. Max 500KB.");
+        if (file.size > 500000) return notify("File too large. Max 500KB.", 'info');
         const reader = new FileReader();
         reader.onloadend = () => {
             setOrgForm(prev => ({ ...prev, signature: reader.result }));
@@ -289,10 +290,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
         { merge: true }
       );
       logAction('admin', 'update_fy_lock', 'organization', { locked_fys: lockedFYs }, 'Updated FY Lock settings');
-      alert('FY Lock settings saved.');
+      notify('FY Lock settings saved.', 'success');
     } catch (error) {
       console.error(error);
-      alert('Failed to save FY Lock settings.');
+      notify('Failed to save FY Lock settings.', 'error');
     } finally {
       setIsSavingFYLock(false);
     }
@@ -306,10 +307,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
         { inventory_categories: customInventoryCats, expense_categories: customExpenseCats }
       );
       logAction('admin', 'update_categories', 'settings', {}, 'Updated custom categories');
-      alert('Categories saved. Reload the app to see them everywhere.');
+      notify('Categories saved. Reload the app to see them everywhere.', 'success');
     } catch (error) {
       console.error(error);
-      alert('Failed to save categories.');
+      notify('Failed to save categories.', 'error');
     } finally {
       setIsSavingCats(false);
     }

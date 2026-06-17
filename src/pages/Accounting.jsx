@@ -377,7 +377,7 @@ const Accounting = ({
   const cnDnInitialForm = { type: 'credit_note', date: new Date().toISOString().slice(0, 10), party_name: '', original_invoice: '', taxable: '', gst: '', reason: '' };
 
   const editCreditDebitNote = (row) => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     if (!assertFYNotLocked(row.date, lockedFYs)) return;
     // Reverse-engineer form fields from journal entries.
     const isCN = row.source === 'credit_note';
@@ -406,11 +406,11 @@ const Accounting = ({
   };
 
   const saveCreditDebitNote = async () => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     const taxable = parseFloat(cnDnForm.taxable || 0);
     const gst = parseFloat(cnDnForm.gst || 0);
     const total = taxable + gst;
-    if (!cnDnForm.date || !cnDnForm.party_name || total <= 0) return alert('Date, party and amount are required.');
+    if (!cnDnForm.date || !cnDnForm.party_name || total <= 0) return addToast('Date, party and amount are required.', 'error');
     if (!assertFYNotLocked(cnDnForm.date, lockedFYs)) return;
     try {
       setIsSaving(true);
@@ -456,7 +456,7 @@ const Accounting = ({
   };
 
   const deleteCreditDebitNote = async (row) => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     if (!row?.id) return;
     if (!assertFYNotLocked(row.date, lockedFYs)) return;
     try {
@@ -475,9 +475,9 @@ const Accounting = ({
 
   // ── TDS Entry Save ──
   const saveTdsEntry = async () => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     const tdsAmt = parseFloat(tdsForm.tds_amount || 0);
-    if (!tdsForm.date || !tdsForm.party_name || tdsAmt <= 0) return alert('Date, party and TDS amount are required.');
+    if (!tdsForm.date || !tdsForm.party_name || tdsAmt <= 0) return addToast('Date, party and TDS amount are required.', 'error');
     if (!assertFYNotLocked(tdsForm.date, lockedFYs)) return;
     try {
       setIsSaving(true);
@@ -686,8 +686,8 @@ const Accounting = ({
   const exportGstrJson = (kind) => exportGstrJsonImpl(kind, { fyFilter, gstData, orgGstin, addToast });
 
   const addAccount = async () => {
-    if (!canEditFinance) return alert('Access denied.');
-    if (!coaForm.code || !coaForm.name) return alert('Code and name are required.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
+    if (!coaForm.code || !coaForm.name) return addToast('Code and name are required.', 'error');
 
     try {
       setIsSaving(true);
@@ -709,7 +709,7 @@ const Accounting = ({
   };
 
   const seedDefaultCoa = async () => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     try {
       setIsSaving(true);
       const defaults = getDefaultChartOfAccounts();
@@ -733,12 +733,12 @@ const Accounting = ({
   };
 
   const postManualJournal = async () => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     const amount = parseFloat(journalForm.amount || 0);
     if (!journalForm.date || !journalForm.debitAccount || !journalForm.creditAccount || amount <= 0) {
-      return alert('Date, debit, credit and valid amount are required.');
+      return addToast('Date, debit, credit and valid amount are required.', 'error');
     }
-    if (journalForm.debitAccount === journalForm.creditAccount) return alert('Debit and credit account cannot be same.');
+    if (journalForm.debitAccount === journalForm.creditAccount) return addToast('Debit and credit account cannot be same.', 'error');
     if (!assertFYNotLocked(journalForm.date, lockedFYs)) return;
 
     try {
@@ -789,10 +789,10 @@ const Accounting = ({
   };
 
   const addOpeningBalance = async () => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     const amount = parseFloat(openingForm.amount || 0);
     if (!openingForm.fy || !openingForm.account_name || amount <= 0) {
-      return alert('FY, account and amount are required.');
+      return addToast('FY, account and amount are required.', 'error');
     }
 
     try {
@@ -985,7 +985,7 @@ const Accounting = ({
   const aiReviewedCount = useMemo(() => aiEntries.filter((e) => e.ai_reviewed).length, [aiEntries]);
 
   const toggleAiReviewed = async (entry) => {
-    if (!canEditFinance) return alert('Access denied: only finance roles can mark entries reviewed.');
+    if (!canEditFinance) return addToast('Access denied: only finance roles can mark entries reviewed.', 'error');
     const now = new Date().toISOString();
     const next = !entry.ai_reviewed;
     try {
@@ -2013,11 +2013,11 @@ const Accounting = ({
   };
 
   const closeFinancialYear = async () => {
-    if (!canEditFinance) return alert('Access denied.');
-    if (fyFilter === 'all') return alert('Select a specific FY first.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
+    if (fyFilter === 'all') return addToast('Select a specific FY first.', 'error');
 
     const alreadyClosed = fiscalYearClosings.some((row) => row.fy === fyFilter && row.status === 'closed');
-    if (alreadyClosed) return alert(`${fyFilter} is already closed.`);
+    if (alreadyClosed) return addToast(`${fyFilter} is already closed.`, 'error');
 
     const nextFy = getNextFinancialYear(fyFilter);
     const closingDate = `${parseInt(fyFilter.slice(0, 4), 10) + 1}-03-31`;
@@ -2143,9 +2143,9 @@ const Accounting = ({
   };
 
   const handlePiSave = async () => {
-    if (!canEditFinance) return alert('Access denied.');
-    if (!piForm.invoice_date) return alert('Invoice date is required.');
-    if (!piForm.vendor_name && !piForm.vendor_id) return alert('Vendor name is required.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
+    if (!piForm.invoice_date) return addToast('Invoice date is required.', 'error');
+    if (!piForm.vendor_name && !piForm.vendor_id) return addToast('Vendor name is required.', 'error');
 
     setIsSaving(true);
     try {
@@ -2199,7 +2199,7 @@ const Accounting = ({
   };
 
   const handlePiDelete = async (piRaw) => {
-    if (!canEditFinance) return alert('Access denied.');
+    if (!canEditFinance) return addToast('Access denied.', 'error');
     try {
       setIsSaving(true);
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', piRaw.id));
@@ -2215,7 +2215,7 @@ const Accounting = ({
 
   const undoFinancialYearClose = async (closingRow) => {
     if (role !== 'admin') {
-      return alert('Only an Admin can undo a financial year closing. Managers cannot reverse a closed FY because it deletes journal entries, rolled-over opening balances, and the closing record.');
+      return addToast('Only an Admin can undo a financial year closing. Managers cannot reverse a closed FY because it deletes journal entries, rolled-over opening balances, and the closing record.', 'error');
     }
     if (!closingRow || closingRow.status !== 'closed') return;
     const confirmed = window.confirm(

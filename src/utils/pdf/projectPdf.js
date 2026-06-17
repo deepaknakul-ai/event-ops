@@ -1,5 +1,6 @@
 // Project quotation PDF/Excel generators — extracted from Projects.jsx.
 import jsPDF from "jspdf";
+import { notify } from '../toast';
 import autoTable from "jspdf-autotable";
 import * as XLSX from "@e965/xlsx";
 import { formatCurrencyPDF, getLogisticsLines, calculateLEDSignalPorts, getProjectGSTBreakdown } from "../helpers";
@@ -1114,7 +1115,7 @@ export const generateQuotationPDF = async (ctx) => {
         pdfDoc.save(`${isReturn ? 'Return' : 'Delivery'}_Challan_${displayChallanNo.replace('/','-')}.pdf`);
     } catch (error) {
         console.error("Challan PDF Error:", error);
-        alert("Failed to generate Challan PDF. See console for details.");
+        notify("Failed to generate Challan PDF. See console for details.", 'error');
     }
   };
 
@@ -1124,14 +1125,14 @@ export const generateQuotationPDF = async (ctx) => {
     const orgSettings = await getOrgSettings();
     const client = clients.find(c => c.id === selectedProject.client_id);
     
-    if (!orgSettings || !client) return alert("Organization or Client details missing.");
+    if (!orgSettings || !client) return notify("Organization or Client details missing.", 'error');
 
     const itemsToShip = (selectedProject.items || []).filter(item => (challanSelection[item.id] || 0) > 0).map(item => ({
         ...item,
         qty: parseInt(challanSelection[item.id])
     }));
 
-    if (itemsToShip.length === 0) return alert("Select items first.");
+    if (itemsToShip.length === 0) return notify("Select items first.", 'error');
 
     const ewayData = {
         "supplyType": "O",

@@ -52,7 +52,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   // Force close open shift
   const handleCloseShift = async () => {
     if (!closeTarget || !closeTime) return;
-    if (!can(role, 'hr_attendance', 'close_shift')) return alert('Access denied.');
+    if (!can(role, 'hr_attendance', 'close_shift')) return addToast('Access denied.', 'error');
     try {
       const ref = doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', closeTarget.id);
       await updateDoc(ref, { checkOut: new Date(closeTime).toISOString(), autoClosed: true });
@@ -64,7 +64,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
 
   // Delete time log
   const handleDeleteLog = async (logId) => {
-    if (!can(role, 'hr_attendance', 'delete')) return alert('Access denied.');
+    if (!can(role, 'hr_attendance', 'delete')) return addToast('Access denied.', 'error');
     if (!window.confirm('Delete this attendance record?')) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', logId));
@@ -76,7 +76,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   // Admin: correct checkout time for suspicious records
   const handleAdjustCheckout = async () => {
     if (!adjustTarget || !adjustTime || !adjustReason.trim()) return addToast('All fields required', 'error');
-    if (!can(role, 'hr_attendance', 'close_shift')) return alert('Access denied.');
+    if (!can(role, 'hr_attendance', 'close_shift')) return addToast('Access denied.', 'error');
     try {
       const ref = doc(db, 'artifacts', appId, 'public', 'data', 'timeLogs', adjustTarget.id);
       const correctedCheckOut = new Date(adjustTime).toISOString();
@@ -130,7 +130,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   };
 
   const handleShiftAction = async (sr, action, clarification) => {
-    if (!can(role, 'hr_shifts', 'approve')) return alert('Access denied.');
+    if (!can(role, 'hr_shifts', 'approve')) return addToast('Access denied.', 'error');
     try {
       const update = { status: action, reviewedBy: currentEmpId, reviewedAt: new Date().toISOString() };
       if (action === 'Clarification' && clarification) update.adminClarification = clarification;
@@ -152,7 +152,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   }, [penalties, filterEmployee, search, getEmpName]);
 
   const handleAddPenalty = async () => {
-    if (!can(role, 'hr_penalties', 'create')) return alert('Access denied.');
+    if (!can(role, 'hr_penalties', 'create')) return addToast('Access denied.', 'error');
     const { employeeId, minutes, reason } = penaltyForm;
     if (!employeeId || !minutes || !reason) return addToast('All fields required', 'error');
     try {
@@ -165,7 +165,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
   };
 
   const handleDeletePenalty = async (pId) => {
-    if (!can(role, 'hr_penalties', 'create')) return alert('Access denied.');
+    if (!can(role, 'hr_penalties', 'create')) return addToast('Access denied.', 'error');
     if (!window.confirm('Remove this penalty?')) return;
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'penalties', pId));
