@@ -1221,10 +1221,10 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
                   <td className="p-3 text-right font-mono">{p.totalHours}</td>
                   <td className="p-3 text-right font-mono text-red-600">{p.penaltyHours}</td>
                   <td className="p-3 text-right font-mono font-bold">{p.netHours}</td>
-                  <td className="p-3 text-right font-mono">₹{p.hourlyRate}</td>
-                  <td className="p-3 text-right font-mono">₹{p.grossPay}</td>
-                  <td className="p-3 text-right font-mono text-red-600">₹{p.deductions || 0}</td>
-                  <td className="p-3 text-right font-mono font-bold text-green-600">₹{p.netPay}</td>
+                  <td className="p-3 text-right font-mono">{formatCurrency(p.hourlyRate)}</td>
+                  <td className="p-3 text-right font-mono">{formatCurrency(p.grossPay)}</td>
+                  <td className="p-3 text-right font-mono text-red-600">{formatCurrency(p.deductions || 0)}</td>
+                  <td className="p-3 text-right font-mono font-bold text-green-600">{formatCurrency(p.netPay)}</td>
                   <td className="p-3"><span className={`text-xs font-semibold px-2 py-0.5 rounded ${p.status === 'Finalized' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>{p.status}</span></td>
                 </tr>
               ))}

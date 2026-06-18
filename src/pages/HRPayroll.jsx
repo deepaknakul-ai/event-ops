@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { DollarSign, Search, Download, FileText, CheckCircle, Clock, AlertTriangle, Users, Filter } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection, deleteDoc } from 'firebase/firestore';
-import { getLogHours, getHourlyRateForDate } from '../utils/helpers';
+import { getLogHours, getHourlyRateForDate, formatCurrency } from '../utils/helpers';
 import { can } from '../utils/permissions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -326,7 +326,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
     pdf.setFontSize(11);
     pdf.text(`Employee: ${emp?.name || row.employeeId}`, 14, 44);
     pdf.text(`Designation: ${emp?.designation || '-'}`, 14, 52);
-    pdf.text(`Hourly Rate: ₹${row.hourlyRate}`, 120, 44);
+    pdf.text(`Hourly Rate: Rs. ${row.hourlyRate}`, 120, 44);
     pdf.text(`Target Hours: ${row.targetHours}h`, 120, 52);
     pdf.text(`Rate Mode: ${rateModeLabel}`, 120, 60);
 
@@ -341,9 +341,9 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
         ['Standard Hours', `${row.standardHours}h`],
         ['Overtime Hours', `${row.overtimeHours}h`],
         ['', ''],
-        ['Gross Pay', `₹${row.grossPay.toFixed(2)}`],
-        ['Deductions', `₹${row.deductions.toFixed(2)}`],
-        ['Net Pay', `₹${row.netPay.toFixed(2)}`],
+        ['Gross Pay', `Rs. ${row.grossPay.toFixed(2)}`],
+        ['Deductions', `Rs. ${row.deductions.toFixed(2)}`],
+        ['Net Pay', `Rs. ${row.netPay.toFixed(2)}`],
       ],
       theme: 'striped',
       headStyles: { fillColor: [15, 23, 42] },
@@ -450,7 +450,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
     pdf.text(`Payroll Report — ${MONTHS[selectedMonth - 1]} ${selectedYear}`, 14, 18);
     pdf.setFontSize(9);
     pdf.setFont('helvetica', 'normal');
-    pdf.text(`Generated: ${new Date().toLocaleString('en-IN')} | Employees: ${filtered.length} | Total Net: ₹${stats.totalNet.toFixed(2)}`, 14, 26);
+    pdf.text(`Generated: ${new Date().toLocaleString('en-IN')} | Employees: ${filtered.length} | Total Net: Rs. ${stats.totalNet.toFixed(2)}`, 14, 26);
 
     autoTable(pdf, {
       startY: 32,
@@ -458,13 +458,13 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
       body: filtered.map(r => [
         getEmpName(r.employeeId),
         r.totalHours, `${r.penaltyHours}h`, r.netHours,
-        `₹${r.hourlyRate}`, `₹${r.grossPay.toFixed(2)}`, `₹${r.deductions.toFixed(2)}`, `₹${r.netPay.toFixed(2)}`,
+        `Rs. ${r.hourlyRate}`, `Rs. ${r.grossPay.toFixed(2)}`, `Rs. ${r.deductions.toFixed(2)}`, `Rs. ${r.netPay.toFixed(2)}`,
         r.status, `${r.compliance}%`,
       ]),
       theme: 'grid',
       headStyles: { fillColor: [15, 23, 42], fontSize: 8 },
       styles: { fontSize: 7 },
-      foot: [['TOTAL', stats.totalHours.toFixed(2), '', '', '', `₹${stats.totalGross.toFixed(2)}`, '', `₹${stats.totalNet.toFixed(2)}`, '', '']],
+      foot: [['TOTAL', stats.totalHours.toFixed(2), '', '', '', `Rs. ${stats.totalGross.toFixed(2)}`, '', `Rs. ${stats.totalNet.toFixed(2)}`, '', '']],
       footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' },
     });
 
@@ -508,11 +508,11 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-[10px] font-medium text-slate-500 uppercase">Total Gross</p>
-          <p className="text-xl font-bold text-indigo-600 mt-1">₹{stats.totalGross.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
+          <p className="text-xl font-bold text-indigo-600 mt-1">{formatCurrency(stats.totalGross)}</p>
         </div>
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-[10px] font-medium text-slate-500 uppercase">Total Net Pay</p>
-          <p className="text-xl font-bold text-green-600 mt-1">₹{stats.totalNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
+          <p className="text-xl font-bold text-green-600 mt-1">{formatCurrency(stats.totalNet)}</p>
         </div>
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-[10px] font-medium text-slate-500 uppercase">Total Hours</p>
@@ -574,12 +574,12 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
                 <td className="p-3 text-right text-red-500">{row.penaltyHours > 0 ? `−${row.penaltyHours}h` : '—'}</td>
                 <td className="p-3 text-right font-semibold text-slate-700">{row.netHours}</td>
                 <td className="p-3 text-right text-slate-500">
-                  <div>₹{Number(row.hourlyRate || 0).toFixed(2)}</div>
+                  <div>{formatCurrency(Number(row.hourlyRate || 0))}</div>
                   {row.isHistoricalRateApplied && <div className="text-[10px] text-indigo-600">Blended</div>}
                 </td>
-                <td className="p-3 text-right text-slate-600">₹{row.grossPay.toFixed(2)}</td>
-                <td className="p-3 text-right text-red-500">{row.deductions > 0 ? `₹${row.deductions.toFixed(2)}` : '—'}</td>
-                <td className="p-3 text-right font-bold text-green-700">₹{row.netPay.toFixed(2)}</td>
+                <td className="p-3 text-right text-slate-600">{formatCurrency(row.grossPay)}</td>
+                <td className="p-3 text-right text-red-500">{row.deductions > 0 ? formatCurrency(row.deductions) : '—'}</td>
+                <td className="p-3 text-right font-bold text-green-700">{formatCurrency(row.netPay)}</td>
                 <td className="p-3 text-center">
                   <span className={`text-[10px] font-bold ${row.compliance >= 100 ? 'text-green-600' : row.compliance >= 80 ? 'text-amber-600' : 'text-red-600'}`}>
                     {row.compliance}%
@@ -618,9 +618,9 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
               <td className="p-3"></td>
               <td className="p-3"></td>
               <td className="p-3"></td>
-              <td className="p-3 text-right">₹{stats.totalGross.toFixed(2)}</td>
+              <td className="p-3 text-right">{formatCurrency(stats.totalGross)}</td>
               <td className="p-3"></td>
-              <td className="p-3 text-right text-green-700">₹{stats.totalNet.toFixed(2)}</td>
+              <td className="p-3 text-right text-green-700">{formatCurrency(stats.totalNet)}</td>
               <td className="p-3"></td>
               <td className="p-3"></td>
               <td className="p-3"></td>
