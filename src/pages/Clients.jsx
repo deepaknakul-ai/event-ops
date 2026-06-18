@@ -13,8 +13,9 @@ import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, gen
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
+import { generateClientManagementReportPDF } from '../utils/pdf/clientPdf';
 
-const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], role, db, appId, logAction }) => {
+const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, db, appId, logAction }) => {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -189,6 +190,17 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     };
   }, [dashboardClient, projects, payments, vendorPayments]);
 
+  // Org settings fetch (for report header), mirrors Projects/Final Report.
+  const getOrgSettings = async () => {
+    try {
+      const snap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
+      if (snap.exists()) return snap.data();
+    } catch (e) { console.error(e); }
+    return null;
+  };
+  const handleClientReport = () => generateClientManagementReportPDF({
+    dashData, getOrgSettings, addToast: notify, expenses, timeLogs, employees,
+  });
 
   const todayFyStart = (() => {
     const d = new Date();
@@ -851,9 +863,14 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
             <button onClick={() => setDashboardClient(null)} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition">
               <ArrowLeft size={16} /> All Clients
             </button>
-            {(role === 'admin' || role === 'manager') && (
-              <button onClick={() => openEdit(dashboardClient.rootClient || dashboardClient)} className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600"><Edit size={14}/> Edit Client</button>
-            )}
+            <div className="flex items-center gap-2">
+              {can(role, 'finance', 'view') && (
+                <button onClick={handleClientReport} className="flex items-center gap-1.5 text-sm rounded border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-indigo-700 font-medium hover:bg-indigo-100"><FileText size={14}/> Management Report</button>
+              )}
+              {(role === 'admin' || role === 'manager') && (
+                <button onClick={() => openEdit(dashboardClient.rootClient || dashboardClient)} className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600"><Edit size={14}/> Edit Client</button>
+              )}
+            </div>
           </div>
         </div>
       )}

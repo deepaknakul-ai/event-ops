@@ -1333,36 +1333,43 @@ export const generateManagementReportPDF = async (ctx) => {
     // ── 4. Human Resources — Deployment & Execution ──
     y = sectionTitle('4. Human Resources - Deployment & Execution', y);
     const projLogs = (timeLogs || []).filter(l => l.project_id === selectedProject.id);
+    // Hours on-site = check-in to check-out; Hours worked = net of geo/late penalties.
+    const grossLogHours = (l) => (l?.checkIn && l?.checkOut)
+      ? Math.max(0, (new Date(l.checkOut) - new Date(l.checkIn)) / 3600000) : 0;
     const hrMap = new Map();
     projLogs.forEach(l => {
       const id = l.employeeId || l.employee_id;
       if (!id) return;
-      const hrs = getLogHours(l);
+      const worked = getLogHours(l);       // net hours actually used on the show
+      const onsite = grossLogHours(l);     // total hours present at the show
       const rate = getHourlyRateForDate(empObj(id), l.checkIn || l.date || new Date());
-      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, hours: 0, cost: 0, rate });
+      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, onsite: 0, worked: 0, cost: 0, rate });
       const m = hrMap.get(id);
-      m.shifts += 1; m.hours += hrs; m.cost += hrs * (rate || 0); m.rate = rate;
+      m.shifts += 1; m.onsite += onsite; m.worked += worked; m.cost += worked * (rate || 0); m.rate = rate;
     });
     (selectedProject.assigned_employees || []).forEach(id => {
-      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, hours: 0, cost: 0, rate: getHourlyRateForDate(empObj(id), selectedProject.start_date) });
+      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, onsite: 0, worked: 0, cost: 0, rate: getHourlyRateForDate(empObj(id), selectedProject.start_date) });
     });
-    const hrRows = Array.from(hrMap.entries()).map(([id, m]) => [empName(id), m.shifts, m.hours.toFixed(1), formatCurrencyPDF(m.rate || 0), formatCurrencyPDF(m.cost)]);
-    const totalHours = Array.from(hrMap.values()).reduce((s, m) => s + m.hours, 0);
+    const hrRows = Array.from(hrMap.entries()).map(([id, m]) => [
+      empName(id), m.shifts, m.onsite.toFixed(1), m.worked.toFixed(1), formatCurrencyPDF(m.rate || 0), formatCurrencyPDF(m.cost),
+    ]);
+    const totOnsite = Array.from(hrMap.values()).reduce((s, m) => s + m.onsite, 0);
+    const totWorked = Array.from(hrMap.values()).reduce((s, m) => s + m.worked, 0);
     const totalLabour = Array.from(hrMap.values()).reduce((s, m) => s + m.cost, 0);
     autoTable(doc, {
       startY: y,
-      head: [['Employee', 'Shifts', 'Hours', 'Rate/Hr', 'Labour Cost (indicative)']],
-      body: hrRows.length ? hrRows : [['No staff deployed', '', '', '', '']],
-      foot: hrRows.length ? [['Total', projLogs.length, totalHours.toFixed(1), '', formatCurrencyPDF(totalLabour)]] : undefined,
+      head: [['Employee', 'Days', 'Hrs On-Site', 'Hrs Worked', 'Rate/Hr', 'Cost to Project']],
+      body: hrRows.length ? hrRows : [['No staff deployed', '', '', '', '', '']],
+      foot: hrRows.length ? [['Total', projLogs.length, totOnsite.toFixed(1), totWorked.toFixed(1), '', formatCurrencyPDF(totalLabour)]] : undefined,
       theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [124, 58, 237] },
       footStyles: { fillColor: [245, 243, 255], textColor: [91, 33, 182], fontStyle: 'bold' },
-      columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
+      columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'center' }, 4: { halign: 'right' }, 5: { halign: 'right' } },
       didDrawPage: drawCompactHeader,
     });
     y = doc.lastAutoTable.finalY + 3;
     if (y + 6 > pageH - 14) { doc.addPage(); drawCompactHeader(); y = 24; }
     doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(120, 120, 120);
-    doc.text('Labour cost is indicative (hours x hourly rate from attendance) and is not included in the project P&L above.', mX, y + 2);
+    doc.text('Days = shifts attended; Hrs On-Site = check-in to check-out; Hrs Worked = net of penalties; Cost to Project = Hrs Worked x Rate (indicative, excluded from P&L).', mX, y + 2);
     doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
     y += 8;
 
