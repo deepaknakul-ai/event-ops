@@ -3,7 +3,7 @@ import jsPDF from "jspdf";
 import { notify } from '../toast';
 import autoTable from "jspdf-autotable";
 import * as XLSX from "@e965/xlsx";
-import { formatCurrencyPDF, getLogisticsLines, calculateLEDSignalPorts, getProjectGSTBreakdown } from "../helpers";
+import { formatCurrencyPDF, getLogisticsLines, calculateLEDSignalPorts, getProjectGSTBreakdown, getProjectGrandTotal, getLogHours, getHourlyRateForDate, fmtDate } from "../helpers";
 import { LOGISTICS_TYPES } from "../constants";
 
 export const generateQuotationPDF = async (ctx) => {
@@ -1176,3 +1176,249 @@ export const generateQuotationPDF = async (ctx) => {
     document.body.removeChild(a);
   };
 
+export const generateManagementReportPDF = async (ctx) => {
+  const {
+    selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients,
+    calculateProjectTotals, outsourcingRows, expenseByEmployeeCategory,
+    payments, timeLogs, employees, lifecycle,
+  } = ctx;
+  if (!selectedProject) return;
+  if (!canViewProjectFinancials) {
+    addToast('Access denied: management report is restricted.', 'error');
+    return;
+  }
+  try {
+    const doc = new jsPDF();
+    const org = await getOrgSettings();
+    const client = (clients || []).find(c => c.id === selectedProject.client_id);
+    const totals = calculateProjectTotals();
+    const pageW = doc.internal.pageSize.width;
+    const pageH = doc.internal.pageSize.height;
+    const mX = 14;
+
+    const empName = (id) => (employees || []).find(e => e.id === id)?.name || id || '—';
+    const empObj = (id) => (employees || []).find(e => e.id === id) || {};
+
+    const drawCompactHeader = () => {
+      const pg = doc.internal.getCurrentPageInfo().pageNumber;
+      if (pg === 1) return;
+      doc.setFillColor(37, 99, 235);
+      doc.rect(mX, 6, pageW - mX * 2, 12, 'F');
+      doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(255, 255, 255);
+      doc.text('Project Management Report', mX + 3, 14);
+      doc.text(selectedProject.project_name || '', pageW - mX - 3, 14, { align: 'right' });
+      doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
+    };
+    const sectionTitle = (title, yy) => {
+      if (yy + 16 > pageH - 14) { doc.addPage(); drawCompactHeader(); yy = 24; }
+      doc.setFillColor(37, 99, 235);
+      doc.rect(mX, yy, pageW - mX * 2, 7, 'F');
+      doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(255, 255, 255);
+      doc.text(title, mX + 2, yy + 5);
+      doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
+      return yy + 11;
+    };
+
+    // ── Title block ──
+    let y = 16;
+    if (org?.logo) { try { doc.addImage(org.logo, 'JPEG', mX, y - 4, 22, 22); } catch (e) { /* no logo */ } }
+    doc.setFontSize(15); doc.setFont('helvetica', 'bold'); doc.setTextColor(37, 99, 235);
+    doc.text(org?.name || 'Company', pageW - mX, y + 3, { align: 'right' });
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(13); doc.setFont('helvetica', 'bold');
+    doc.text('PROJECT MANAGEMENT REPORT', mX + (org?.logo ? 26 : 0), y + 4);
+    y += 13;
+    doc.setDrawColor(200); doc.line(mX, y, pageW - mX, y); y += 6;
+
+    doc.setFontSize(9);
+    const leftInfo = [['Project', selectedProject.project_name || '—'], ['Client', client?.name || '—'], ['Venue', selectedProject.venue || '—']];
+    const rightInfo = [['Status', selectedProject.status || '—'], ['Period', `${fmtDate(selectedProject.start_date)} - ${fmtDate(selectedProject.end_date)}`], ['Generated', new Date().toLocaleDateString('en-IN')]];
+    leftInfo.forEach(([k, v], i) => {
+      doc.setFont('helvetica', 'bold'); doc.text(`${k}:`, mX, y + i * 5);
+      doc.setFont('helvetica', 'normal'); doc.text(String(v), mX + 18, y + i * 5);
+    });
+    rightInfo.forEach(([k, v], i) => {
+      doc.setFont('helvetica', 'bold'); doc.text(`${k}:`, pageW / 2, y + i * 5);
+      doc.setFont('helvetica', 'normal'); doc.text(String(v), pageW / 2 + 22, y + i * 5);
+    });
+    y += 3 * 5 + 4;
+
+    // ── Lifecycle strip ──
+    if (lifecycle && Array.isArray(lifecycle.stages)) {
+      const stages = lifecycle.stages;
+      const segW = (pageW - mX * 2) / stages.length;
+      stages.forEach((st, i) => {
+        const active = !lifecycle.cancelled && i <= lifecycle.current;
+        if (active) doc.setFillColor(37, 99, 235); else doc.setFillColor(226, 232, 240);
+        doc.roundedRect(mX + i * segW + 1, y, segW - 2, 6, 1, 1, 'F');
+        doc.setFontSize(7.5); doc.setFont('helvetica', active ? 'bold' : 'normal');
+        if (active) doc.setTextColor(255, 255, 255); else doc.setTextColor(100, 116, 139);
+        doc.text(st, mX + i * segW + segW / 2, y + 4, { align: 'center' });
+      });
+      doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
+      y += 12;
+    }
+
+    // ── 1. Profitability & Payment ──
+    y = sectionTitle('1. Profitability & Payment Status', y);
+    const revenueBase = totals.equipment + totals.logistics;
+    const costBase = totals.outsourcing + totals.direct_expense;
+    const opMargin = revenueBase - costBase;
+    const marginPct = revenueBase > 0 ? (opMargin / revenueBase * 100).toFixed(1) : '0.0';
+    const grand = getProjectGrandTotal(selectedProject);
+    const received = (payments || []).filter(p => p.project_id === selectedProject.id).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    const outstanding = grand - received;
+    autoTable(doc, {
+      startY: y,
+      head: [['Financial Summary', 'Amount']],
+      body: [
+        ['Equipment Revenue (base)', formatCurrencyPDF(totals.equipment)],
+        ['Logistics Revenue (base)', formatCurrencyPDF(totals.logistics)],
+        ['Total Revenue (excl. GST)', formatCurrencyPDF(revenueBase)],
+        ['Outsourcing Cost (base)', formatCurrencyPDF(totals.outsourcing)],
+        ['Direct Expenses', formatCurrencyPDF(totals.direct_expense)],
+        ['Total Cost (excl. GST)', formatCurrencyPDF(costBase)],
+        [`Operating Profit / Loss  (Margin ${marginPct}%)`, formatCurrencyPDF(opMargin)],
+        ['Invoice Grand Total (incl. GST)', formatCurrencyPDF(grand)],
+        ['Received', formatCurrencyPDF(received)],
+        ['Outstanding', formatCurrencyPDF(outstanding)],
+        ['Net GST Payable', formatCurrencyPDF(totals.gst_payable)],
+      ],
+      didParseCell: (d) => {
+        if (d.section !== 'body') return;
+        if ([2, 5].includes(d.row.index)) d.cell.styles.fontStyle = 'bold';
+        if (d.row.index === 6) { d.cell.styles.fontStyle = 'bold'; d.cell.styles.fillColor = [240, 253, 250]; }
+        if (d.row.index === 9 && d.column.index === 1) { d.cell.styles.fontStyle = 'bold'; d.cell.styles.textColor = outstanding > 0.5 ? [185, 28, 28] : [5, 150, 105]; }
+      },
+      theme: 'grid', styles: { fontSize: 8.5, cellPadding: 1.8 }, headStyles: { fillColor: [37, 99, 235] },
+      columnStyles: { 1: { halign: 'right' } },
+      didDrawPage: drawCompactHeader,
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    // ── 2. Equipment & Resources Allocated ──
+    y = sectionTitle('2. Equipment & Resources Allocated', y);
+    const items = selectedProject.items || [];
+    const itemRows = items.map(it => [it.item_name || '—', it.qty || 0, it.days || 0, formatCurrencyPDF(it.rate || 0), formatCurrencyPDF(it.total || 0)]);
+    const itemQty = items.reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
+    const itemsTotal = items.reduce((s, it) => s + (it.total || 0), 0);
+    autoTable(doc, {
+      startY: y,
+      head: [['Equipment / Item', 'Qty', 'Days', 'Rate', 'Value']],
+      body: itemRows.length ? itemRows : [['No equipment allocated', '', '', '', '']],
+      foot: itemRows.length ? [['Total', itemQty, '', '', formatCurrencyPDF(itemsTotal)]] : undefined,
+      theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [37, 99, 235] },
+      footStyles: { fillColor: [239, 246, 255], textColor: [30, 64, 175], fontStyle: 'bold' },
+      columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
+      didDrawPage: drawCompactHeader,
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    // ── 3. Outsourced Resources (Vendors) ──
+    y = sectionTitle('3. Outsourced Resources (Vendors)', y);
+    const vRows = (outsourcingRows || []).map(r => [r.vendor, r.item, r.qty, r.days, formatCurrencyPDF(r.base), `${r.gstRate}%`, formatCurrencyPDF(r.total)]);
+    const vTotal = (outsourcingRows || []).reduce((s, r) => s + (r.total || 0), 0);
+    autoTable(doc, {
+      startY: y,
+      head: [['Vendor', 'Item', 'Qty', 'Days', 'Base', 'GST%', 'Total']],
+      body: vRows.length ? vRows : [['No outsourcing', '', '', '', '', '', '']],
+      foot: vRows.length ? [['Total', '', '', '', '', '', formatCurrencyPDF(vTotal)]] : undefined,
+      theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [220, 38, 38] },
+      footStyles: { fillColor: [254, 242, 242], textColor: [153, 27, 27], fontStyle: 'bold' },
+      columnStyles: { 2: { halign: 'center' }, 3: { halign: 'center' }, 4: { halign: 'right' }, 5: { halign: 'center' }, 6: { halign: 'right' } },
+      didDrawPage: drawCompactHeader,
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    // ── 4. Human Resources — Deployment & Execution ──
+    y = sectionTitle('4. Human Resources - Deployment & Execution', y);
+    const projLogs = (timeLogs || []).filter(l => l.project_id === selectedProject.id);
+    const hrMap = new Map();
+    projLogs.forEach(l => {
+      const id = l.employeeId || l.employee_id;
+      if (!id) return;
+      const hrs = getLogHours(l);
+      const rate = getHourlyRateForDate(empObj(id), l.checkIn || l.date || new Date());
+      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, hours: 0, cost: 0, rate });
+      const m = hrMap.get(id);
+      m.shifts += 1; m.hours += hrs; m.cost += hrs * (rate || 0); m.rate = rate;
+    });
+    (selectedProject.assigned_employees || []).forEach(id => {
+      if (!hrMap.has(id)) hrMap.set(id, { shifts: 0, hours: 0, cost: 0, rate: getHourlyRateForDate(empObj(id), selectedProject.start_date) });
+    });
+    const hrRows = Array.from(hrMap.entries()).map(([id, m]) => [empName(id), m.shifts, m.hours.toFixed(1), formatCurrencyPDF(m.rate || 0), formatCurrencyPDF(m.cost)]);
+    const totalHours = Array.from(hrMap.values()).reduce((s, m) => s + m.hours, 0);
+    const totalLabour = Array.from(hrMap.values()).reduce((s, m) => s + m.cost, 0);
+    autoTable(doc, {
+      startY: y,
+      head: [['Employee', 'Shifts', 'Hours', 'Rate/Hr', 'Labour Cost (indicative)']],
+      body: hrRows.length ? hrRows : [['No staff deployed', '', '', '', '']],
+      foot: hrRows.length ? [['Total', projLogs.length, totalHours.toFixed(1), '', formatCurrencyPDF(totalLabour)]] : undefined,
+      theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [124, 58, 237] },
+      footStyles: { fillColor: [245, 243, 255], textColor: [91, 33, 182], fontStyle: 'bold' },
+      columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
+      didDrawPage: drawCompactHeader,
+    });
+    y = doc.lastAutoTable.finalY + 3;
+    if (y + 6 > pageH - 14) { doc.addPage(); drawCompactHeader(); y = 24; }
+    doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(120, 120, 120);
+    doc.text('Labour cost is indicative (hours x hourly rate from attendance) and is not included in the project P&L above.', mX, y + 2);
+    doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
+    y += 8;
+
+    // ── 5. Execution & Delivery Timeline ──
+    y = sectionTitle('5. Execution & Delivery Timeline', y);
+    const challans = selectedProject.challans || [];
+    const chRows = challans.map(c => [
+      (c.type === 'return' ? 'RET/' : '') + (c.challan_no || '—'),
+      c.type === 'return' ? 'Return' : 'Delivery',
+      fmtDate(c.date),
+      (c.items || []).length,
+      c.transport?.vehicle_no || '—',
+    ]);
+    autoTable(doc, {
+      startY: y,
+      head: [['Challan No', 'Type', 'Date', '# Items', 'Vehicle']],
+      body: chRows.length ? chRows : [['No challans issued', '', '', '', '']],
+      theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [2, 132, 199] },
+      columnStyles: { 3: { halign: 'center' } },
+      didDrawPage: drawCompactHeader,
+    });
+    y = doc.lastAutoTable.finalY + 4;
+    if (y + 6 > pageH - 14) { doc.addPage(); drawCompactHeader(); y = 24; }
+    doc.setFontSize(8);
+    doc.text(`Milestones -  Setup: ${fmtDate(selectedProject.setup_date)}   |   Start: ${fmtDate(selectedProject.start_date)}   |   End: ${fmtDate(selectedProject.end_date)}`, mX, y + 2);
+    y += 8;
+
+    // ── 6. Expense Breakdown ──
+    y = sectionTitle('6. Expense Breakdown (by Employee & Category)', y);
+    const exRows = (expenseByEmployeeCategory || []).map(r => [r.employee, r.category, formatCurrencyPDF(r.total)]);
+    const exTotal = (expenseByEmployeeCategory || []).reduce((s, r) => s + (r.total || 0), 0);
+    autoTable(doc, {
+      startY: y,
+      head: [['Employee', 'Category', 'Amount']],
+      body: exRows.length ? exRows : [['No expenses recorded', '', '']],
+      foot: exRows.length ? [['Total', '', formatCurrencyPDF(exTotal)]] : undefined,
+      theme: 'grid', styles: { fontSize: 8, cellPadding: 1.6 }, headStyles: { fillColor: [16, 185, 129] },
+      footStyles: { fillColor: [236, 253, 245], textColor: [6, 95, 70], fontStyle: 'bold' },
+      columnStyles: { 2: { halign: 'right' } },
+      didDrawPage: drawCompactHeader,
+    });
+
+    // ── Page numbers ──
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let pg = 1; pg <= totalPages; pg++) {
+      doc.setPage(pg);
+      doc.setFontSize(7.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(140, 140, 140);
+      doc.text(`Page ${pg} of ${totalPages}`, pageW - mX, pageH - 5, { align: 'right' });
+      doc.text(`${org?.name || ''} - Management Report`, mX, pageH - 5);
+      doc.setTextColor(0, 0, 0);
+    }
+
+    const safe = (selectedProject.project_name || 'project').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+    doc.save(`Management_Report_${safe}.pdf`);
+  } catch (err) {
+    console.error('Management Report PDF Error:', err);
+    addToast('Failed to generate Management Report PDF', 'error');
+  }
+};

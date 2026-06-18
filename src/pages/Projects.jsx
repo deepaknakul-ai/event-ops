@@ -19,7 +19,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage
 import { storage } from '../firebase';
 
 import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS, GST_STATE_CODES } from '../utils/constants';
-import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExcel as generateQuotationExcelImpl, generateFinalReportPDF as generateFinalReportPDFImpl, generateTaxInvoicePDF as generateTaxInvoicePDFImpl, generateProformaInvoicePDF as generateProformaInvoicePDFImpl, printChallanPDF as printChallanPDFImpl, downloadEWayBillJSON as downloadEWayBillJSONImpl } from '../utils/pdf/projectPdf';
+import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExcel as generateQuotationExcelImpl, generateFinalReportPDF as generateFinalReportPDFImpl, generateTaxInvoicePDF as generateTaxInvoicePDFImpl, generateProformaInvoicePDF as generateProformaInvoicePDFImpl, printChallanPDF as printChallanPDFImpl, downloadEWayBillJSON as downloadEWayBillJSONImpl, generateManagementReportPDF as generateManagementReportPDFImpl } from '../utils/pdf/projectPdf';
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
@@ -1017,6 +1017,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const generateQuotationExcel = () => generateQuotationExcelImpl(quotationCtx());
 
   const generateFinalReportPDF = () => generateFinalReportPDFImpl({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseDateRows, expenseByEmployeeCategory });
+  const generateManagementReportPDF = () => generateManagementReportPDFImpl({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseByEmployeeCategory, payments, timeLogs, employees, lifecycle: getProjectLifecycle(selectedProject) });
 
   // --- Print Handler ---
   const printProjectDocument = async (type) => {
@@ -2084,6 +2085,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                 <FileText size={16} className="text-slate-600" /> Final Report
               </button>
             )}
+            {canViewProjectFinancials && (
+              <button onClick={generateManagementReportPDF} className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm hover:bg-indigo-100 text-indigo-700 font-medium transition-all">
+                <ClipboardList size={16} className="text-indigo-600" /> Management Report
+              </button>
+            )}
             {canManageProjectInvoices && (
               <button onClick={() => { setProformaForm({ date: new Date().toISOString().split('T')[0], notes: '', payment_terms: '' }); setIsProformaModalOpen(true); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-teal-50 hover:border-teal-200 text-slate-700 transition-all">
                 <Receipt size={16} className="text-teal-600" /> Proforma Invoice
@@ -2706,9 +2712,14 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
                 <ClipboardList size={20} className="text-indigo-600" /> Final Project Report
               </h3>
-              <button onClick={generateFinalReportPDF} className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                Export PDF
-              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={generateFinalReportPDF} className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                  Export PDF
+                </button>
+                <button onClick={generateManagementReportPDF} className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-700 font-medium hover:bg-indigo-100">
+                  Management Report
+                </button>
+              </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
