@@ -1332,7 +1332,24 @@ export const generateManagementReportPDF = async (ctx) => {
 
     // ── 4. Human Resources — Deployment & Execution ──
     y = sectionTitle('4. Human Resources - Deployment & Execution', y);
-    const projLogs = (timeLogs || []).filter(l => l.project_id === selectedProject.id);
+    // Attendance attribution: (a) logs explicitly tagged to this project (Site
+    // check-in with the project selected), plus (b) an assigned employee's logs
+    // that fall within the project window even if they forgot to tag it — so the
+    // execution picture is complete. Deduped by log id.
+    const assignedSet = new Set(selectedProject.assigned_employees || []);
+    const winStart = new Date(selectedProject.setup_date || selectedProject.start_date || 0);
+    winStart.setHours(0, 0, 0, 0);
+    const winEnd = new Date(selectedProject.end_date || selectedProject.start_date || 0);
+    winEnd.setHours(23, 59, 59, 999);
+    const projLogs = (timeLogs || []).filter(l => {
+      const id = l.employeeId || l.employee_id;
+      if (l.project_id === selectedProject.id) return true;
+      if (!l.project_id && id && assignedSet.has(id)) {
+        const t = new Date(l.checkIn || l.date || 0);
+        return t >= winStart && t <= winEnd;
+      }
+      return false;
+    });
     // Hours on-site = check-in to check-out; Hours worked = net of geo/late penalties.
     const grossLogHours = (l) => (l?.checkIn && l?.checkOut)
       ? Math.max(0, (new Date(l.checkOut) - new Date(l.checkIn)) / 3600000) : 0;
@@ -1369,7 +1386,9 @@ export const generateManagementReportPDF = async (ctx) => {
     y = doc.lastAutoTable.finalY + 3;
     if (y + 6 > pageH - 14) { doc.addPage(); drawCompactHeader(); y = 24; }
     doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(120, 120, 120);
-    doc.text('Days = shifts attended; Hrs On-Site = check-in to check-out; Hrs Worked = net of penalties; Cost to Project = Hrs Worked x Rate (indicative, excluded from P&L).', mX, y + 2);
+    doc.text('Hrs On-Site = check-in to check-out; Hrs Worked = net of penalties; Cost = Hrs Worked x Rate (indicative, excluded from P&L).', mX, y + 2);
+    y += 3.5;
+    doc.text('Sourced from attendance tagged to this project, plus assigned staff who checked in during the project dates. 0 hrs = no attendance captured for that person.', mX, y + 2);
     doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
     y += 8;
 
