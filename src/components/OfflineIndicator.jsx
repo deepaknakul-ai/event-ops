@@ -17,9 +17,30 @@ export default function OfflineIndicator({ offlineState, role }) {
   const handleSync = async () => {
     setError('');
     try {
-      await prepareForOffline();
+      const res = await prepareForOffline();
+      if (res && res.failed && res.failed.length) {
+        setError('Cached, but skipped (check permissions): ' + res.failed.join(', ') + '.');
+      }
     } catch (e) {
-      setError('Sync failed. Check your connection and try again.');
+      setError('Sync failed: ' + (e?.code || e?.message || 'unknown error') + '. Check your connection and try again.');
+    }
+  };
+
+  const handleGoOffline = async () => {
+    setError('');
+    try {
+      await goOffline();
+    } catch (e) {
+      setError('Could not activate Flight Mode: ' + (e?.code || e?.message || 'unknown error') + '.');
+    }
+  };
+
+  const handleGoOnline = async () => {
+    setError('');
+    try {
+      await goOnline();
+    } catch (e) {
+      setError('Could not exit Flight Mode: ' + (e?.code || e?.message || 'unknown error') + '.');
     }
   };
 
@@ -120,7 +141,7 @@ export default function OfflineIndicator({ offlineState, role }) {
                 <>
                   {!forcedOffline && isOnline && (
                     <button
-                      onClick={async () => { await goOffline(); }}
+                      onClick={handleGoOffline}
                       disabled={isSyncing}
                       className="w-full flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 font-medium hover:bg-amber-100 disabled:opacity-50 transition"
                     >
@@ -129,7 +150,7 @@ export default function OfflineIndicator({ offlineState, role }) {
                   )}
                   {forcedOffline && (
                     <button
-                      onClick={async () => { await goOnline(); }}
+                      onClick={handleGoOnline}
                       className="w-full flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 font-medium hover:bg-green-100 transition"
                     >
                       <Wifi size={14} /> Exit Flight Mode
