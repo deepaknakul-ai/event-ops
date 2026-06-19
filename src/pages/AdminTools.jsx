@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -62,6 +62,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [isSavingCats, setIsSavingCats] = useState(false);
   const [commForm, setCommForm] = useState({ provider: 'smtp', from_name: '', from_email: '', smtp_host: '', smtp_port: 587, smtp_secure: false, smtp_user: '', smtp_pass: '', api_key: '', reminders_enabled: false, reminder_overdue_days: 7 });
   const [isSavingComm, setIsSavingComm] = useState(false);
+  const [payForm, setPayForm] = useState({ provider: 'razorpay', key_id: '', key_secret: '', webhook_secret: '' });
+  const [isSavingPay, setIsSavingPay] = useState(false);
+  const [einvForm, setEinvForm] = useState({ enabled: false, gsp_base_url: '', client_id: '', client_secret: '', username: '', password: '', gstin: '' });
+  const [isSavingEinv, setIsSavingEinv] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -92,6 +96,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             if (commSnap.exists()) {
                 setCommForm(prev => ({ ...prev, ...commSnap.data() }));
             }
+            const paySnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'payments'));
+            if (paySnap.exists()) setPayForm(prev => ({ ...prev, ...paySnap.data() }));
+            const einvSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'einvoice'));
+            if (einvSnap.exists()) setEinvForm(prev => ({ ...prev, ...einvSnap.data() }));
         } catch (e) { console.error(e); }
     };
     fetchSettings();
@@ -193,6 +201,24 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     } catch (e) {
       notify('Failed to save: ' + (e?.message || 'error'), 'error');
     } finally { setIsSavingComm(false); }
+  };
+
+  const handleSavePayments = async () => {
+    setIsSavingPay(true);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'payments'), payForm, { merge: true });
+      logAction('admin', 'update_payments', 'payments', {}, 'Updated Payment Gateway Settings');
+      notify('Payment settings saved.', 'success');
+    } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingPay(false); }
+  };
+
+  const handleSaveEinvoice = async () => {
+    setIsSavingEinv(true);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'einvoice'), einvForm, { merge: true });
+      logAction('admin', 'update_einvoice', 'einvoice', {}, 'Updated E-Invoice Settings');
+      notify('E-invoice settings saved.', 'success');
+    } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingEinv(false); }
   };
 
   const handleAddOrUpdateBank = () => {
@@ -609,6 +635,37 @@ const AdminTools = ({ db, appId, logAction, role }) => {
               </div>
             </div>
             <button onClick={handleSaveCommunication} disabled={isSavingComm} className="mt-4 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingComm ? 'Saving…' : 'Save Communication Settings'}</button>
+       </div>
+
+       {/* ===== PAYMENTS (RAZORPAY) SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><CreditCard size={20} /> Payment Gateway</h3>
+            <p className="text-slate-500 text-sm mb-4">Generate Razorpay payment links from invoices; paid links auto-post a receipt via webhook. Keys live server-side only.</p>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Provider</label><select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={payForm.provider} onChange={e => setPayForm({ ...payForm, provider: e.target.value })}><option value="razorpay">Razorpay</option></select></div>
+              <div></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Key ID</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={payForm.key_id} onChange={e => setPayForm({ ...payForm, key_id: e.target.value })} placeholder="rzp_live_..." /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Key Secret</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={payForm.key_secret} onChange={e => setPayForm({ ...payForm, key_secret: e.target.value })} autoComplete="new-password" /></div>
+              <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">Webhook Secret</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={payForm.webhook_secret} onChange={e => setPayForm({ ...payForm, webhook_secret: e.target.value })} autoComplete="new-password" /></div>
+            </div>
+            <p className="mt-2 text-xs text-slate-400">Razorpay webhook URL: <code className="bg-slate-100 px-1 rounded">https://us-central1-{appId === 'TERMS 1.0.0' ? 'terms-a005e' : 'PROJECT'}.cloudfunctions.net/razorpayWebhook?appId={encodeURIComponent(appId)}</code> — subscribe to <b>payment_link.paid</b>.</p>
+            <button onClick={handleSavePayments} disabled={isSavingPay} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingPay ? 'Saving…' : 'Save Payment Settings'}</button>
+       </div>
+
+       {/* ===== E-INVOICE (IRN) SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><FileCheck size={20} /> GST E-Invoice (IRN)</h3>
+            <p className="text-slate-500 text-sm mb-4">Generate IRN + signed QR via your GSP once you cross the e-invoicing turnover threshold. Inert until enabled and credentials are set.</p>
+            <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3"><input type="checkbox" checked={!!einvForm.enabled} onChange={e => setEinvForm({ ...einvForm, enabled: e.target.checked })} /> Enable e-invoicing</label>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">GSP Base URL</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.gsp_base_url} onChange={e => setEinvForm({ ...einvForm, gsp_base_url: e.target.value })} placeholder="https://api.gsp-provider.com" /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Client ID</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.client_id} onChange={e => setEinvForm({ ...einvForm, client_id: e.target.value })} /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Client Secret</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.client_secret} onChange={e => setEinvForm({ ...einvForm, client_secret: e.target.value })} autoComplete="new-password" /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">GST Portal Username</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.username} onChange={e => setEinvForm({ ...einvForm, username: e.target.value })} /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">GST Portal Password</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.password} onChange={e => setEinvForm({ ...einvForm, password: e.target.value })} autoComplete="new-password" /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">GSTIN</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.gstin} onChange={e => setEinvForm({ ...einvForm, gstin: e.target.value })} /></div>
+            </div>
+            <button onClick={handleSaveEinvoice} disabled={isSavingEinv} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingEinv ? 'Saving…' : 'Save E-Invoice Settings'}</button>
        </div>
 
        {/* ===== BANK ACCOUNTS SECTION ===== */}

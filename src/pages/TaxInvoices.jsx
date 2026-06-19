@@ -1,12 +1,13 @@
 import React, { useState, useMemo } from 'react';
 import {
   Plus, Search, Edit, Trash2, FileText, X, CheckCircle,
-  AlertCircle, Download, Receipt, ChevronDown, Zap, XCircle, Eye
+  AlertCircle, Download, Receipt, ChevronDown, Zap, XCircle, Eye, CreditCard, FileCheck
 } from 'lucide-react';
 import {
   collection, addDoc, updateDoc, doc, deleteDoc,
   getDoc, writeBatch
 } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
@@ -604,6 +605,37 @@ const TaxInvoices = ({
   const partyEmail = (c) => c.email || (c.contacts && c.contacts[0] && c.contacts[0].email) || '';
   const partyPhone = (c) => c.phone || c.contact_phone || (c.contacts && c.contacts[0] && c.contacts[0].phone) || '';
 
+  // ── Payment link (Razorpay) + e-invoice (IRN) ──
+  const handlePaymentLink = async (inv) => {
+    const cl = invoiceParty(inv);
+    try {
+      addToast('Generating payment link…', 'info');
+      const fn = httpsCallable(getFunctions(), 'createPaymentLink');
+      const res = await fn({ appId, amount: inv.final_amount, description: `Invoice ${inv.invoice_no}`, reference: `proj:${inv.project_id}`, customer: { name: cl.name, email: partyEmail(cl), phone: partyPhone(cl) } });
+      const url = res.data?.url;
+      if (!url) throw new Error('No link returned');
+      try { await navigator.clipboard.writeText(url); } catch { /* ignore */ }
+      addToast('Payment link copied: ' + url, 'success');
+      logAction('tax_invoices', 'payment_link', inv.id, { url }, inv.invoice_no);
+    } catch (e) {
+      const msg = e?.message || 'error';
+      addToast(/not configured|failed-precondition/i.test(msg) ? 'Razorpay not set up — add keys in Admin Tools → Payments.' : 'Payment link failed: ' + msg, 'error');
+    }
+  };
+
+  const handleGenerateIRN = async (inv) => {
+    try {
+      addToast('Requesting IRN…', 'info');
+      const fn = httpsCallable(getFunctions(), 'generateIRN');
+      const res = await fn({ appId, invoiceId: inv.id });
+      if (res.data?.irn) addToast('IRN generated: ' + res.data.irn, 'success');
+      else addToast(res.data?.message || 'E-invoice payload prepared.', 'info');
+    } catch (e) {
+      const msg = e?.message || 'error';
+      addToast(/not configured|not enabled|failed-precondition/i.test(msg) ? 'E-invoicing not enabled — configure it in Admin Tools → GST E-Invoice.' : 'IRN failed: ' + msg, 'error');
+    }
+  };
+
   // ── render ────────────────────────────────────────────────────────────────
   const clientOptions = clients.filter(c => c.type !== 'Vendor').sort((a,b) => (a.name||'').localeCompare(b.name||''));
 
@@ -814,6 +846,10 @@ const TaxInvoices = ({
                           subject={`Tax Invoice ${inv.invoice_no}`}
                           message={`Dear ${invoiceParty(inv).name || 'Customer'}, please find your Tax Invoice ${inv.invoice_no} attached.`}
                         />
+                        <button onClick={() => handlePaymentLink(inv)} title="Generate Razorpay payment link" className="p-1.5 rounded hover:bg-emerald-50 text-emerald-600 transition"><CreditCard size={14} /></button>
+                        {can(role, 'tax_invoices', 'edit') && (
+                          <button onClick={() => handleGenerateIRN(inv)} title="Generate e-invoice IRN" className="p-1.5 rounded hover:bg-purple-50 text-purple-600 transition"><FileCheck size={14} /></button>
+                        )}
                         {can(role, 'tax_invoices', 'edit') && (
                           <button onClick={() => openEdit(inv)} title="Edit" className="p-1.5 rounded hover:bg-indigo-50 text-indigo-600 transition"><Edit size={14} /></button>
                         )}

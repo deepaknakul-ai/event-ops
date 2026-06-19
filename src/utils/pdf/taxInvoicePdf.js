@@ -224,6 +224,20 @@ import { GST_STATE_CODES } from "../constants";
         pdfDoc.text(pdfDoc.splitTextToSize(invoiceTerms, pageWidth-margin*2), margin, y);
       }
 
+      // GST e-invoice IRN + signed QR (when generated via GSP)
+      if (invoice.irn) {
+        try {
+          pdfDoc.setFontSize(7); pdfDoc.setFont('helvetica', 'normal'); pdfDoc.setTextColor(80, 80, 80);
+          pdfDoc.text(`IRN: ${invoice.irn}`, margin, pageH - 6);
+          if (invoice.signed_qr) {
+            const qrImg = await QRCode.toDataURL(String(invoice.signed_qr), { margin: 0, width: 160 });
+            pdfDoc.addImage(qrImg, 'PNG', pageWidth - margin - 22, pageH - 30, 22, 22);
+            pdfDoc.text('e-Invoice', pageWidth - margin - 11, pageH - 6, { align: 'center' });
+          }
+          pdfDoc.setTextColor(0, 0, 0);
+        } catch (e) { /* QR optional */ }
+      }
+
       const fileName = `TaxInvoice_${invNo.replace(/\//g,'-')}_${(client?.name||'').replace(/\s+/g,'_')}.pdf`;
       if (ctx.deliver) return { doc: pdfDoc, filename: fileName };
       pdfDoc.save(fileName);

@@ -15,11 +15,11 @@
  *     draft journal entries from `recurring_rules` with `template_id` set.
  */
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
-const { pbkdf2, timingSafeEqual, createHash, randomBytes } = require('crypto');
+const { pbkdf2, timingSafeEqual, createHash, createHmac, randomBytes } = require('crypto');
 const { promisify } = require('util');
 
 admin.initializeApp();
@@ -853,5 +853,138 @@ exports.getPortalData = onCall(
       summary: { billed, received, outstanding: billed - received, projectCount: projects.length },
       projects, invoices, payments, vendor,
     };
+  }
+);
+
+// ── Payments: Razorpay payment links + webhook auto-reconcile ───────────────
+async function readPaymentConfig(appId) {
+  const snap = await db.doc(`artifacts/${appId}/public/data/settings/payments`).get();
+  return snap.exists ? (snap.data() || {}) : null;
+}
+
+exports.createPaymentLink = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, amount, description, customer, reference, callbackUrl } = req.data || {};
+    await assertAppUser(req.auth, appId);
+    if (!(Number(amount) > 0)) throw new HttpsError('invalid-argument', 'A positive amount is required');
+    const cfg = await readPaymentConfig(appId);
+    if (!cfg || cfg.provider !== 'razorpay' || !cfg.key_id || !cfg.key_secret) {
+      throw new HttpsError('failed-precondition', 'Razorpay is not configured. Add keys in Admin Tools → Payments.');
+    }
+    const auth = Buffer.from(`${cfg.key_id}:${cfg.key_secret}`).toString('base64');
+    const body = {
+      amount: Math.round(Number(amount) * 100),
+      currency: 'INR',
+      accept_partial: false,
+      description: description || 'Payment',
+      ...(reference ? { reference_id: reference } : {}),
+      ...(customer ? { customer: { name: customer.name || undefined, email: customer.email || undefined, contact: customer.phone || undefined } } : {}),
+      notify: { sms: !!(customer && customer.phone), email: !!(customer && customer.email) },
+      reminder_enable: true,
+      ...(callbackUrl ? { callback_url: callbackUrl, callback_method: 'get' } : {}),
+    };
+    const r = await fetch('https://api.razorpay.com/v1/payment_links', {
+      method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new HttpsError('internal', `Razorpay error: ${(data && data.error && data.error.description) || r.status}`);
+    return { ok: true, url: data.short_url, id: data.id };
+  }
+);
+
+// Razorpay webhook → verify signature, then post a payment (idempotent).
+// Configure in Razorpay dashboard: https://<region>-<project>.cloudfunctions.net/razorpayWebhook?appId=<APPID>
+exports.razorpayWebhook = onRequest(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req, res) => {
+    try {
+      const appId = req.query.appId || (req.body && req.body.appId);
+      if (!appId) { res.status(400).send('appId required'); return; }
+      const cfg = await readPaymentConfig(appId);
+      if (!cfg || !cfg.webhook_secret) { res.status(400).send('not configured'); return; }
+      const sig = req.headers['x-razorpay-signature'];
+      const expected = createHmac('sha256', cfg.webhook_secret).update(req.rawBody).digest('hex');
+      if (!sig || sig !== expected) { res.status(401).send('bad signature'); return; }
+
+      const event = req.body.event;
+      if (event === 'payment_link.paid' || event === 'payment.captured') {
+        const pl = req.body.payload && req.body.payload.payment_link && req.body.payload.payment_link.entity;
+        const pay = req.body.payload && req.body.payload.payment && req.body.payload.payment.entity;
+        const reference = (pl && pl.reference_id) || (pay && pay.notes && pay.notes.reference) || '';
+        const amount = ((pl && pl.amount) || (pay && pay.amount) || 0) / 100;
+        const payId = (pay && pay.id) || (pl && pl.id) || '';
+        if (payId) {
+          const dup = await db.collection(`artifacts/${appId}/public/data/payments`).where('razorpay_id', '==', payId).limit(1).get();
+          if (!dup.empty) { res.status(200).send('ok (dup)'); return; }
+        }
+        let project_id = null, client_id = null;
+        if (reference.startsWith('proj:')) {
+          project_id = reference.slice(5);
+          const pdoc = await db.doc(`artifacts/${appId}/public/data/projects/${project_id}`).get();
+          if (pdoc.exists) client_id = pdoc.data().client_id || null;
+        } else if (reference.startsWith('client:')) {
+          client_id = reference.slice(7);
+        }
+        await db.collection(`artifacts/${appId}/public/data/payments`).add({
+          amount, client_id, project_id, mode: 'Razorpay', method: 'Razorpay',
+          reference: payId, razorpay_id: payId, date: new Date().toISOString().slice(0, 10),
+          source: 'razorpay_webhook', recorded_at: new Date().toISOString(),
+        });
+        logger.info(`[${appId}] razorpay payment posted: ${payId} ${amount}`);
+      }
+      res.status(200).send('ok');
+    } catch (e) {
+      logger.error('razorpayWebhook error', e);
+      res.status(500).send('error');
+    }
+  }
+);
+
+// ── GST e-invoice (IRN) — scaffold; live GSP call when configured ───────────
+exports.generateIRN = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, invoiceId } = req.data || {};
+    await assertAppUser(req.auth, appId);
+    if (!invoiceId) throw new HttpsError('invalid-argument', 'invoiceId required');
+    const cfg = await db.doc(`artifacts/${appId}/public/data/settings/einvoice`).get().then((s) => (s.exists ? s.data() : null));
+    if (!cfg || !cfg.enabled) throw new HttpsError('failed-precondition', 'E-invoicing is not enabled. Configure it in Admin Tools → GST E-Invoice.');
+    const invRef = db.doc(`artifacts/${appId}/public/data/tax_invoices/${invoiceId}`);
+    const invSnap = await invRef.get();
+    if (!invSnap.exists) throw new HttpsError('not-found', 'Invoice not found');
+    const inv = invSnap.data();
+    if (inv.irn) return { ok: true, irn: inv.irn, message: 'IRN already generated.' };
+
+    // Minimal NIC-schema payload built from the invoice (best-effort scaffold).
+    const dt = inv.invoice_date ? new Date(inv.invoice_date) : new Date();
+    const payload = {
+      Version: '1.1',
+      TranDtls: { TaxSch: 'GST', SupTyp: 'B2B' },
+      DocDtls: { Typ: 'INV', No: inv.invoice_no || '', Dt: dt.toLocaleDateString('en-GB') },
+      SellerDtls: { Gstin: cfg.gstin || inv.org_gstin_at_issue || '' },
+      BuyerDtls: { Gstin: inv.client_gstin || 'URP', LglNm: inv.client_name || '' },
+      ValDtls: { TotInvVal: Number(inv.final_amount || 0) },
+    };
+    await invRef.set({ einvoice_payload: payload, einvoice_status: 'prepared' }, { merge: true });
+
+    if (!cfg.gsp_base_url || !cfg.client_id || !cfg.client_secret) {
+      return { ok: true, pending: true, message: 'E-invoice payload prepared. Add full GSP credentials to obtain the live IRN.' };
+    }
+    try {
+      const r = await fetch(`${cfg.gsp_base_url.replace(/\/$/, '')}/ei/api/invoice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', client_id: cfg.client_id, client_secret: cfg.client_secret, gstin: cfg.gstin || '', user_name: cfg.username || '' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      const irn = data.Irn || data.irn || (data.data && data.data.Irn);
+      const qr = data.SignedQRCode || data.signedQRCode || (data.data && data.data.SignedQRCode);
+      if (!r.ok || !irn) throw new Error((data && (data.message || data.error)) || `GSP error ${r.status}`);
+      await invRef.set({ irn, signed_qr: qr || '', einvoice_status: 'generated', irn_at: new Date().toISOString() }, { merge: true });
+      return { ok: true, irn };
+    } catch (e) {
+      return { ok: false, message: 'GSP call failed (payload saved): ' + (e.message || 'error') };
+    }
   }
 );
