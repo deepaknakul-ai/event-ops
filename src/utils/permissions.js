@@ -54,6 +54,12 @@ export const PERMISSIONS = {
     edit:   ['admin', 'manager'],
     delete: ['admin'],
   },
+  leads: {
+    view:   ['admin', 'manager', 'accountant'],
+    create: ['admin', 'manager'],
+    edit:   ['admin', 'manager'],
+    delete: ['admin'],
+  },
   projects: {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
@@ -191,6 +197,7 @@ export const PERMISSIONS = {
 // ── Human-readable resource definitions (used by RBACManager matrix) ─────────
 export const RESOURCE_DEFS = {
   clients:           { label: 'Clients & Vendors',   actions: ['view', 'create', 'edit', 'delete'] },
+  leads:             { label: 'Leads / CRM',         actions: ['view', 'create', 'edit', 'delete'] },
   projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
@@ -306,6 +313,7 @@ export const getNavAccess = (role) => ({
   projects:          can(role, 'projects', 'view'),
   outsourcing:       can(role, 'outsourcing', 'view'),
   clients:           can(role, 'clients', 'view'),
+  leads:             can(role, 'leads', 'view'),
   inventory:         can(role, 'inventory', 'view'),
   expenses:          can(role, 'expenses', 'view_own'),
   finance:           can(role, 'finance', 'view'),
