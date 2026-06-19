@@ -40,6 +40,7 @@ const PublicLedger = lazy(() => import('./pages/PublicLedger'));
 const QuoteApproval = lazy(() => import('./pages/QuoteApproval'));
 const PublicReimbursable = lazy(() => import('./pages/PublicReimbursable'));
 const PublicEmployeeLedger = lazy(() => import('./pages/PublicEmployeeLedger'));
+const Portal = lazy(() => import('./pages/Portal'));
 const Finance = lazy(() => import('./pages/Finance'));
 const Accounting = lazy(() => import('./pages/Accounting'));
 const ChallanManager = lazy(() => import('./pages/ChallanManager'));
@@ -3417,6 +3418,16 @@ const [payroll, setPayroll] = useState([]);
       <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
         <Routes>
           <Route path="/employee-statement/:token" element={<PublicEmployeeLedger />} />
+        </Routes>
+      </Suspense>
+    );
+  }
+
+  if (location.pathname.startsWith('/portal/')) {
+    return (
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <Routes>
+          <Route path="/portal/:token" element={<Portal />} />
         </Routes>
       </Suspense>
     );

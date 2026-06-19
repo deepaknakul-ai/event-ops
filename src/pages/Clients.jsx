@@ -3,7 +3,7 @@ import { notify } from '../utils/toast';
 import {
   Users, Plus, Search, Edit, Trash2, MapPin, Copy, Box,
   BarChart2, TrendingUp, TrendingDown, X, ArrowLeft, AlertTriangle,
-  Calendar, FileText, CreditCard, Briefcase, CheckCircle, Clock
+  Calendar, FileText, CreditCard, Briefcase, CheckCircle, Clock, Link2
 } from 'lucide-react';
 import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
@@ -523,6 +523,31 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     setLedgerExpiryDays('');
   };
 
+  const handlePortalLink = async (client) => {
+    if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!client) return;
+    let token = client.portal_token;
+    if (!token) {
+      token = generateSecureToken(20);
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', client.id), {
+        portal_token: token,
+        portal_token_created_at: new Date().toISOString(),
+      });
+      logAction('clients', 'create_portal_link', client.id, { token }, client.name);
+    }
+    const link = `${window.location.origin}/portal/${token}`;
+    try { await navigator.clipboard.writeText(link); notify('Portal link copied to clipboard.', 'success'); }
+    catch { notify('Portal link: ' + link, 'info'); }
+  };
+
+  const handleRevokePortalLink = async (client) => {
+    if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
+    if (!client) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', client.id), { portal_token: '' });
+    logAction('clients', 'revoke_portal_link', client.id, {}, client.name);
+    notify('Portal link revoked.', 'success');
+  };
+
   const handleRegenerateLedgerLink = async () => {
     if (!can(role, 'clients', 'edit')) return notify('Access denied: insufficient permissions.', 'error');
     if (!ledgerLinkModal.client) return;
@@ -866,6 +891,12 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
             <div className="flex items-center gap-2">
               {can(role, 'finance', 'view') && (
                 <button onClick={handleClientReport} className="flex items-center gap-1.5 text-sm rounded border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-indigo-700 font-medium hover:bg-indigo-100"><FileText size={14}/> Management Report</button>
+              )}
+              {can(role, 'clients', 'edit') && (
+                <button onClick={() => handlePortalLink(dashboardClient.rootClient || dashboardClient)} title="Copy a secure self-service portal link for this party" className="flex items-center gap-1.5 text-sm rounded border border-teal-200 bg-teal-50 px-3 py-1.5 text-teal-700 font-medium hover:bg-teal-100"><Link2 size={14}/> Portal Link</button>
+              )}
+              {can(role, 'clients', 'edit') && (dashboardClient.rootClient || dashboardClient).portal_token && (
+                <button onClick={() => handleRevokePortalLink(dashboardClient.rootClient || dashboardClient)} title="Disable the portal link" className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-500"><X size={14}/> Revoke</button>
               )}
               {(role === 'admin' || role === 'manager') && (
                 <button onClick={() => openEdit(dashboardClient.rootClient || dashboardClient)} className="flex items-center gap-1.5 text-sm rounded border border-slate-200 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-600"><Edit size={14}/> Edit Client</button>

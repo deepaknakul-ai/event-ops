@@ -792,3 +792,66 @@ exports.runDueRemindersNow = onCall(
     return { ok: true, results };
   }
 );
+
+// ── Self-service portal data (magic-link, no login) ─────────────────────────
+// Validates a client/vendor portal_token server-side and returns ONLY that
+// party's scoped data via the Admin SDK, so the public portal page needs no
+// Firestore access or auth.
+exports.getPortalData = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token } = req.data || {};
+    if (!appId || !token) throw new HttpsError('invalid-argument', 'appId and token required');
+    const q = await db.collection(`artifacts/${appId}/public/data/clients`).where('portal_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired link');
+    const cDoc = q.docs[0];
+    const client = cDoc.data();
+    const cid = cDoc.id;
+    if (client.portal_token_expiry && new Date(client.portal_token_expiry) < new Date()) {
+      throw new HttpsError('permission-denied', 'This link has expired. Please request a new one.');
+    }
+    const [projSnap, invSnap, paySnap, orgSnap, vpaySnap] = await Promise.all([
+      db.collection(`artifacts/${appId}/public/data/projects`).where('client_id', '==', cid).get(),
+      db.collection(`artifacts/${appId}/public/data/tax_invoices`).where('client_id', '==', cid).get(),
+      db.collection(`artifacts/${appId}/public/data/payments`).where('client_id', '==', cid).get(),
+      db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
+      db.collection(`artifacts/${appId}/public/data/vendor_payments`).where('vendor_id', '==', cid).get().catch(() => ({ docs: [] })),
+    ]);
+    const org = (orgSnap && orgSnap.exists) ? orgSnap.data() : {};
+    const projects = projSnap.docs
+      .map((d) => { const p = d.data(); return { id: d.id, name: p.project_name || '', status: p.status || '', start_date: p.start_date || '', end_date: p.end_date || '', venue: p.venue || '', invoice_status: p.invoice_status || '', quote_status: p.quote_status || '' }; })
+      .sort((a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0));
+    const invoices = invSnap.docs.map((d) => d.data()).filter((i) => (i.status || 'active') !== 'cancelled')
+      .map((i) => ({ invoice_no: i.invoice_no || '', date: i.invoice_date || '', amount: Number(i.final_amount || 0) }))
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    const payments = paySnap.docs.map((d) => d.data())
+      .map((p) => ({ date: p.date || p.payment_date || '', amount: Number(p.amount || 0), mode: p.mode || p.method || p.payment_mode || '', ref: p.reference || p.ref || '' }))
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    const billed = invoices.reduce((s, i) => s + i.amount, 0);
+    const received = payments.reduce((s, p) => s + p.amount, 0);
+
+    const isVendor = client.type === 'Vendor' || client.type === 'Both';
+    let vendor = null;
+    if (isVendor) {
+      const jobs = []; let vBilled = 0;
+      projSnap.docs.forEach((d) => {
+        const p = d.data();
+        (p.vendor_allocations || []).filter((a) => a.vendor_id === cid).forEach((a) => {
+          const amt = Number(a.tax_amount || a.amount || 0);
+          jobs.push({ project: p.project_name || '', item: a.item_name || '', amount: amt });
+          vBilled += amt;
+        });
+      });
+      const vPaid = (vpaySnap.docs || []).reduce((s, d) => s + Number(d.data().amount || 0), 0);
+      vendor = { jobs, billed: vBilled, paid: vPaid, balance: vBilled - vPaid };
+    }
+
+    return {
+      party: { name: client.name || '', gstin: client.gstin || '', type: client.type || 'Client', address: client.address || '' },
+      org: { name: org.name || '', address: org.address || '', gstin: org.gstin || '', phone: org.phone || '', email: org.email || '', logo: org.logo || '' },
+      isVendor,
+      summary: { billed, received, outstanding: billed - received, projectCount: projects.length },
+      projects, invoices, payments, vendor,
+    };
+  }
+);
