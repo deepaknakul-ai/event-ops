@@ -54,6 +54,7 @@ const BusinessReport = lazy(() => import('./pages/BusinessReport'));
 const Inventory = lazy(() => import('./pages/Inventory'));
 const WarehouseScan = lazy(() => import('./pages/WarehouseScan'));
 const Schedule = lazy(() => import('./pages/Schedule'));
+const AssetAnalytics = lazy(() => import('./pages/AssetAnalytics'));
 const Projects = lazy(() => import('./pages/Projects'));
 const Clients = lazy(() => import('./pages/Clients'));
 const ConfigurationBuilder = lazy(() => import('./pages/ConfigurationBuilder'));
@@ -3580,6 +3581,7 @@ const [payroll, setPayroll] = useState([]);
           {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
+          {can(role,'reports','view') && <NavItem to="/asset-analytics" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Asset Analytics" />}
           {can(role,'configurations','view') && <NavItem to="/configurations" setMobileMenuOpen={setMobileMenuOpen} icon={Layers} label="Configs" />}
           {can(role,'expenses','view_own') && <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />}
           {can(role,'finance','view') && <NavItem to="/finance" setMobileMenuOpen={setMobileMenuOpen} icon={Wallet} label="Finance" />}
@@ -3673,6 +3675,7 @@ const [payroll, setPayroll] = useState([]);
                   {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
+          {can(role,'reports','view') && <NavItem to="/asset-analytics" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Asset Analytics" />}
                   {can(role,'configurations','view') && <NavItem to="/configurations" setMobileMenuOpen={setMobileMenuOpen} icon={Layers} label="Configs" />}
                   <NavItem to="/expenses" setMobileMenuOpen={setMobileMenuOpen} icon={DollarSign} label="Expenses" />
                   {can(role,'finance','view') && <NavItem to="/finance" setMobileMenuOpen={setMobileMenuOpen} icon={Wallet} label="Finance" />}
@@ -3744,6 +3747,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
                 <Route path="/warehouse-scan" element={<ProtectedRoute role={effectiveRole} resource="inventory"><WarehouseScan projects={projects} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} currentEmpId={effectiveEmpId} addToast={addToast} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/schedule" element={<ProtectedRoute role={effectiveRole} resource="projects"><Schedule projects={projects} inventory={inventory} employees={safeEmployees} role={effectiveRole} /></ProtectedRoute>} />
+                <Route path="/asset-analytics" element={<ProtectedRoute role={effectiveRole} resource="reports"><AssetAnalytics inventory={inventory} projects={projects} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/configurations" element={<ProtectedRoute role={effectiveRole} resource="configurations"><ConfigurationBuilder configurations={configurations} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
                 <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} expenseCats={[...EXPENSE_CATS, ...customExpenseCategories.filter(c => !EXPENSE_CATS.includes(c))]} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/employees" element={<ProtectedRoute role={effectiveRole} resource="employees"><Employees employees={safeEmployees} role={effectiveRole} db={db} appId={appId} advances={advances} logAction={logAction} /></ProtectedRoute>} />
