@@ -901,3 +901,23 @@ export const calculateLeaveBalance = (leaves, entitlements) => {
   });
   return balance;
 };
+
+// Service/maintenance due status for an inventory item. Uses an explicit
+// next_test_due if set, else last_service_date + service_interval_days.
+// Returns { status: 'overdue'|'due_soon'|'ok'|'none', dueDate, days }.
+export const getServiceStatus = (item, asOf = new Date()) => {
+  if (!item) return { status: 'none' };
+  let due = item.next_test_due || null;
+  if (!due && item.last_service_date && Number(item.service_interval_days) > 0) {
+    const d = new Date(item.last_service_date);
+    d.setDate(d.getDate() + Number(item.service_interval_days));
+    due = d.toISOString().slice(0, 10);
+  }
+  if (!due) return { status: 'none' };
+  const today = new Date(asOf); today.setHours(0, 0, 0, 0);
+  const dueDate = new Date(due); dueDate.setHours(0, 0, 0, 0);
+  const days = Math.round((dueDate - today) / 86400000);
+  if (days < 0) return { status: 'overdue', dueDate: due, days };
+  if (days <= 14) return { status: 'due_soon', dueDate: due, days };
+  return { status: 'ok', dueDate: due, days };
+};

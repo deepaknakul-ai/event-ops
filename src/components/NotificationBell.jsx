@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Bell, Calendar, FileText, AlertTriangle, Package, ChevronRight, X } from 'lucide-react';
+import { Bell, Calendar, FileText, AlertTriangle, Package, ChevronRight, X, Wrench } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { formatCurrency, getProjectGrandTotal, isDateOverlap } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, isDateOverlap, getServiceStatus } from '../utils/helpers';
 
 const NotificationBell = ({ projects = [], inventory = [], payments = [], clients = [], role = 'tech', expenses = [], hrLeaves = [] }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -120,6 +120,21 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
           });
         }
       });
+
+      // 5. Maintenance / service due (overdue or within 14 days)
+      inventory.forEach(item => {
+        if (item.is_external) return;
+        const svc = getServiceStatus(item);
+        if (svc.status === 'overdue' || svc.status === 'due_soon') {
+          items.push({
+            type: 'service_due',
+            priority: svc.status === 'overdue' ? 'high' : 'medium',
+            title: `${svc.status === 'overdue' ? 'Service overdue' : 'Service due'}: ${item.name}`,
+            subtitle: svc.status === 'overdue' ? `Was due ${svc.dueDate} (${Math.abs(svc.days)}d ago)` : `Due ${svc.dueDate} (in ${svc.days}d)`,
+            action: () => navigate('/inventory'),
+          });
+        }
+      });
     }
 
     return items.sort((a, b) => (a.priority === 'high' ? -1 : 1) - (b.priority === 'high' ? -1 : 1));
@@ -133,6 +148,7 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
     overdue: <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />,
     unpaid_invoice: <FileText size={14} className="text-orange-500 flex-shrink-0" />,
     low_stock: <Package size={14} className="text-yellow-500 flex-shrink-0" />,
+    service_due: <Wrench size={14} className="text-cyan-600 flex-shrink-0" />,
   };
 
   const badgeMap = {
@@ -140,6 +156,7 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
     overdue: 'bg-red-50 text-red-600 border-red-200',
     unpaid_invoice: 'bg-orange-50 text-orange-600 border-orange-200',
     low_stock: 'bg-yellow-50 text-yellow-700 border-yellow-200',
+    service_due: 'bg-cyan-50 text-cyan-700 border-cyan-200',
   };
 
   const labelMap = {
@@ -147,6 +164,7 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
     overdue: 'Overdue',
     unpaid_invoice: 'Unpaid',
     low_stock: 'Low Stock',
+    service_due: 'Service Due',
   };
 
   // Group by type for section headers
@@ -156,7 +174,7 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
     return acc;
   }, {});
 
-  const typeOrder = ['overdue', 'upcoming_project', 'unpaid_invoice', 'low_stock'];
+  const typeOrder = ['overdue', 'service_due', 'upcoming_project', 'unpaid_invoice', 'low_stock'];
 
   return (
     <div className="relative" ref={ref}>

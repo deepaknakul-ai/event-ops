@@ -56,7 +56,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     // LED Tile Model (for LED Wall category)
     tile_model: null,
     // Maintenance
-    last_service_date: '', next_test_due: '', service_notes: '',
+    last_service_date: '', next_test_due: '', service_interval_days: '', service_notes: '',
     // Misc
     gst_rate: 18, is_external: false, hsn_code: '', remarks: '', specifications: '',
     // M-3: low-stock reorder threshold (alerts when available qty drops below this).
@@ -921,10 +921,12 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                 {activeTab === 'maintenance' && (
                     <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-3 gap-4">
                             {renderField('Last Service Date', 'last_service_date', 'date')}
                             {renderField('Next Test Due', 'next_test_due', 'date')}
+                            {renderField('Service Interval (days)', 'service_interval_days', 'number')}
                         </div>
+                        <p className="text-xs text-slate-400">Leave "Next Test Due" blank to auto-compute from Last Service Date + interval. Due/overdue items appear in the notification bell.</p>
                         <div>
                             <label className="block text-xs font-bold text-white text-slate-200 mb-1">Service History / Notes</label>
                             <textarea className="w-full rounded border border-slate-300 p-2 text-sm bg-white text-black bg-slate-50 border-slate-200 text-black placeholder-slate-400 placeholder-slate-4000" rows={4} value={formData.service_notes} onChange={e => setFormData({...formData, service_notes: e.target.value})} />
