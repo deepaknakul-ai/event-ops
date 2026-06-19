@@ -57,6 +57,21 @@ export const INTENTS = [
     'yet to bill', 'bill pending', 'invoice pending project',
     'awaiting invoice', 'to be invoiced', 'billing pending',
   ] },
+  { id: 'projects.lossMaking', keywords: [
+    'loss making', 'loss-making', 'losing money', 'negative margin', 'at a loss',
+    'unprofitable', 'lost money', 'loss projects', 'projects in loss',
+  ] },
+  { id: 'projects.topMargin', keywords: [
+    'most profitable', 'top margin', 'best margin', 'highest margin',
+    'best performing project', 'top projects by margin', 'profitable projects', 'most profit',
+  ] },
+  { id: 'projects.bottomMargin', keywords: [
+    'least profitable', 'worst margin', 'lowest margin', 'worst performing project',
+  ] },
+  { id: 'clients.top', keywords: [
+    'top client', 'top clients', 'best client', 'biggest client', 'top customer',
+    'clients by revenue', 'highest revenue client', 'most valuable client', 'top accounts',
+  ] },
   { id: 'projects.byDateRange', keywords: [
     'projects between', 'projects from', 'projects in', 'projects on',
     'projects during', 'shows between', 'events in', 'jobs in',

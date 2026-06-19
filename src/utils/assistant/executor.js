@@ -6,7 +6,7 @@
 // `pendingAction` descriptors the UI executes after user confirmation and
 // RBAC checks.
 
-import { getProjectGrandTotal } from '../helpers';
+import { getProjectGrandTotal, getEffectivePOCost } from '../helpers';
 
 // Fallback to stored totals when items/logistics are not present in memory
 // (e.g. legacy or import-sourced projects). getProjectGrandTotal does the
@@ -196,6 +196,55 @@ function projectsUnbilled(ctx) {
       line2: `${p.client_name || '—'}`,
       line3: `Value: ${fmtINR(p.total || p.grand_total || 0)}`,
     })),
+  };
+}
+
+// ── Profitability (BI) ──────────────────────────────────────────────────────
+function projectMarginRows(ctx) {
+  const exp = ctx.expenses || [];
+  return (ctx.projects || [])
+    .filter((p) => ['Completed', 'Closed'].includes(p.status))
+    .map((p) => {
+      const revenue = projectTotal(p);
+      let cost = 0;
+      if (p.logistics_costs) Object.values(p.logistics_costs).forEach((c) => { cost += (c.amount || 0) * (1 + (c.gst || 0) / 100); });
+      cost += (p.reimbursable_expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
+      cost += exp.filter((e) => e.project_id === p.id && e.status !== 'Rejected' && e.status !== 'Disapproved').reduce((s, e) => s + parseFloat(e.amount || 0), 0);
+      cost += (p.purchase_orders || []).filter((po) => po.status !== 'Cancelled').reduce((a, po) => a + getEffectivePOCost(po).total, 0);
+      cost += (p.vendor_allocations || []).filter((a) => !a.po_id).reduce((a, v) => a + (parseFloat(v.tax_amount) || 0), 0);
+      const margin = revenue - cost;
+      return { p, revenue, cost, margin, pct: revenue > 0 ? (margin / revenue) * 100 : 0 };
+    });
+}
+
+function projectsByMargin(ctx, dir) {
+  let rows = projectMarginRows(ctx);
+  if (dir === 'loss') rows = rows.filter((r) => r.margin < 0);
+  rows.sort((a, b) => (dir === 'bottom' || dir === 'loss' ? a.margin - b.margin : b.margin - a.margin));
+  rows = rows.slice(0, 15);
+  if (!rows.length) return { type: 'text', title: dir === 'loss' ? 'No loss-making projects 🎉' : 'No delivered projects found', subtitle: 'Profitability uses Completed/Closed projects.' };
+  return {
+    type: 'table',
+    title: dir === 'loss' ? `Loss-making projects (${rows.length})` : dir === 'bottom' ? 'Least profitable projects' : 'Most profitable projects',
+    columns: [{ key: 'name', label: 'Project' }, { key: 'revenue', label: 'Revenue' }, { key: 'margin', label: 'Margin' }, { key: 'pct', label: 'Margin %' }],
+    rows: rows.map((r) => ({ id: r.p.id, name: r.p.project_name || '—', revenue: fmtINR(r.revenue), margin: fmtINR(r.margin), pct: `${r.pct.toFixed(0)}%` })),
+  };
+}
+
+function clientsTop(ctx) {
+  const cm = {};
+  (ctx.projects || []).filter((p) => ['Completed', 'Closed'].includes(p.status)).forEach((p) => {
+    const cid = p.client_id || '?'; cm[cid] = (cm[cid] || 0) + projectTotal(p);
+  });
+  const rows = Object.entries(cm)
+    .map(([cid, rev]) => ({ name: (ctx.clients || []).find((c) => c.id === cid)?.name || '—', rev }))
+    .sort((a, b) => b.rev - a.rev).slice(0, 10);
+  if (!rows.length) return { type: 'text', title: 'No client revenue yet', subtitle: 'Based on delivered projects.' };
+  return {
+    type: 'table',
+    title: 'Top clients by revenue',
+    columns: [{ key: 'name', label: 'Client' }, { key: 'rev', label: 'Revenue' }],
+    rows: rows.map((r) => ({ name: r.name, rev: fmtINR(r.rev) })),
   };
 }
 
@@ -1120,6 +1169,10 @@ export function executeAssistantIntent(parsed, ctx = {}) {
     case 'inventory.low': return inventoryLow(ctx);
     case 'inventory.search': return inventorySearch(ctx, e.itemName);
     case 'inventory.byCategory': return inventoryByCategory(ctx, e.category);
+    case 'projects.topMargin': return projectsByMargin(ctx, 'top');
+    case 'projects.lossMaking': return projectsByMargin(ctx, 'loss');
+    case 'projects.bottomMargin': return projectsByMargin(ctx, 'bottom');
+    case 'clients.top': return clientsTop(ctx);
     case 'reports.pl': return reportPL(ctx);
     case 'reports.revenue': return reportRevenue(ctx);
     case 'reports.expenses': return reportExpenses(ctx);
