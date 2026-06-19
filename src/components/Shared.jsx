@@ -1,9 +1,12 @@
 // c:\APP\temp\rental-ops\src\components\Shared.jsx
-import React, { useEffect, useState } from 'react';
-import { X, AlertTriangle, Search } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import { X, AlertTriangle, Search, Send, Mail, MessageCircle, Download, Loader } from 'lucide-react';
 import { getDoc, doc } from 'firebase/firestore';
 import { validateGSTIN } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
+import { notify } from '../utils/toast';
+import { promptDialog } from '../utils/dialog';
+import { emailDocument, whatsappShare } from '../utils/messaging';
 
 export const LoadingSpinner = () => (
   <div className="flex h-screen items-center justify-center bg-slate-50">
@@ -224,6 +227,82 @@ export const Modal = ({ isOpen, onClose, title, children }) => {
         </div>
         <div className="px-5 py-4 overflow-y-auto text-slate-700 flex-1">{children}</div>
       </div>
+    </div>
+  );
+};
+
+/**
+ * SendMenu — Download / Email / WhatsApp a generated document.
+ *
+ * Props:
+ *   buildPdf:  async () => ({ doc, filename })  — returns a jsPDF doc WITHOUT saving
+ *   email:     default recipient email (optional; prompted if missing)
+ *   phone:     default WhatsApp number (optional)
+ *   subject:   email subject
+ *   message:   email/WhatsApp body text
+ *   link:      optional link appended to the WhatsApp/email body (e.g. portal URL)
+ *   label:     button label (default "Send")
+ *   disabled:  disable the trigger
+ */
+export const SendMenu = ({ buildPdf, email = '', phone = '', subject = 'Document', message = '', link = '', label = 'Send', disabled = false, compact = false, className = '' }) => {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  const handleDownload = async () => {
+    setOpen(false);
+    try {
+      const { doc: pdfDoc, filename } = await buildPdf();
+      if (pdfDoc) pdfDoc.save(filename || 'document.pdf');
+    } catch (e) { notify('Could not generate document: ' + (e?.message || 'error'), 'error'); }
+  };
+
+  const handleEmail = async () => {
+    setOpen(false);
+    const to = (email || '').trim() || (await promptDialog('Send to email address:', ''))?.trim();
+    if (!to) return;
+    setBusy(true);
+    try {
+      const { doc: pdfDoc, filename } = await buildPdf();
+      await emailDocument({ pdfDoc, filename, to, subject, html: (message || subject).replace(/\n/g, '<br>') + (link ? `<br><br><a href="${link}">${link}</a>` : ''), text: message });
+      notify('Email sent to ' + to, 'success');
+    } catch (e) {
+      const msg = e?.message || 'Failed to send';
+      notify(/not configured|failed-precondition/i.test(msg) ? 'Email not set up yet — add SMTP/API in Admin Tools → Communication.' : 'Email failed: ' + msg, 'error');
+    } finally { setBusy(false); }
+  };
+
+  const handleWhatsApp = () => {
+    setOpen(false);
+    whatsappShare({ phone, message: message || subject, link });
+  };
+
+  return (
+    <div className={`relative inline-block ${className}`} ref={ref}>
+      <button
+        type="button"
+        disabled={disabled || busy}
+        onClick={() => setOpen(o => !o)}
+        title={compact ? 'Send (Email / WhatsApp / Download)' : undefined}
+        className={compact
+          ? 'p-1.5 rounded hover:bg-indigo-50 text-indigo-600 transition disabled:opacity-50'
+          : 'flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 transition'}
+      >
+        {busy ? <Loader size={compact ? 14 : 15} className="animate-spin" /> : <Send size={compact ? 14 : 15} />}{compact ? '' : ` ${label}`}
+      </button>
+      {open && (
+        <div className="absolute right-0 z-50 mt-1 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
+          <button type="button" onClick={handleDownload} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><Download size={15} className="text-slate-500" /> Download</button>
+          <button type="button" onClick={handleEmail} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><Mail size={15} className="text-blue-500" /> Email</button>
+          <button type="button" onClick={handleWhatsApp} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><MessageCircle size={15} className="text-green-500" /> WhatsApp</button>
+        </div>
+      )}
     </div>
   );
 };

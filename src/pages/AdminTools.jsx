@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -60,6 +60,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [newInventoryCat, setNewInventoryCat] = useState('');
   const [newExpenseCat, setNewExpenseCat] = useState('');
   const [isSavingCats, setIsSavingCats] = useState(false);
+  const [commForm, setCommForm] = useState({ provider: 'smtp', from_name: '', from_email: '', smtp_host: '', smtp_port: 587, smtp_secure: false, smtp_user: '', smtp_pass: '', api_key: '', reminders_enabled: false, reminder_overdue_days: 7 });
+  const [isSavingComm, setIsSavingComm] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -85,6 +87,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             if (catsSnap.exists()) {
                 setCustomInventoryCats(catsSnap.data().inventory_categories || []);
                 setCustomExpenseCats(catsSnap.data().expense_categories || []);
+            }
+            const commSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'communication'));
+            if (commSnap.exists()) {
+                setCommForm(prev => ({ ...prev, ...commSnap.data() }));
             }
         } catch (e) { console.error(e); }
     };
@@ -172,6 +178,21 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), orgForm, { merge: true });
     logAction('admin', 'update_org', 'organization', {}, 'Updated Organization Details');
     notify("Organization Details Updated.", 'success');
+  };
+
+  const handleSaveCommunication = async () => {
+    setIsSavingComm(true);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'communication'), {
+        ...commForm,
+        smtp_port: Number(commForm.smtp_port) || 587,
+        reminder_overdue_days: Number(commForm.reminder_overdue_days) || 7,
+      }, { merge: true });
+      logAction('admin', 'update_communication', 'communication', {}, 'Updated Communication Settings');
+      notify('Communication settings saved.', 'success');
+    } catch (e) {
+      notify('Failed to save: ' + (e?.message || 'error'), 'error');
+    } finally { setIsSavingComm(false); }
   };
 
   const handleAddOrUpdateBank = () => {
@@ -551,6 +572,43 @@ const AdminTools = ({ db, appId, logAction, role }) => {
                 </div>
             </div>
             <button onClick={handleSaveOrgSettings} className="mt-4 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700">Save Organization Details</button>
+       </div>
+
+       {/* ===== COMMUNICATION (EMAIL / WHATSAPP) SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Mail size={20} /> Communication</h3>
+            <p className="text-slate-500 text-sm mb-4">Configure outbound email so you can send invoices, quotes, payslips and reminders directly from the app. WhatsApp click-to-send works without any setup.</p>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Email Provider</label>
+                <select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.provider} onChange={e => setCommForm({ ...commForm, provider: e.target.value })}>
+                  <option value="smtp">SMTP (Gmail / Zoho / any host)</option>
+                  <option value="sendgrid">SendGrid (API key)</option>
+                  <option value="resend">Resend (API key)</option>
+                </select>
+              </div>
+              <div></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">From Name</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.from_name} onChange={e => setCommForm({ ...commForm, from_name: e.target.value })} placeholder="Your Company" /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">From Email</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.from_email} onChange={e => setCommForm({ ...commForm, from_email: e.target.value })} placeholder="billing@yourco.com" /></div>
+              {commForm.provider === 'smtp' ? (
+                <>
+                  <div><label className="block text-sm font-bold text-slate-700 mb-1">SMTP Host</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.smtp_host} onChange={e => setCommForm({ ...commForm, smtp_host: e.target.value })} placeholder="smtp.gmail.com" /></div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className="block text-sm font-bold text-slate-700 mb-1">Port</label><input type="number" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.smtp_port} onChange={e => setCommForm({ ...commForm, smtp_port: e.target.value })} placeholder="587" /></div>
+                    <div className="flex items-end pb-2"><label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={!!commForm.smtp_secure} onChange={e => setCommForm({ ...commForm, smtp_secure: e.target.checked })} /> SSL (465)</label></div>
+                  </div>
+                  <div><label className="block text-sm font-bold text-slate-700 mb-1">SMTP Username</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.smtp_user} onChange={e => setCommForm({ ...commForm, smtp_user: e.target.value })} placeholder="user@gmail.com" /></div>
+                  <div><label className="block text-sm font-bold text-slate-700 mb-1">SMTP Password / App Password</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.smtp_pass} onChange={e => setCommForm({ ...commForm, smtp_pass: e.target.value })} placeholder="••••••••" autoComplete="new-password" /></div>
+                </>
+              ) : (
+                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">{commForm.provider === 'sendgrid' ? 'SendGrid' : 'Resend'} API Key</label><input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={commForm.api_key} onChange={e => setCommForm({ ...commForm, api_key: e.target.value })} placeholder="API key" autoComplete="new-password" /></div>
+              )}
+              <div className="md:col-span-2 mt-1 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <label className="flex items-center gap-2 text-sm font-bold text-slate-700"><input type="checkbox" checked={!!commForm.reminders_enabled} onChange={e => setCommForm({ ...commForm, reminders_enabled: e.target.checked })} /> Send automatic overdue-invoice payment reminders</label>
+                <div className="mt-2 flex items-center gap-2 text-sm text-slate-600">Remind when an invoice is overdue by <input type="number" className="w-20 rounded border border-slate-300 p-1.5 bg-white text-black" value={commForm.reminder_overdue_days} onChange={e => setCommForm({ ...commForm, reminder_overdue_days: e.target.value })} /> days.</div>
+              </div>
+            </div>
+            <button onClick={handleSaveCommunication} disabled={isSavingComm} className="mt-4 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingComm ? 'Saving…' : 'Save Communication Settings'}</button>
        </div>
 
        {/* ===== BANK ACCOUNTS SECTION ===== */}

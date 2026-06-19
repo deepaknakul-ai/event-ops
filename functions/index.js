@@ -18,6 +18,7 @@ const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
+const nodemailer = require('nodemailer');
 const { pbkdf2, timingSafeEqual, createHash, randomBytes } = require('crypto');
 const { promisify } = require('util');
 
@@ -620,5 +621,88 @@ exports.runRecurringTemplatesNow = onCall(
       }
     }
     return { ok: true, today, results };
+  }
+);
+
+// ── Messaging: send a generated document (PDF) by email ─────────────────────
+// Provider-agnostic — SMTP (nodemailer) or transactional API (SendGrid/Resend),
+// chosen in settings/communication. Inert until the admin configures it.
+async function assertAppUser(auth, appId) {
+  if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+  const prov = auth.token && auth.token.firebase && auth.token.firebase.sign_in_provider;
+  if (prov === 'anonymous') throw new HttpsError('permission-denied', 'Anonymous sessions cannot send mail');
+  if (auth.token && auth.token.role) return;
+  if (!appId) throw new HttpsError('invalid-argument', 'appId required');
+  const [rolesSnap, empSnap] = await Promise.all([
+    db.doc(`artifacts/${appId}/public/data/userRoles/${auth.uid}`).get().catch(() => null),
+    db.doc(`artifacts/${appId}/public/data/employees/${auth.uid}`).get().catch(() => null),
+  ]);
+  const ok = (rolesSnap && rolesSnap.exists && rolesSnap.data().role) || (empSnap && empSnap.exists && empSnap.data().role);
+  if (!ok) throw new HttpsError('permission-denied', 'No role in this workspace');
+}
+
+async function readCommunicationConfig(appId) {
+  const snap = await db.doc(`artifacts/${appId}/public/data/settings/communication`).get();
+  if (!snap.exists) throw new HttpsError('failed-precondition', 'Email is not configured. Add it in Admin Tools → Communication.');
+  return snap.data() || {};
+}
+
+async function deliverEmail(cfg, { to, cc, subject, html, text, attachment }) {
+  const provider = (cfg.provider || 'smtp').toLowerCase();
+  const fromEmail = cfg.from_email || cfg.smtp_user;
+  if (!fromEmail) throw new HttpsError('failed-precondition', 'Sender email (from_email) not set.');
+  const from = cfg.from_name ? `${cfg.from_name} <${fromEmail}>` : fromEmail;
+  const att = attachment && attachment.contentBase64
+    ? { filename: attachment.filename || 'document.pdf', b64: attachment.contentBase64, type: attachment.contentType || 'application/pdf' }
+    : null;
+
+  if (provider === 'smtp') {
+    if (!cfg.smtp_host || !cfg.smtp_user || !cfg.smtp_pass) throw new HttpsError('failed-precondition', 'SMTP host/user/pass not set.');
+    const transport = nodemailer.createTransport({
+      host: cfg.smtp_host,
+      port: Number(cfg.smtp_port) || 587,
+      secure: cfg.smtp_secure === true || Number(cfg.smtp_port) === 465,
+      auth: { user: cfg.smtp_user, pass: cfg.smtp_pass },
+    });
+    await transport.sendMail({
+      from, to, cc: cc || undefined, subject, html, text,
+      attachments: att ? [{ filename: att.filename, content: Buffer.from(att.b64, 'base64'), contentType: att.type }] : [],
+    });
+    return;
+  }
+  if (provider === 'sendgrid') {
+    if (!cfg.api_key) throw new HttpsError('failed-precondition', 'SendGrid API key not set.');
+    const body = {
+      personalizations: [{ to: [{ email: to }], ...(cc ? { cc: [{ email: cc }] } : {}) }],
+      from: { email: fromEmail, name: cfg.from_name || undefined },
+      subject,
+      content: [{ type: 'text/html', value: html || text || '' }],
+      ...(att ? { attachments: [{ content: att.b64, filename: att.filename, type: att.type, disposition: 'attachment' }] } : {}),
+    };
+    const r = await fetch('https://api.sendgrid.com/v3/mail/send', { method: 'POST', headers: { Authorization: `Bearer ${cfg.api_key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new HttpsError('internal', `SendGrid error ${r.status}: ${await r.text()}`);
+    return;
+  }
+  if (provider === 'resend') {
+    if (!cfg.api_key) throw new HttpsError('failed-precondition', 'Resend API key not set.');
+    const body = { from, to, ...(cc ? { cc } : {}), subject, html: html || undefined, text: text || undefined, ...(att ? { attachments: [{ filename: att.filename, content: att.b64 }] } : {}) };
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${cfg.api_key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw new HttpsError('internal', `Resend error ${r.status}: ${await r.text()}`);
+    return;
+  }
+  throw new HttpsError('failed-precondition', `Unknown email provider: ${provider}`);
+}
+
+exports.sendDocumentEmail = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60 },
+  async (req) => {
+    const { appId, to, cc, subject, html, text, attachment } = req.data || {};
+    await assertAppUser(req.auth, appId);
+    if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(to))) throw new HttpsError('invalid-argument', 'Valid recipient email required');
+    if (!subject) throw new HttpsError('invalid-argument', 'Subject required');
+    if (attachment && attachment.contentBase64 && attachment.contentBase64.length > 9000000) throw new HttpsError('invalid-argument', 'Attachment too large (max ~7MB)');
+    const cfg = await readCommunicationConfig(appId);
+    await deliverEmail(cfg, { to, cc, subject, html, text, attachment });
+    return { ok: true };
   }
 );

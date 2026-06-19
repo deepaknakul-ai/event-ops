@@ -224,8 +224,11 @@ import { GST_STATE_CODES } from "../constants";
         pdfDoc.text(pdfDoc.splitTextToSize(invoiceTerms, pageWidth-margin*2), margin, y);
       }
 
-      pdfDoc.save(`TaxInvoice_${invNo.replace(/\//g,'-')}_${(client?.name||'').replace(/\s+/g,'_')}.pdf`);
+      const fileName = `TaxInvoice_${invNo.replace(/\//g,'-')}_${(client?.name||'').replace(/\s+/g,'_')}.pdf`;
+      if (ctx.deliver) return { doc: pdfDoc, filename: fileName };
+      pdfDoc.save(fileName);
       logAction('tax_invoices', 'print_pdf', invoice.id, {}, invoice.invoice_no);
+      return { doc: pdfDoc, filename: fileName };
     } catch (err) {
       console.error('Tax Invoice PDF Error:', err);
       addToast('Failed to generate PDF', 'error');
@@ -531,8 +534,11 @@ import { GST_STATE_CODES } from "../constants";
       doc.setDrawColor(160); doc.setLineDashPattern([1, 1], 0); doc.line(right - 60, ay + 24, right, ay + 24); doc.setLineDashPattern([], 0);
       doc.setFontSize(7.5); doc.setTextColor(80, 80, 80); doc.text("Receiver's Seal & Sign", right - 30, ay + 28, { align: 'center' });
 
-      doc.save(`TaxInvoice_GST_${(invoice.invoice_no || '').replace(/\//g, '-')}_${(billToName || '').replace(/\s+/g, '_')}.pdf`);
+      const fileName = `TaxInvoice_GST_${(invoice.invoice_no || '').replace(/\//g, '-')}_${(billToName || '').replace(/\s+/g, '_')}.pdf`;
+      if (ctx.deliver) return { doc, filename: fileName };
+      doc.save(fileName);
       logAction('tax_invoices', 'print_pdf_gst', invoice.id, {}, invoice.invoice_no);
+      return { doc, filename: fileName };
     } catch (err) {
       console.error('GST-format Invoice PDF Error:', err);
       addToast('Failed to generate GST-format PDF', 'error');

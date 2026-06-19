@@ -202,13 +202,12 @@ service cloud.firestore {
     }
 
     // ── Settings ──────────────────────────────────────────────────────────────
-    // settings/security: admin-read only. The verifyLogin and resetAdminPassword
-    //   Cloud Functions access it via Admin SDK (bypasses rules) so the client
-    //   never needs to read this doc directly.
-    // All other settings docs: any real (non-anonymous) authenticated session.
+    // Secret-bearing settings docs (security, communication, payments, einvoice):
+    //   admin-read only. Cloud Functions access them via Admin SDK (bypasses
+    //   rules). All other settings docs: any real (non-anonymous) session.
     // Write: admin only.
     match /artifacts/{appId}/public/data/settings/{docId} {
-      allow read: if docId == 'security'
+      allow read: if (docId in ['security', 'communication', 'payments', 'einvoice'])
                     ? isAdmin(appId)
                     : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
       allow write: if isAdmin(appId);

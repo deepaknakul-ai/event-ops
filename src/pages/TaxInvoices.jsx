@@ -10,7 +10,7 @@ import {
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
-import { Modal, ConfirmDeleteModal } from '../components/Shared';
+import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import {
   formatCurrency, formatCurrencyPDF, fmtDate,
   getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord, getProjectGrandTotal, amountToWordsINR, round2
@@ -598,6 +598,11 @@ const TaxInvoices = ({
   const pdfCtx = () => ({ clients, projects, payments, taxInvoices, getOrgSettings, logAction, addToast });
   const generatePDF = (invoice) => generateClassicInvoicePDF(invoice, pdfCtx());
   const generateGSTFormatPDF = (invoice) => generateGSTFormatInvoicePDF(invoice, pdfCtx());
+  // Deliver-mode build (returns { doc, filename } without auto-saving) for SendMenu.
+  const buildInvoicePdf = (invoice) => generateClassicInvoicePDF(invoice, { ...pdfCtx(), deliver: true });
+  const invoiceParty = (invoice) => clients.find(c => c.id === invoice.client_id) || {};
+  const partyEmail = (c) => c.email || (c.contacts && c.contacts[0] && c.contacts[0].email) || '';
+  const partyPhone = (c) => c.phone || c.contact_phone || (c.contacts && c.contacts[0] && c.contacts[0].phone) || '';
 
   // ── render ────────────────────────────────────────────────────────────────
   const clientOptions = clients.filter(c => c.type !== 'Vendor').sort((a,b) => (a.name||'').localeCompare(b.name||''));
@@ -801,6 +806,14 @@ const TaxInvoices = ({
                       <div className="flex items-center justify-center gap-1">
                         <button onClick={() => generatePDF(inv)} title="Download PDF" className="p-1.5 rounded hover:bg-blue-50 text-blue-600 transition"><Download size={14} /></button>
                         <button onClick={() => generateGSTFormatPDF(inv)} title="Download GST format (Vyapar-style)" className="p-1.5 rounded hover:bg-green-50 text-green-600 transition"><Receipt size={14} /></button>
+                        <SendMenu
+                          compact
+                          buildPdf={() => buildInvoicePdf(inv)}
+                          email={partyEmail(invoiceParty(inv))}
+                          phone={partyPhone(invoiceParty(inv))}
+                          subject={`Tax Invoice ${inv.invoice_no}`}
+                          message={`Dear ${invoiceParty(inv).name || 'Customer'}, please find your Tax Invoice ${inv.invoice_no} attached.`}
+                        />
                         {can(role, 'tax_invoices', 'edit') && (
                           <button onClick={() => openEdit(inv)} title="Edit" className="p-1.5 rounded hover:bg-indigo-50 text-indigo-600 transition"><Edit size={14} /></button>
                         )}
