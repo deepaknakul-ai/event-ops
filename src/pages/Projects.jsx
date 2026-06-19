@@ -25,7 +25,7 @@ import {
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
   getLogisticsLines, sumLogisticsRecord
 } from '../utils/helpers';
-import { Modal, ConfirmDeleteModal } from '../components/Shared';
+import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
 import { can } from '../utils/permissions';
 
@@ -1017,7 +1017,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const generateQuotationExcel = () => generateQuotationExcelImpl(quotationCtx());
 
   const generateFinalReportPDF = () => generateFinalReportPDFImpl({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseDateRows, expenseByEmployeeCategory });
-  const generateManagementReportPDF = () => generateManagementReportPDFImpl({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseByEmployeeCategory, payments, timeLogs, employees, lifecycle: getProjectLifecycle(selectedProject) });
+  const mgmtReportCtx = () => ({ selectedProject, canViewProjectFinancials, addToast, getOrgSettings, clients, calculateProjectTotals, outsourcingRows, expenseByEmployeeCategory, payments, timeLogs, employees, lifecycle: getProjectLifecycle(selectedProject) });
+  const generateManagementReportPDF = () => generateManagementReportPDFImpl(mgmtReportCtx());
+  const buildQuotationPdf = () => generateQuotationPDFImpl({ ...quotationCtx(), deliver: true });
+  const projectClientObj = () => clients.find(c => c.id === selectedProject?.client_id) || {};
+  const projectClientEmail = () => { const c = projectClientObj(); return c.email || (c.contacts && c.contacts[0] && c.contacts[0].email) || ''; };
+  const projectClientPhone = () => { const c = projectClientObj(); return c.phone || c.contact_phone || (c.contacts && c.contacts[0] && c.contacts[0].phone) || ''; };
 
   // --- Print Handler ---
   const printProjectDocument = async (type) => {
@@ -2089,6 +2094,16 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <button onClick={generateManagementReportPDF} className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm hover:bg-indigo-100 text-indigo-700 font-medium transition-all">
                 <ClipboardList size={16} className="text-indigo-600" /> Management Report
               </button>
+            )}
+            {canViewProjectFinancials && selectedProject && (
+              <SendMenu
+                label="Send Quote"
+                buildPdf={buildQuotationPdf}
+                email={projectClientEmail()}
+                phone={projectClientPhone()}
+                subject={`Quotation — ${selectedProject.project_name}`}
+                message={`Dear ${projectClientObj().name || 'Customer'}, please find our quotation for ${selectedProject.project_name} attached.`}
+              />
             )}
             {canManageProjectInvoices && (
               <button onClick={() => { setProformaForm({ date: new Date().toISOString().split('T')[0], notes: '', payment_terms: '' }); setIsProformaModalOpen(true); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-teal-50 hover:border-teal-200 text-slate-700 transition-all">

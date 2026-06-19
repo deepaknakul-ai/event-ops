@@ -237,7 +237,10 @@ export const generateQuotationPDF = async (ctx) => {
     y += 20;
     doc.text("Authorized Signatory", pageWidth - margin, y, { align: 'right' });
 
-    doc.save(`Quotation_${selectedProject.project_name.replace(/\s/g, '_')}.pdf`);
+    const fileName = `Quotation_${selectedProject.project_name.replace(/\s/g, '_')}.pdf`;
+    if (ctx.deliver) return { doc, filename: fileName };
+    doc.save(fileName);
+    return { doc, filename: fileName };
   };
 
   export const generateQuotationExcel = (ctx) => {
@@ -966,7 +969,10 @@ export const generateQuotationPDF = async (ctx) => {
         pdfDoc.setTextColor(0, 0, 0);
       }
 
-      pdfDoc.save(`ProformaInvoice_${piData.pi_no.replace(/\//g, '-')}_${selectedProject.project_name.replace(/\s/g, '_')}.pdf`);
+      const fileName = `ProformaInvoice_${piData.pi_no.replace(/\//g, '-')}_${selectedProject.project_name.replace(/\s/g, '_')}.pdf`;
+      if (ctx.deliver) return { doc: pdfDoc, filename: fileName };
+      pdfDoc.save(fileName);
+      return { doc: pdfDoc, filename: fileName };
     } catch (err) {
       console.error('Proforma Invoice PDF Error:', err);
       addToast('Failed to generate Proforma Invoice PDF', 'error');
@@ -1442,7 +1448,10 @@ export const generateManagementReportPDF = async (ctx) => {
     }
 
     const safe = (selectedProject.project_name || 'project').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
-    doc.save(`Management_Report_${safe}.pdf`);
+    const fileName = `Management_Report_${safe}.pdf`;
+    if (ctx.deliver) return { doc, filename: fileName };
+    doc.save(fileName);
+    return { doc, filename: fileName };
   } catch (err) {
     console.error('Management Report PDF Error:', err);
     addToast('Failed to generate Management Report PDF', 'error');

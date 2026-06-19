@@ -706,3 +706,89 @@ exports.sendDocumentEmail = onCall(
     return { ok: true };
   }
 );
+
+// ── Overdue-invoice payment reminders ───────────────────────────────────────
+// Consolidated per-client reminder using persisted tax_invoice amounts and
+// payments (billed − received). Deduped to at most once per client per 7 days.
+async function processDueReminders(appId, today) {
+  let cfg;
+  try { cfg = await readCommunicationConfig(appId); } catch { return { skipped: 'no-config' }; }
+  if (!cfg.reminders_enabled) return { skipped: 'disabled' };
+  const overdueDays = Number(cfg.reminder_overdue_days) || 7;
+  const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - overdueDays);
+
+  const [invSnap, paySnap, cliSnap, orgSnap] = await Promise.all([
+    db.collection(`artifacts/${appId}/public/data/tax_invoices`).get(),
+    db.collection(`artifacts/${appId}/public/data/payments`).get(),
+    db.collection(`artifacts/${appId}/public/data/clients`).get(),
+    db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
+  ]);
+  const org = (orgSnap && orgSnap.exists) ? orgSnap.data() : {};
+  const invoices = invSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => (i.status || 'active') !== 'cancelled');
+  const clients = {}; cliSnap.forEach((d) => { clients[d.id] = d.data(); });
+
+  const byClient = {};
+  invoices.forEach((i) => {
+    const cid = i.client_id; if (!cid) return;
+    if (!byClient[cid]) byClient[cid] = { billed: 0, overdue: [] };
+    byClient[cid].billed += Number(i.final_amount || 0);
+    const idt = i.invoice_date ? new Date(i.invoice_date) : null;
+    if (idt && idt < cutoff) byClient[cid].overdue.push(i);
+  });
+  const recv = {};
+  paySnap.forEach((d) => { const p = d.data(); if (p.client_id) recv[p.client_id] = (recv[p.client_id] || 0) + Number(p.amount || 0); });
+
+  const fmt = (n) => 'Rs. ' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  let sent = 0, skipped = 0;
+  for (const [cid, agg] of Object.entries(byClient)) {
+    const outstanding = agg.billed - (recv[cid] || 0);
+    if (outstanding <= 1 || agg.overdue.length === 0) { skipped += 1; continue; }
+    const client = clients[cid] || {};
+    const to = client.email || (client.contacts && client.contacts[0] && client.contacts[0].email);
+    if (!to) { skipped += 1; continue; }
+    const logRef = db.doc(`artifacts/${appId}/public/data/reminder_log/${cid}`);
+    const logSnap = await logRef.get();
+    if (logSnap.exists && logSnap.data().last_sent) {
+      const last = new Date(logSnap.data().last_sent);
+      if ((today - last) / 86400000 < 7) { skipped += 1; continue; }
+    }
+    const list = agg.overdue.map((i) => `<li>${i.invoice_no || ''} dated ${i.invoice_date || ''} — ${fmt(i.final_amount)}</li>`).join('');
+    const html = `<p>Dear ${client.name || 'Customer'},</p><p>This is a gentle reminder that the following invoice(s) are overdue, with a total outstanding balance of <b>${fmt(outstanding)}</b>:</p><ul>${list}</ul><p>We would appreciate it if you could arrange payment at your earliest convenience.</p><p>Regards,<br>${org.name || ''}</p>`;
+    try {
+      await deliverEmail(cfg, { to, subject: `Payment reminder — ${fmt(outstanding)} outstanding`, html, text: `Dear ${client.name || 'Customer'}, your outstanding balance is ${fmt(outstanding)}. Please arrange payment.` });
+      await logRef.set({ last_sent: today.toISOString(), outstanding, count: (logSnap.exists ? (logSnap.data().count || 0) : 0) + 1 }, { merge: true });
+      sent += 1;
+    } catch (e) { logger.warn(`[${appId}] reminder failed for ${cid}: ${e.message}`); skipped += 1; }
+  }
+  return { sent, skipped };
+}
+
+exports.sendDueReminders = onSchedule(
+  { schedule: 'every day 09:30', timeZone: 'Asia/Kolkata', memory: '256MiB', timeoutSeconds: 540 },
+  async () => {
+    const today = new Date();
+    const appIds = await listAppIds();
+    for (const appId of appIds) {
+      try { const r = await processDueReminders(appId, today); logger.info(`[${appId}] reminders`, r); }
+      catch (e) { logger.error(`[${appId}] sendDueReminders error`, e); }
+    }
+    return null;
+  }
+);
+
+exports.runDueRemindersNow = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 540 },
+  async (req) => {
+    if (!req.auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+    const candidates = Array.isArray(req.data && req.data.appIds) && req.data.appIds.length ? req.data.appIds : await listAppIds();
+    const appIds = await filterAdminApps(req.auth, candidates);
+    if (!appIds.length) throw new HttpsError('permission-denied', 'Not an admin in any requested app');
+    const today = new Date();
+    const results = [];
+    for (const appId of appIds) {
+      try { results.push({ appId, ...(await processDueReminders(appId, today)) }); }
+      catch (e) { results.push({ appId, error: e.message }); }
+    }
+    return { ok: true, results };
+  }
+);
