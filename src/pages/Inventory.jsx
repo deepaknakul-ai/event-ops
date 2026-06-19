@@ -11,6 +11,7 @@ import InventoryCalendar from '../components/InventoryCalendar';
 import { formatCurrency, validateGSTIN } from '../utils/helpers';
 import { CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
+import { generateAssetLabelsPDF } from '../utils/pdf/assetLabels';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -350,6 +351,13 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
             className="flex items-center justify-center gap-2 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 px-3 py-1 text-sm hover:bg-indigo-100 whitespace-nowrap flex-1 md:flex-none"
           >
             <CalendarDays size={16} /> Availability
+          </button>
+          <button
+            onClick={async () => { const r = await generateAssetLabelsPDF(filteredInventory); notify(r && r.count ? `Generated ${r.count} QR label(s).` : 'No printable items in the current filter.', r && r.count ? 'success' : 'info'); }}
+            title="Print QR labels for the filtered items"
+            className="flex items-center justify-center gap-2 rounded border border-slate-200 bg-white text-slate-600 px-3 py-1 text-sm hover:bg-slate-50 whitespace-nowrap flex-1 md:flex-none"
+          >
+            <Printer size={16} /> QR Labels
           </button>
           {role === 'admin' && (
             <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded bg-indigo-600 px-3 py-1 text-white text-sm hover:bg-indigo-700 whitespace-nowrap flex-1 md:flex-none">
