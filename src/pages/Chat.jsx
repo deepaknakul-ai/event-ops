@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { collection, query, where, orderBy, limit, onSnapshot, addDoc, setDoc, doc } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, onSnapshot, addDoc, setDoc, doc, increment } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import {
   Hash, Megaphone, Send, Search, Plus, FolderKanban, MessageSquare, ArrowLeft, Lock,
@@ -98,7 +98,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
   useEffect(() => {
     if (!db || !currentEmpId) return undefined;
     const unsub = onSnapshot(query(readsCol(), where('emp_id', '==', currentEmpId)), (snap) => {
-      const m = {}; snap.forEach((d) => { const v = d.data(); m[v.channel_id] = v.last_read_at; }); setReads(m);
+      const m = {}; snap.forEach((d) => { const v = d.data(); m[v.channel_id] = { at: v.last_read_at, seq: v.read_seq || 0 }; }); setReads(m);
     }, () => {});
     return () => unsub();
   }, [db, appId, currentEmpId]);
@@ -171,11 +171,14 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
     return () => unsub();
   }, [db, appId, active]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Current seq of the active channel (drives the read cursor + re-mark on new msgs).
+  const activeSeq = active ? ((myChannels[active.id]?.seq) ?? (builtinDocs[active.id]?.seq) ?? 0) : 0;
+
   // ── Mark active channel read (on open + on each new message while visible) ───
   useEffect(() => {
     if (!db || !active || !currentEmpId || document.visibilityState !== 'visible') return;
-    setDoc(readDoc(`${active.id}__${currentEmpId}`), { channel_id: active.id, emp_id: currentEmpId, last_read_at: new Date().toISOString() }, { merge: true }).catch(() => {});
-  }, [db, appId, active, currentEmpId, messages.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    setDoc(readDoc(`${active.id}__${currentEmpId}`), { channel_id: active.id, emp_id: currentEmpId, last_read_at: new Date().toISOString(), read_seq: activeSeq }, { merge: true }).catch(() => {});
+  }, [db, appId, active, currentEmpId, activeSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }); }, [messages]);
 
@@ -190,8 +193,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
   const unreadOf = (cid) => {
     const d = channelDocs[cid];
     if (!d || !d.last_message || d.last_message.sender_id === currentEmpId) return false;
-    const lr = reads[cid];
-    return !lr || new Date(d.updated_at || d.last_message.at) > new Date(lr);
+    return (d.seq || 0) > (reads[cid]?.seq || 0);
   };
   const onlineOf = (eid) => presenceEnabled && eid !== currentEmpId && onlineSet.has(eid);
 
@@ -271,6 +273,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
       await setDoc(channelDoc(active.id), {
         id: active.id, type: active.type, name: active.name || '', project_id: active.project_id || '',
         members, last_message: { text: preview, sender_id: currentEmpId, sender_name: meName, at: now2 }, updated_at: now2,
+        seq: increment(1),
       }, { merge: true });
     } catch (e) {
       setText(body);
@@ -292,6 +295,16 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
     } catch { notify('Only an admin can change this.', 'error'); }
   };
   const handleEnablePush = () => enablePush({ appId, empId: currentEmpId, vapidKey });
+
+  // Clear all chat notifications: mark every channel with unread as read.
+  const markAllRead = async () => {
+    const all = { ...Object.fromEntries(Object.entries(builtinDocs).filter(([, v]) => v)), ...myChannels };
+    const todo = Object.values(all).filter((c) => c.last_message && c.last_message.sender_id !== currentEmpId && (c.seq || 0) > (reads[c.id]?.seq || 0));
+    if (todo.length === 0) { notify('No unread messages.', 'info'); return; }
+    const now2 = new Date().toISOString();
+    await Promise.all(todo.map((c) => setDoc(readDoc(`${c.id}__${currentEmpId}`), { channel_id: c.id, emp_id: currentEmpId, last_read_at: now2, read_seq: c.seq || 0 }, { merge: true }).catch(() => {})));
+    notify('All chats marked as read.', 'success');
+  };
 
   if (!can(role, 'chat', 'view')) return <div className="p-6 text-sm text-slate-500">You don't have access to chat.</div>;
 
@@ -323,6 +336,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
           <div className="mb-2 flex items-center justify-between">
             <h2 className="flex items-center gap-2 text-base font-bold text-slate-800"><MessageSquare size={18} className="text-indigo-600" /> Chat</h2>
             <div className="flex items-center gap-0.5">
+              <button onClick={markAllRead} title="Mark all chats as read" className="rounded-md p-1.5 text-slate-400 hover:bg-indigo-50 hover:text-indigo-600"><CheckCheck size={15} /></button>
               <button onClick={handleEnablePush} title="Enable notifications on this device" className="rounded-md p-1.5 text-slate-400 hover:bg-indigo-50 hover:text-indigo-600"><Bell size={15} /></button>
               {role === 'admin' && (
                 <button onClick={() => { setVapidInput(vapidKey); setAdminPanel((v) => !v); }} title="Chat settings" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><Settings size={15} /></button>

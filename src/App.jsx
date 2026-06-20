@@ -28,6 +28,7 @@ import { upsertPartyAccount } from './utils/partyAccounts';
 import { registerToast, notify } from './utils/toast';
 import DialogHost from './components/DialogHost';
 import InstallPrompt from './components/InstallPrompt';
+import { useChatUnread } from './utils/useChatUnread';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
 import { partitionRules } from './utils/aiAccountant';
@@ -2986,6 +2987,7 @@ const [payroll, setPayroll] = useState([]);
   const currentEmployee = employees.find(e => e.id === currentEmpId);
   const effectiveRole = impersonating ? impersonating.role : role;       // use throughout routes
   const effectiveEmpId = impersonating ? impersonating.empId : currentEmpId;
+  const chatUnread = useChatUnread(db, appId, effectiveEmpId);            // unread badge for the Chat nav item
 
   // Strip sensitive fields from employees before passing to child components
   const safeEmployees = useMemo(() =>
@@ -3584,7 +3586,7 @@ const [payroll, setPayroll] = useState([]);
           {can(role,'outsourcing','view') && <NavItem to="/outsourcing" setMobileMenuOpen={setMobileMenuOpen} icon={ShoppingBag} label="Outsource" />}
           {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'leads','view') && <NavItem to="/leads" setMobileMenuOpen={setMobileMenuOpen} icon={Target} label="Leads / CRM" />}
-          {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" />}
+          {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" badge={chatUnread} />}
           {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
@@ -3681,7 +3683,7 @@ const [payroll, setPayroll] = useState([]);
                   {can(role,'outsourcing','view') && <NavItem to="/outsourcing" setMobileMenuOpen={setMobileMenuOpen} icon={ShoppingBag} label="Outsource" />}
                   {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'leads','view') && <NavItem to="/leads" setMobileMenuOpen={setMobileMenuOpen} icon={Target} label="Leads / CRM" />}
-          {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" />}
+          {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" badge={chatUnread} />}
                   {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
