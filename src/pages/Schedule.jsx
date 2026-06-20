@@ -1,15 +1,27 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, AlertTriangle, Users, Package, Calendar } from 'lucide-react';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc, arrayRemove } from 'firebase/firestore';
+import { ChevronLeft, ChevronRight, AlertTriangle, Users, Package, Calendar, UserMinus, ExternalLink, BellOff, RotateCcw, CheckCircle2 } from 'lucide-react';
 import { isDateOverlap } from '../utils/helpers';
 import { can } from '../utils/permissions';
+import { notify } from '../utils/toast';
+import { confirmDialog } from '../utils/dialog';
 
-// Read-only resource / dispatch board: a month timeline of projects with their
-// crew + key equipment, plus conflict detection (double-booked staff and
-// over-allocated equipment across overlapping projects).
-const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manager' }) => {
+// Resource / dispatch board: a month timeline of projects with their crew + key
+// equipment, plus conflict detection (double-booked staff and over-allocated
+// equipment across overlapping projects) AND a resolution mechanism:
+//   • crew double-booking  → one-click unassign from either project
+//   • equipment over-alloc → jump to either project to adjust quantities
+//   • any conflict         → "Ignore" (acknowledge as acceptable, persisted),
+//                            restorable later. Ignored conflicts stop flagging.
+const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manager', db, appId, currentEmpId, logAction = () => {} }) => {
   const navigate = useNavigate();
   const [monthOffset, setMonthOffset] = useState(0);
+  const [ignored, setIgnored] = useState({}); // conflict key -> override doc
+  const [showIgnored, setShowIgnored] = useState(false);
+  const [busy, setBusy] = useState(null);
+
+  const canEdit = can(role, 'projects', 'edit');
 
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth() + monthOffset);
   const year = base.getFullYear(), month = base.getMonth();
@@ -21,6 +33,17 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
 
   const empName = (id) => employees.find((e) => e.id === id)?.name || id;
   const itemName = (id) => inventory.find((i) => i.id === id)?.name || id;
+
+  // Acknowledged ("ignored") conflicts, persisted so they stay cleared for everyone.
+  useEffect(() => {
+    if (!db || !appId) return undefined;
+    const unsub = onSnapshot(
+      collection(db, 'artifacts', appId, 'public', 'data', 'schedule_overrides'),
+      (snap) => { const m = {}; snap.forEach((d) => { const v = d.data(); if (v && v.key) m[v.key] = v; }); setIgnored(m); },
+      () => {},
+    );
+    return () => unsub();
+  }, [db, appId]);
 
   const active = useMemo(() => projects.filter((p) => p.status !== 'Cancelled' && p.start_date && p.end_date), [projects]);
 
@@ -39,7 +62,14 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
     Object.entries(empMap).forEach(([eid, ps]) => {
       for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++) {
         if (isDateOverlap(ps[i].start_date, ps[i].end_date, ps[j].start_date, ps[j].end_date)) {
-          out.push({ type: 'crew', label: `${empName(eid)} double-booked`, detail: `${ps[i].project_name} ↔ ${ps[j].project_name}`, ids: [ps[i].id, ps[j].id] });
+          const key = `crew|${eid}|${[ps[i].id, ps[j].id].sort().join('~')}`;
+          out.push({
+            type: 'crew', key, empId: eid,
+            label: `${empName(eid)} double-booked`,
+            detail: `${ps[i].project_name} ↔ ${ps[j].project_name}`,
+            ids: [ps[i].id, ps[j].id],
+            pair: [{ id: ps[i].id, name: ps[i].project_name }, { id: ps[j].id, name: ps[j].project_name }],
+          });
         }
       }
     });
@@ -56,15 +86,66 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
       if (arr.length < 2 || !total || inv?.is_external) return;
       for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
         if (isDateOverlap(arr[i].p.start_date, arr[i].p.end_date, arr[j].p.start_date, arr[j].p.end_date) && (arr[i].qty + arr[j].qty) > total) {
-          out.push({ type: 'equipment', label: `${itemName(iid)} over-booked (${arr[i].qty + arr[j].qty}/${total})`, detail: `${arr[i].p.project_name} ↔ ${arr[j].p.project_name}`, ids: [arr[i].p.id, arr[j].p.id] });
+          const key = `equip|${iid}|${[arr[i].p.id, arr[j].p.id].sort().join('~')}`;
+          out.push({
+            type: 'equipment', key, itemId: iid, total,
+            label: `${itemName(iid)} over-booked (${arr[i].qty + arr[j].qty}/${total})`,
+            detail: `${arr[i].p.project_name} ↔ ${arr[j].p.project_name}`,
+            ids: [arr[i].p.id, arr[j].p.id],
+            pair: [{ id: arr[i].p.id, name: arr[i].p.project_name, qty: arr[i].qty }, { id: arr[j].p.id, name: arr[j].p.project_name, qty: arr[j].qty }],
+          });
         }
       }
     });
     const seen = new Set();
-    return out.filter((c) => { const k = c.type + c.label + c.detail; if (seen.has(k)) return false; seen.add(k); return true; });
+    return out.filter((c) => { if (seen.has(c.key)) return false; seen.add(c.key); return true; });
   }, [active, inventory, employees]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const conflictIds = useMemo(() => new Set(conflicts.flatMap((c) => c.ids)), [conflicts]);
+  const ignoredSet = useMemo(() => new Set(Object.keys(ignored)), [ignored]);
+  const activeConflicts = useMemo(() => conflicts.filter((c) => !ignoredSet.has(c.key)), [conflicts, ignoredSet]);
+  const ignoredConflicts = useMemo(() => conflicts.filter((c) => ignoredSet.has(c.key)), [conflicts, ignoredSet]);
+  // Only ACTIVE (non-acknowledged) conflicts flag red on the timeline.
+  const conflictIds = useMemo(() => new Set(activeConflicts.flatMap((c) => c.ids)), [activeConflicts]);
+
+  const overrideId = (key) => key.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 1400);
+
+  // ── Resolution actions ────────────────────────────────────────────────────
+  const handleUnassign = async (c, proj) => {
+    if (!db) return;
+    const ok = await confirmDialog(`Remove ${empName(c.empId)} from "${proj.name}"? This resolves the double-booking.`, { title: 'Unassign crew', confirmLabel: 'Unassign', danger: true });
+    if (!ok) return;
+    setBusy(c.key + proj.id);
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', proj.id), { assigned_employees: arrayRemove(c.empId) });
+      logAction('projects', 'team_manage', proj.id, { unassigned_employee: c.empId, reason: 'schedule_conflict' }, proj.name);
+      notify(`${empName(c.empId)} unassigned from ${proj.name}.`, 'success');
+    } catch (e) { notify(`Could not update: ${e.message || e}`, 'error'); }
+    setBusy(null);
+  };
+
+  const handleIgnore = async (c) => {
+    if (!db) return;
+    setBusy(c.key);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'schedule_overrides', overrideId(c.key)), {
+        key: c.key, type: c.type, label: c.label, detail: c.detail,
+        acknowledged_by: currentEmpId || null, acknowledged_at: new Date().toISOString(),
+      });
+      logAction('projects', 'edit', c.ids[0], { schedule_conflict_ignored: c.key }, c.label);
+      notify('Marked as acceptable — cleared from active conflicts.', 'success');
+    } catch (e) { notify(`Could not save: ${e.message || e}`, 'error'); }
+    setBusy(null);
+  };
+
+  const handleRestore = async (c) => {
+    if (!db) return;
+    setBusy(c.key);
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'schedule_overrides', overrideId(c.key)));
+      notify('Conflict restored to the active list.', 'info');
+    } catch (e) { notify(`Could not restore: ${e.message || e}`, 'error'); }
+    setBusy(null);
+  };
 
   const barStyle = (p) => {
     const s = new Date(Math.max(new Date(p.start_date).getTime(), monthStart.getTime()));
@@ -80,6 +161,40 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
   // light day gridlines (weeks)
   const weekTicks = []; for (let d = 1; d <= daysInMonth; d += 7) weekTicks.push(d);
 
+  const renderActions = (c) => {
+    if (!canEdit) return null;
+    return (
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        {c.type === 'crew' && c.pair.map((pr) => (
+          <button
+            key={pr.id}
+            onClick={() => handleUnassign(c, pr)}
+            disabled={busy === c.key + pr.id}
+            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+          >
+            <UserMinus size={11} /> Unassign from {pr.name}
+          </button>
+        ))}
+        {c.type === 'equipment' && c.pair.map((pr) => (
+          <button
+            key={pr.id}
+            onClick={() => navigate(`/projects/${pr.id}`)}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-white px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100"
+          >
+            <ExternalLink size={11} /> Adjust in {pr.name} ({pr.qty})
+          </button>
+        ))}
+        <button
+          onClick={() => handleIgnore(c)}
+          disabled={busy === c.key}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+        >
+          <BellOff size={11} /> Ignore
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4 p-1">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -93,20 +208,49 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
       </div>
 
       {/* Conflicts */}
-      <div className={`rounded-xl border p-4 ${conflicts.length ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
+      <div className={`rounded-xl border p-4 ${activeConflicts.length ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
         <div className="flex items-center gap-2 text-sm font-bold">
-          <AlertTriangle size={16} className={conflicts.length ? 'text-red-600' : 'text-emerald-600'} />
-          {conflicts.length ? `${conflicts.length} scheduling conflict(s)` : 'No scheduling conflicts'}
+          {activeConflicts.length ? <AlertTriangle size={16} className="text-red-600" /> : <CheckCircle2 size={16} className="text-emerald-600" />}
+          {activeConflicts.length ? `${activeConflicts.length} scheduling conflict(s)` : 'No active scheduling conflicts'}
         </div>
-        {conflicts.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {conflicts.map((c, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs text-red-800">
-                {c.type === 'crew' ? <Users size={12} /> : <Package size={12} />}
-                <span className="font-semibold">{c.label}</span>
-                <span className="text-red-600">— {c.detail}</span>
+        {activeConflicts.length > 0 && (
+          <div className="mt-2 divide-y divide-red-100">
+            {activeConflicts.map((c) => (
+              <div key={c.key} className="py-2 first:pt-0 last:pb-0">
+                <div className="flex items-center gap-2 text-xs text-red-800">
+                  {c.type === 'crew' ? <Users size={12} /> : <Package size={12} />}
+                  <span className="font-semibold">{c.label}</span>
+                  <span className="text-red-600">— {c.detail}</span>
+                </div>
+                {renderActions(c)}
               </div>
             ))}
+          </div>
+        )}
+        {!canEdit && activeConflicts.length > 0 && (
+          <div className="mt-2 text-[11px] italic text-red-500">You can view conflicts but need project-edit rights to resolve them.</div>
+        )}
+
+        {/* Ignored / acknowledged conflicts */}
+        {ignoredConflicts.length > 0 && (
+          <div className="mt-3 border-t border-slate-200 pt-2">
+            <button onClick={() => setShowIgnored((v) => !v)} className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-slate-700">
+              <BellOff size={12} /> {ignoredConflicts.length} ignored {showIgnored ? '▾' : '▸'}
+            </button>
+            {showIgnored && (
+              <div className="mt-1.5 space-y-1.5">
+                {ignoredConflicts.map((c) => (
+                  <div key={c.key} className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                    <span className="truncate"><span className="font-medium text-slate-600">{c.label}</span> — {c.detail}</span>
+                    {canEdit && (
+                      <button onClick={() => handleRestore(c)} disabled={busy === c.key} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50">
+                        <RotateCcw size={10} /> Restore
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
