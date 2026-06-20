@@ -60,6 +60,12 @@ export const PERMISSIONS = {
     edit:   ['admin', 'manager'],
     delete: ['admin'],
   },
+  chat: {
+    view:     ['admin', 'accountant', 'manager', 'tech', 'user'],
+    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],  // post messages
+    announce: ['admin', 'manager'],                                // post to Announcements
+    moderate: ['admin', 'manager'],                                // delete others' messages
+  },
   projects: {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
@@ -198,6 +204,7 @@ export const PERMISSIONS = {
 export const RESOURCE_DEFS = {
   clients:           { label: 'Clients & Vendors',   actions: ['view', 'create', 'edit', 'delete'] },
   leads:             { label: 'Leads / CRM',         actions: ['view', 'create', 'edit', 'delete'] },
+  chat:              { label: 'Team Chat',           actions: ['view', 'create', 'announce', 'moderate'] },
   projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
@@ -240,6 +247,8 @@ export const ACTION_LABELS = {
   allocation:   'Allocate Items',
   approve:      'Approve',
   manage_roles: 'Change User Roles',
+  announce:     'Post Announcements',
+  moderate:     'Moderate / Delete',
   // HR actions
   close_shift: 'Close Open Shift',
   bulk_apply:  'Bulk Apply',
@@ -314,6 +323,7 @@ export const getNavAccess = (role) => ({
   outsourcing:       can(role, 'outsourcing', 'view'),
   clients:           can(role, 'clients', 'view'),
   leads:             can(role, 'leads', 'view'),
+  chat:              can(role, 'chat', 'view'),
   inventory:         can(role, 'inventory', 'view'),
   expenses:          can(role, 'expenses', 'view_own'),
   finance:           can(role, 'finance', 'view'),

@@ -16,6 +16,7 @@
  */
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
+const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
@@ -987,4 +988,91 @@ exports.generateIRN = onCall(
       return { ok: false, message: 'GSP call failed (payload saved): ' + (e.message || 'error') };
     }
   }
+);
+
+// ── Chat push: notify recipients when a new chat message is created ──────────
+// Fires on chat_channels/{cid}/messages/{mid}. Resolves recipients (channel
+// members − sender; team/announcement → all active employees), gathers their
+// FCM device tokens from chat_push_tokens, sends a multicast, and prunes any
+// tokens the FCM service reports as dead. Server send uses the function's
+// service account — no VAPID/secret needed here (the public VAPID key is only
+// used client-side to obtain a token).
+exports.onChatMessageCreated = onDocumentCreated(
+  {
+    region: 'us-central1',
+    memory: '256MiB',
+    timeoutSeconds: 60,
+    document: 'artifacts/{appId}/public/data/chat_channels/{cid}/messages/{mid}',
+  },
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+    const msg = snap.data() || {};
+    const { appId, cid } = event.params;
+    const senderId = msg.sender_id || '';
+    const ctype = msg.channel_type || '';
+
+    // 1. Resolve recipient employee ids.
+    let recipientIds = [];
+    if (ctype === 'team' || ctype === 'announcement') {
+      const emps = await db.collection(`artifacts/${appId}/public/data/employees`).get();
+      recipientIds = emps.docs
+        .filter((d) => (d.data().status || 'Active') === 'Active')
+        .map((d) => d.id);
+    } else {
+      recipientIds = Array.isArray(msg.members) ? msg.members.slice() : [];
+    }
+    recipientIds = recipientIds.filter((id) => id && id !== senderId);
+    if (recipientIds.length === 0) return;
+
+    // 2. Collect device tokens for those recipients.
+    const recipSet = new Set(recipientIds);
+    const tokSnap = await db.collection(`artifacts/${appId}/public/data/chat_push_tokens`).get();
+    const tokenDocs = tokSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((t) => t.token && recipSet.has(t.emp_id));
+    const tokens = Array.from(new Set(tokenDocs.map((t) => t.token)));
+    if (tokens.length === 0) return;
+
+    // 3. Build the notification (look up the channel name for context).
+    const chanSnap = await db.doc(`artifacts/${appId}/public/data/chat_channels/${cid}`).get();
+    const chanName = chanSnap.exists ? (chanSnap.data().name || '') : '';
+    const sender = msg.sender_name || 'Someone';
+    let title;
+    if (ctype === 'dm') title = sender;
+    else if (ctype === 'announcement') title = `📢 ${chanName || 'Announcement'}`;
+    else title = chanName ? `${chanName} · ${sender}` : sender;
+    let body = (msg.text || '').slice(0, 240);
+    if (!body && Array.isArray(msg.attachments) && msg.attachments.length) {
+      body = (msg.attachments[0].type || '').startsWith('image/') ? '📷 Photo' : `📎 ${msg.attachments[0].name || 'Attachment'}`;
+    }
+
+    // 4. Send + prune dead tokens.
+    let resp;
+    try {
+      resp = await admin.messaging().sendEachForMulticast({
+        tokens,
+        notification: { title, body },
+        data: { channel_id: msg.channel_id || cid, channel_type: ctype },
+        webpush: {
+          notification: { icon: '/icons/icon-192.png' },
+          fcmOptions: { link: '/chat' },
+        },
+      });
+    } catch (e) {
+      logger.warn('chat push send failed', e);
+      return;
+    }
+    const dead = [];
+    resp.responses.forEach((r, i) => {
+      if (!r.success) {
+        const code = r.error && r.error.code;
+        if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+          dead.push(tokens[i]);
+        }
+      }
+    });
+    await Promise.all(dead.map((tk) => db.doc(`artifacts/${appId}/public/data/chat_push_tokens/${tk}`).delete().catch(() => {})));
+    logger.info(`chat push: ${resp.successCount}/${tokens.length} delivered for ${ctype} ${cid}`);
+  },
 );

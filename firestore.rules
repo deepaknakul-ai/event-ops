@@ -89,14 +89,17 @@ service cloud.firestore {
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
                   && collection != 'audit_logs'
                   && collection != 'employees'
-                  && collection != 'settings';
+                  && collection != 'settings'
+                  // chat_* are excluded here so the stricter chat rules below are
+                  // authoritative (OR-semantics would otherwise expose private DMs).
+                  && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']);
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']
       ) ? false
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
@@ -157,7 +160,7 @@ service cloud.firestore {
 
       // Deletes: finance collections admin-only; everything else admin/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -268,6 +271,72 @@ service cloud.firestore {
       );
 
       allow delete: if isAdmin(appId);
+    }
+
+    // ── Team chat ─────────────────────────────────────────────────────────────
+    // chat_channels + their /messages subcollection, plus per-user chat_reads,
+    // chat_presence and chat_push_tokens. These collections are EXCLUDED from the
+    // broad wildcard above so the rules here are authoritative (Firestore
+    // OR-semantics would otherwise let the wildcard's open read override DM
+    // privacy). Open channels (team/announcement) are readable by any real user;
+    // private channels (dm/project) only by a listed member or management.
+    // Each message carries a denormalised channel_type + members so reads
+    // authorise without a cross-document lookup.
+    function chatCanRead(appId, ctype, members) {
+      return isAuthed()
+        && request.auth.token.firebase.sign_in_provider != 'anonymous'
+        && (ctype == 'team' || ctype == 'announcement'
+            || (members is list && userEmpId() in members)
+            || hasAnyRole(appId, ['admin', 'manager']));
+    }
+
+    match /artifacts/{appId}/public/data/chat_channels/{cid} {
+      allow read: if chatCanRead(appId, resource.data.get('type', ''), resource.data.get('members', []));
+      allow create, update: if isRoleUser(appId)
+        && (request.resource.data.type == 'team'
+            || request.resource.data.type == 'announcement'
+            || (request.resource.data.members is list && userEmpId() in request.resource.data.members)
+            || hasAnyRole(appId, ['admin', 'manager']));
+      allow delete: if hasAnyRole(appId, ['admin', 'manager']);
+
+      match /messages/{mid} {
+        allow read: if chatCanRead(appId, resource.data.get('channel_type', ''), resource.data.get('members', []));
+        // Sender must be the caller; announcements are management-only to post;
+        // dm/project require membership; team is open to any role user.
+        allow create: if isRoleUser(appId)
+          && request.resource.data.sender_id == userEmpId()
+          && (request.resource.data.channel_type == 'team'
+              || (request.resource.data.channel_type == 'announcement' && hasAnyRole(appId, ['admin', 'manager']))
+              || (request.resource.data.channel_type in ['dm', 'project']
+                  && request.resource.data.members is list
+                  && userEmpId() in request.resource.data.members));
+        // Author may edit / soft-delete own message; management may moderate.
+        allow update: if isRoleUser(appId)
+          && (resource.data.sender_id == userEmpId() || hasAnyRole(appId, ['admin', 'manager']));
+        allow delete: if hasAnyRole(appId, ['admin', 'manager']);
+      }
+    }
+
+    // Per-user read cursors (unread counts + read receipts). Readable by any role
+    // user (so "seen by" works); each person writes only their own cursor.
+    match /artifacts/{appId}/public/data/chat_reads/{rid} {
+      allow read: if isRoleUser(appId);
+      allow create, update: if isRoleUser(appId) && request.resource.data.emp_id == userEmpId();
+      allow delete: if false;
+    }
+
+    // Online presence. Readable by any role user; each person writes only their own.
+    match /artifacts/{appId}/public/data/chat_presence/{empId} {
+      allow read: if isRoleUser(appId);
+      allow create, update, delete: if isRoleUser(appId) && empId == userEmpId();
+    }
+
+    // Push device tokens. Not client-readable (functions use the Admin SDK);
+    // each user registers/removes only their own tokens.
+    match /artifacts/{appId}/public/data/chat_push_tokens/{token} {
+      allow read: if false;
+      allow create, update: if isRoleUser(appId) && request.resource.data.emp_id == userEmpId();
+      allow delete: if isRoleUser(appId) && (resource.data.emp_id == userEmpId() || isAdmin(appId));
     }
   }
 }

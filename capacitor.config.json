@@ -1,0 +1,12 @@
+{
+  "appId": "app.terms.rentalops",
+  "appName": "TERMS",
+  "webDir": "dist",
+  "server": {
+    "url": "https://terms-a005e.web.app",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

@@ -19,7 +19,7 @@ const firebaseConfig = {
   measurementId: "G-D0HZ3NB682"
 };
 
-const app = initializeApp(firebaseConfig);
+export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 // Persistent local cache: all Firestore data is mirrored to IndexedDB in the
