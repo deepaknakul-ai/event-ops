@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -66,6 +66,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [isSavingPay, setIsSavingPay] = useState(false);
   const [einvForm, setEinvForm] = useState({ enabled: false, gsp_base_url: '', client_id: '', client_secret: '', username: '', password: '', gstin: '' });
   const [isSavingEinv, setIsSavingEinv] = useState(false);
+  const [chatForm, setChatForm] = useState({ presence_enabled: true, fcm_vapid_key: '' });
+  const [isSavingChat, setIsSavingChat] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -100,6 +102,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             if (paySnap.exists()) setPayForm(prev => ({ ...prev, ...paySnap.data() }));
             const einvSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'einvoice'));
             if (einvSnap.exists()) setEinvForm(prev => ({ ...prev, ...einvSnap.data() }));
+            const chatSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'chat'));
+            if (chatSnap.exists()) setChatForm(prev => ({ ...prev, ...chatSnap.data() }));
         } catch (e) { console.error(e); }
     };
     fetchSettings();
@@ -219,6 +223,18 @@ const AdminTools = ({ db, appId, logAction, role }) => {
       logAction('admin', 'update_einvoice', 'einvoice', {}, 'Updated E-Invoice Settings');
       notify('E-invoice settings saved.', 'success');
     } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingEinv(false); }
+  };
+
+  const handleSaveChat = async () => {
+    setIsSavingChat(true);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'chat'), {
+        presence_enabled: chatForm.presence_enabled !== false,
+        fcm_vapid_key: (chatForm.fcm_vapid_key || '').trim(),
+      }, { merge: true });
+      logAction('admin', 'update_chat', 'chat', {}, 'Updated Chat / Notification Settings');
+      notify('Chat settings saved.', 'success');
+    } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingChat(false); }
   };
 
   const handleAddOrUpdateBank = () => {
@@ -666,6 +682,24 @@ const AdminTools = ({ db, appId, logAction, role }) => {
               <div><label className="block text-sm font-bold text-slate-700 mb-1">GSTIN</label><input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={einvForm.gstin} onChange={e => setEinvForm({ ...einvForm, gstin: e.target.value })} /></div>
             </div>
             <button onClick={handleSaveEinvoice} disabled={isSavingEinv} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingEinv ? 'Saving…' : 'Save E-Invoice Settings'}</button>
+       </div>
+
+       {/* ===== CHAT / NOTIFICATIONS SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Bell size={20} /> Team Chat &amp; Notifications</h3>
+            <p className="text-slate-500 text-sm mb-4">Turn on background push for Team Chat. Get the key from <span className="font-medium">Firebase Console → Project settings → Cloud Messaging → Web Push certificates → Generate key pair</span>, then paste the public key below. Chat works without it — only background notifications need it.</p>
+            <div className="grid gap-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">FCM Web-Push key (VAPID public key)</label>
+                <input className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={chatForm.fcm_vapid_key} onChange={e => setChatForm({ ...chatForm, fcm_vapid_key: e.target.value })} placeholder="BPx… long public key …" />
+                <p className="text-xs text-slate-400 mt-1">{chatForm.fcm_vapid_key ? '✓ Configured — each person taps the 🔔 in Chat to enable it on their own device.' : 'Not set — background push is off (in-app chat still works).'}</p>
+              </div>
+              <div>
+                <label className="flex items-center gap-2 text-sm font-bold text-slate-700"><input type="checkbox" checked={chatForm.presence_enabled !== false} onChange={e => setChatForm({ ...chatForm, presence_enabled: e.target.checked })} /> Show online presence (green dots)</label>
+                <p className="text-xs text-slate-400 mt-1 ml-6">Presence is the only thing that adds Firestore cost. Uncheck to run chat at near-zero cost.</p>
+              </div>
+            </div>
+            <button onClick={handleSaveChat} disabled={isSavingChat} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingChat ? 'Saving…' : 'Save Chat Settings'}</button>
        </div>
 
        {/* ===== BANK ACCOUNTS SECTION ===== */}
