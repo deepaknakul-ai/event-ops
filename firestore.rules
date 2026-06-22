@@ -92,14 +92,15 @@ service cloud.firestore {
                   && collection != 'settings'
                   // chat_* are excluded here so the stricter chat rules below are
                   // authoritative (OR-semantics would otherwise expose private DMs).
-                  && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']);
+                  && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
+                                      'employee_locations', 'location_history']);
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history']
       ) ? false
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
@@ -160,7 +161,7 @@ service cloud.firestore {
 
       // Deletes: finance collections admin-only; everything else admin/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -337,6 +338,25 @@ service cloud.firestore {
       allow read: if false;
       allow create, update: if isRoleUser(appId) && request.resource.data.emp_id == userEmpId();
       allow delete: if isRoleUser(appId) && (resource.data.emp_id == userEmpId() || isAdmin(appId));
+    }
+
+    // ── Employee location tracking ─────────────────────────────────────────────
+    // Privacy: excluded from the open-read wildcard above. An employee writes only
+    // their own location; reads are limited to themselves and management. History
+    // is management-read only and append-only (pruned by a scheduled function via
+    // the Admin SDK).
+    match /artifacts/{appId}/public/data/employee_locations/{empId} {
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && (empId == userEmpId() || hasAnyRole(appId, ['admin', 'manager']));
+      allow create, update: if isRoleUser(appId) && empId == userEmpId();
+      allow delete: if hasAnyRole(appId, ['admin', 'manager']);
+    }
+    match /artifacts/{appId}/public/data/location_history/{docId} {
+      allow read: if hasAnyRole(appId, ['admin', 'manager']);
+      allow create: if isRoleUser(appId) && request.resource.data.emp_id == userEmpId();
+      allow update: if false;
+      allow delete: if hasAnyRole(appId, ['admin', 'manager']);
     }
   }
 }

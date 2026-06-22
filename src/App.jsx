@@ -28,6 +28,7 @@ import { upsertPartyAccount } from './utils/partyAccounts';
 import { registerToast, notify } from './utils/toast';
 import DialogHost from './components/DialogHost';
 import InstallPrompt from './components/InstallPrompt';
+import LocationTracker from './components/LocationTracker';
 import { useChatUnread } from './utils/useChatUnread';
 import { LoadingSpinner, ConfirmationModal, ConfirmDeleteModal, Toast, Modal, GSTINField } from './components/Shared';
 import NavItem from './components/NavItem';
@@ -59,6 +60,7 @@ const Schedule = lazy(() => import('./pages/Schedule'));
 const AssetAnalytics = lazy(() => import('./pages/AssetAnalytics'));
 const Leads = lazy(() => import('./pages/Leads'));
 const Chat = lazy(() => import('./pages/Chat'));
+const LiveMap = lazy(() => import('./pages/LiveMap'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const Projects = lazy(() => import('./pages/Projects'));
 const Clients = lazy(() => import('./pages/Clients'));
@@ -3563,6 +3565,7 @@ const [payroll, setPayroll] = useState([]);
       </div>
       <DialogHost />
       <InstallPrompt />
+      <LocationTracker db={db} appId={appId} currentEmpId={effectiveEmpId} employees={safeEmployees} timeLogs={timeLogs} />
       <aside className="hidden w-[260px] flex-col bg-white md:flex shadow-[1px_0_0_0_#e2e8f0] z-10">
         <div className="flex h-16 items-center gap-2 px-5 border-b border-slate-100">
           <div className="h-8 w-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">T</div>
@@ -3587,6 +3590,7 @@ const [payroll, setPayroll] = useState([]);
           {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'leads','view') && <NavItem to="/leads" setMobileMenuOpen={setMobileMenuOpen} icon={Target} label="Leads / CRM" />}
           {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" badge={chatUnread} />}
+          {can(role,'tracking','view') && <NavItem to="/tracking" setMobileMenuOpen={setMobileMenuOpen} icon={MapPin} label="Live Map" />}
           {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
@@ -3684,6 +3688,7 @@ const [payroll, setPayroll] = useState([]);
                   {can(role,'clients','view') && <NavItem to="/clients" setMobileMenuOpen={setMobileMenuOpen} icon={Users} label="Clients" />}
           {can(role,'leads','view') && <NavItem to="/leads" setMobileMenuOpen={setMobileMenuOpen} icon={Target} label="Leads / CRM" />}
           {can(role,'chat','view') && <NavItem to="/chat" setMobileMenuOpen={setMobileMenuOpen} icon={MessageSquare} label="Chat" badge={chatUnread} />}
+          {can(role,'tracking','view') && <NavItem to="/tracking" setMobileMenuOpen={setMobileMenuOpen} icon={MapPin} label="Live Map" />}
                   {can(role,'inventory','view') && <NavItem to="/inventory" setMobileMenuOpen={setMobileMenuOpen} icon={Box} label="Inventory" />}
           {can(role,'inventory','view') && <NavItem to="/warehouse-scan" setMobileMenuOpen={setMobileMenuOpen} icon={Camera} label="Warehouse Scan" />}
           {can(role,'projects','view') && <NavItem to="/schedule" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Schedule" />}
@@ -3763,6 +3768,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/asset-analytics" element={<ProtectedRoute role={effectiveRole} resource="reports"><AssetAnalytics inventory={inventory} projects={projects} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/leads" element={<ProtectedRoute role={effectiveRole} resource="leads"><Leads role={effectiveRole} db={db} appId={appId} currentEmpId={effectiveEmpId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/chat" element={<ProtectedRoute role={effectiveRole} resource="chat"><Chat role={effectiveRole} db={db} appId={appId} employees={safeEmployees} projects={projects} currentEmpId={effectiveEmpId} /></ProtectedRoute>} />
+                <Route path="/tracking" element={<ProtectedRoute role={effectiveRole} resource="tracking"><LiveMap role={effectiveRole} db={db} appId={appId} employees={safeEmployees} hqSettings={hqSettings} /></ProtectedRoute>} />
                 <Route path="/analytics" element={<ProtectedRoute role={effectiveRole} resource="reports"><Analytics projects={projects} clients={clients} expenses={expenses} payments={payments} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/configurations" element={<ProtectedRoute role={effectiveRole} resource="configurations"><ConfigurationBuilder configurations={configurations} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
                 <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} expenseCats={[...EXPENSE_CATS, ...customExpenseCategories.filter(c => !EXPENSE_CATS.includes(c))]} lockedFYs={lockedFYs} /></ProtectedRoute>} />

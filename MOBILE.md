@@ -93,3 +93,47 @@ The icons in `public/icons/` are a generated "T" lettermark. To use your logo:
 
 Then redeploy hosting. For the Android app, set the launcher icon in Android
 Studio (Image Asset) from the 512px PNG.
+
+---
+
+## 5. Employee location tracking
+
+Live location tracking (Admin → **Live Map**) runs **only while an employee is on
+duty** (checked in) and only when an admin enables it in **Admin Tools → Location
+Tracking**. Each person sees a "Sharing location" indicator while it's on.
+
+**Works now — no native build required.** Tracking uses the standard browser
+geolocation API, so it runs in a mobile browser (real GPS), the installed PWA,
+and the native app's foreground. On first use the OS shows a location-permission
+prompt; the employee must **Allow**.
+
+### Foreground in the native app
+With Approach A/B above, foreground GPS works once the app has location
+permission. Add to `android/app/src/main/AndroidManifest.xml`:
+```xml
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+```
+(For sharper fixes you can also `npm install @capacitor/geolocation`, but the
+webview's `navigator.geolocation` already works.)
+
+### Background tracking (phone locked / app closed) — later upgrade
+True background tracking is **not** built in (you chose foreground-only). To add
+it later:
+1. `npm install @capacitor-community/background-geolocation` and start/stop it
+   from the same on-duty logic as `src/components/LocationTracker.jsx`, writing to
+   the same `employee_locations` / `location_history` collections.
+2. Add `ACCESS_BACKGROUND_LOCATION` + a foreground-service entry to the manifest
+   (a persistent "TERMS is tracking your location" notification is mandatory).
+3. **Google Play approval:** background location triggers a policy review — you must
+   submit a justification video and publish a **privacy policy URL** describing what
+   you collect, why (workforce attendance/dispatch), and retention. Without this,
+   Play will reject the app.
+
+### Privacy notes
+- Data: latest position per employee (`employee_locations`) + an optional trail
+  (`location_history`), pruned automatically after the retention window (Admin
+  Tools). Only **admin/manager** can read others' locations (enforced in
+  `firestore.rules`); an employee can read only their own.
+- Tell your team in writing that on-duty location is tracked. For the background
+  upgrade this disclosure + a privacy policy become a Play Store requirement.

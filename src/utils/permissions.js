@@ -66,6 +66,9 @@ export const PERMISSIONS = {
     announce: ['admin', 'manager'],                                // post to Announcements
     moderate: ['admin', 'manager'],                                // delete others' messages
   },
+  tracking: {
+    view: ['admin', 'manager'],   // live employee map (management only)
+  },
   projects: {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
@@ -205,6 +208,7 @@ export const RESOURCE_DEFS = {
   clients:           { label: 'Clients & Vendors',   actions: ['view', 'create', 'edit', 'delete'] },
   leads:             { label: 'Leads / CRM',         actions: ['view', 'create', 'edit', 'delete'] },
   chat:              { label: 'Team Chat',           actions: ['view', 'create', 'announce', 'moderate'] },
+  tracking:          { label: 'Live Tracking',       actions: ['view'] },
   projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
@@ -324,6 +328,7 @@ export const getNavAccess = (role) => ({
   clients:           can(role, 'clients', 'view'),
   leads:             can(role, 'leads', 'view'),
   chat:              can(role, 'chat', 'view'),
+  tracking:          can(role, 'tracking', 'view'),
   inventory:         can(role, 'inventory', 'view'),
   expenses:          can(role, 'expenses', 'view_own'),
   finance:           can(role, 'finance', 'view'),

@@ -1076,3 +1076,40 @@ exports.onChatMessageCreated = onDocumentCreated(
     logger.info(`chat push: ${resp.successCount}/${tokens.length} delivered for ${ctype} ${cid}`);
   },
 );
+
+// ── Location history cleanup — prune trail points past the retention window ──
+// Daily; per app reads settings/tracking.history_retention_days (default 30) and
+// deletes location_history docs older than the cutoff. `at` is an ISO string, so
+// a single-field range query needs no composite index.
+async function pruneAppLocationHistory(appId) {
+  const cfg = await db.doc(`artifacts/${appId}/public/data/settings/tracking`).get()
+    .then((s) => (s.exists ? s.data() : {})).catch(() => ({}));
+  const days = Math.max(1, Number(cfg.history_retention_days) || 30);
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const col = db.collection(`artifacts/${appId}/public/data/location_history`);
+  let deleted = 0;
+  // Delete in batches of 400 until nothing older remains.
+  for (let i = 0; i < 50; i++) {
+    const snap = await col.where('at', '<', cutoff).limit(400).get();
+    if (snap.empty) break;
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < 400) break;
+  }
+  return deleted;
+}
+
+exports.pruneLocationHistory = onSchedule(
+  { schedule: 'every day 02:30', timeZone: 'Asia/Kolkata', memory: '256MiB', timeoutSeconds: 540 },
+  async () => {
+    const appIds = await listAppIds();
+    let total = 0;
+    for (const appId of appIds) {
+      try { total += await pruneAppLocationHistory(appId); }
+      catch (e) { logger.warn(`pruneLocationHistory failed for ${appId}`, e); }
+    }
+    logger.info(`pruneLocationHistory removed ${total} old point(s) across ${appIds.length} app(s)`);
+  },
+);

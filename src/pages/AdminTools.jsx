@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -68,6 +68,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [isSavingEinv, setIsSavingEinv] = useState(false);
   const [chatForm, setChatForm] = useState({ presence_enabled: true, fcm_vapid_key: '' });
   const [isSavingChat, setIsSavingChat] = useState(false);
+  const [trackForm, setTrackForm] = useState({ enabled: false, interval_seconds: 45, min_distance_m: 50, history_enabled: true, history_retention_days: 30 });
+  const [isSavingTrack, setIsSavingTrack] = useState(false);
 
   useEffect(() => {
     const fetchSettings = async () => {
@@ -104,6 +106,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             if (einvSnap.exists()) setEinvForm(prev => ({ ...prev, ...einvSnap.data() }));
             const chatSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'chat'));
             if (chatSnap.exists()) setChatForm(prev => ({ ...prev, ...chatSnap.data() }));
+            const trackSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'tracking'));
+            if (trackSnap.exists()) setTrackForm(prev => ({ ...prev, ...trackSnap.data() }));
         } catch (e) { console.error(e); }
     };
     fetchSettings();
@@ -235,6 +239,21 @@ const AdminTools = ({ db, appId, logAction, role }) => {
       logAction('admin', 'update_chat', 'chat', {}, 'Updated Chat / Notification Settings');
       notify('Chat settings saved.', 'success');
     } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingChat(false); }
+  };
+
+  const handleSaveTracking = async () => {
+    setIsSavingTrack(true);
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'tracking'), {
+        enabled: !!trackForm.enabled,
+        interval_seconds: Math.max(15, Number(trackForm.interval_seconds) || 45),
+        min_distance_m: Math.max(0, Number(trackForm.min_distance_m) || 50),
+        history_enabled: trackForm.history_enabled !== false,
+        history_retention_days: Math.max(1, Number(trackForm.history_retention_days) || 30),
+      }, { merge: true });
+      logAction('admin', 'update_tracking', 'tracking', {}, 'Updated Location Tracking Settings');
+      notify('Location tracking settings saved.', 'success');
+    } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingTrack(false); }
   };
 
   const handleAddOrUpdateBank = () => {
@@ -700,6 +719,21 @@ const AdminTools = ({ db, appId, logAction, role }) => {
               </div>
             </div>
             <button onClick={handleSaveChat} disabled={isSavingChat} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingChat ? 'Saving…' : 'Save Chat Settings'}</button>
+       </div>
+
+       {/* ===== LOCATION TRACKING SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><MapPin size={20} /> Location Tracking</h3>
+            <p className="text-slate-500 text-sm mb-4">Track employees' live location <span className="font-medium">only while they are on duty</span> (checked in). Each person sees a "Sharing location" indicator while it's on. Works in the browser, the installed app, and the native app's foreground. Off by default.</p>
+            <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3"><input type="checkbox" checked={!!trackForm.enabled} onChange={e => setTrackForm({ ...trackForm, enabled: e.target.checked })} /> Enable location tracking (on-duty only)</label>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Update every (seconds)</label><input type="number" min="15" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={trackForm.interval_seconds} onChange={e => setTrackForm({ ...trackForm, interval_seconds: e.target.value })} /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">…or after moving (metres)</label><input type="number" min="0" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={trackForm.min_distance_m} onChange={e => setTrackForm({ ...trackForm, min_distance_m: e.target.value })} /></div>
+              <div className="md:col-span-2"><label className="flex items-center gap-2 text-sm font-bold text-slate-700"><input type="checkbox" checked={trackForm.history_enabled !== false} onChange={e => setTrackForm({ ...trackForm, history_enabled: e.target.checked })} /> Keep location history / trails</label></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Delete history older than (days)</label><input type="number" min="1" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={trackForm.history_retention_days} onChange={e => setTrackForm({ ...trackForm, history_retention_days: e.target.value })} /></div>
+            </div>
+            <p className="text-xs text-slate-400 mt-2">Lower interval / distance = more frequent updates (more battery + cost). History is auto-pruned daily.</p>
+            <button onClick={handleSaveTracking} disabled={isSavingTrack} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingTrack ? 'Saving…' : 'Save Tracking Settings'}</button>
        </div>
 
        {/* ===== BANK ACCOUNTS SECTION ===== */}
