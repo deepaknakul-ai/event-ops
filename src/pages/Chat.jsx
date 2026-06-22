@@ -51,6 +51,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
   const [search, setSearch] = useState('');
   const [pickDM, setPickDM] = useState(false);
   const [mobileThread, setMobileThread] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState({ Open: true, Completed: false, Others: false });
   const [pending, setPending] = useState([]);         // staged attachments before send
   const [uploading, setUploading] = useState(false);
   const [mentionQ, setMentionQ] = useState(null);     // active @mention query (null = closed)
@@ -206,6 +207,18 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
     return list.sort((a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0));
   }, [projects, role, currentEmpId]);
 
+  // Project rooms grouped by lifecycle: Open (Ongoing/Quoted), Completed, Others.
+  const groupedProjects = useMemo(() => {
+    const open = [], completed = [], others = [];
+    visibleProjects.forEach((p) => {
+      const s = (p.status || '').toLowerCase();
+      if (s === 'ongoing' || s === 'quoted') open.push(p);
+      else if (s.startsWith('complet')) completed.push(p);
+      else others.push(p);
+    });
+    return { Open: open, Completed: completed, Others: others };
+  }, [visibleProjects]);
+
   const openChannel = (ch) => { setMessages([]); setChannelReads({}); setPending([]); setMentionQ(null); setActive(ch); setMobileThread(true); setPickDM(false); };
   const openBuiltin = (b) => openChannel({ ...b, members: [], project_id: '' });
   const openProject = (p) => openChannel({ id: projectChannelId(p.id), type: 'project', name: p.project_name, project_id: p.id, members: channelMembers('project', { project: p, employees }) });
@@ -311,6 +324,25 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
   const sFilter = (s) => !search || (s || '').toLowerCase().includes(search.toLowerCase());
   const otherOf = (ch) => (ch.members || []).find((m) => m !== currentEmpId);
 
+  const renderProjectGroup = (title, list) => {
+    if (list.length === 0) return null;
+    const expanded = groupsOpen[title] || !!search;
+    const groupUnread = list.some((p) => unreadOf(projectChannelId(p.id)));
+    return (
+      <div>
+        <button onClick={() => setGroupsOpen((g) => ({ ...g, [title]: !g[title] }))} className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-600">
+          <span className="w-2 text-slate-300">{expanded ? '▾' : '▸'}</span>
+          <span>{title}</span>
+          <span className="text-slate-300">({list.length})</span>
+          {!expanded && groupUnread && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-indigo-500" />}
+        </button>
+        {expanded && list.filter((p) => sFilter(p.project_name)).slice(0, 60).map((p) => (
+          <SidebarItem key={p.id} Icon={FolderKanban} label={p.project_name} sub={p.status} onClick={() => openProject(p)} activeItem={active?.id === projectChannelId(p.id)} badge={unreadOf(projectChannelId(p.id))} />
+        ))}
+      </div>
+    );
+  };
+
   // index of my most recent message (for the read-receipt line)
   let lastMineIdx = -1;
   for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].sender_id === currentEmpId) { lastMineIdx = i; break; } }
@@ -373,9 +405,9 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
           </div>
           <div>
             <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Project rooms</div>
-            {visibleProjects.filter((p) => sFilter(p.project_name)).slice(0, 60).map((p) => (
-              <SidebarItem key={p.id} Icon={FolderKanban} label={p.project_name} sub={p.status} onClick={() => openProject(p)} activeItem={active?.id === projectChannelId(p.id)} badge={unreadOf(projectChannelId(p.id))} />
-            ))}
+            {renderProjectGroup('Open', groupedProjects.Open)}
+            {renderProjectGroup('Completed', groupedProjects.Completed)}
+            {renderProjectGroup('Others', groupedProjects.Others)}
             {visibleProjects.length === 0 && <div className="px-2 py-1 text-[11px] text-slate-400">No project rooms yet.</div>}
           </div>
           <div>
