@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { collection, onSnapshot, query, where, getDocs } from 'firebase/firestore';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -21,14 +22,16 @@ const minsAgo = (iso) => {
 const isLive = (loc) => !!(loc.on_duty && loc.at && (Date.now() - new Date(loc.at).getTime()) < FRESH_MS);
 
 const LiveMap = ({ role = 'user', db, appId, employees = [], hqSettings = {} }) => {
+  const [params] = useSearchParams();
   const [locations, setLocations] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(() => params.get('emp') || null);
   const [trailOn, setTrailOn] = useState(false);
   const [tick, setTick] = useState(0);
   const mapRef = useRef(null);
   const mapEl = useRef(null);
   const markersRef = useRef({});
   const trailRef = useRef(null);
+  const focusedRef = useRef(false);
 
   const empById = useMemo(() => Object.fromEntries(employees.map((e) => [e.id, e])), [employees]);
 
@@ -79,6 +82,17 @@ const LiveMap = ({ role = 'user', db, appId, employees = [], hqSettings = {} }) 
       if (!seen.has(id)) { map.removeLayer(markersRef.current[id]); delete markersRef.current[id]; }
     });
   }, [locations, empById, tick]);
+
+  // Deep-link: /tracking?emp=<id> focuses that employee once their position loads.
+  useEffect(() => {
+    if (focusedRef.current || !selected || !mapRef.current) return;
+    const loc = locations.find((l) => l.id === selected);
+    if (loc) {
+      focusedRef.current = true;
+      mapRef.current.setView([loc.lat, loc.lng], 15);
+      markersRef.current[selected]?.openPopup();
+    }
+  }, [locations, selected]);
 
   // Draw / clear today's trail for the selected employee.
   useEffect(() => {

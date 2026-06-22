@@ -5,7 +5,7 @@ import {
   AlertCircle, ArrowDownRight, ArrowLeft, ArrowUpRight, Calculator, CheckCircle, ChevronDown, ChevronUp,
   ClipboardList, Clock, Copy, Download, Edit, FileCheck, FileText, History, ListChecks,
   MessageCircle, Monitor, Package, Percent, Plus, Printer, Receipt, RotateCcw,
-  Search, Share2, Trash2, Truck, TrendingUp, Users, X, Zap, Upload, Image as ImageIcon
+  Search, Share2, Trash2, Truck, TrendingUp, Users, X, Zap, Upload, Image as ImageIcon, MapPin
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
@@ -28,6 +28,7 @@ import {
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
 import { can } from '../utils/permissions';
+import { useEmployeeLocations, isLocationLive } from '../utils/useEmployeeLocations';
 
 // M-1 fix: explicit state machine. Free transitions previously allowed
 // Closed → Quoted, leaving stale invoice fields. Map below blocks invalid moves
@@ -63,6 +64,7 @@ const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 
 const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast, timeLogs = [], taxInvoices = [], payments = [] }) => {
   const navigate = useNavigate();
   const { projectId } = useParams();
+  const liveLocations = useEmployeeLocations(db, appId, can(role, 'tracking', 'view'));
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
@@ -2429,10 +2431,14 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                     const emp = employees.find(e => e.id === empId);
                     return (
                       <div key={empId} className="flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-sm">
-                        <div className="h-6 w-6 rounded-full bg-blue-200 flex items-center justify-center text-xs font-bold text-blue-700">
+                        <div className="relative h-6 w-6 rounded-full bg-blue-200 flex items-center justify-center text-xs font-bold text-blue-700">
                           {emp?.name?.charAt(0) || '?'}
+                          {liveLocations[empId] && <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-blue-50 ${isLocationLive(liveLocations[empId]) ? 'bg-emerald-500' : 'bg-slate-300'}`} />}
                         </div>
                         <span className="text-slate-700 font-medium">{emp?.name || 'Unknown'}</span>
+                        {can(role, 'tracking', 'view') && liveLocations[empId] && (
+                          <button onClick={() => navigate(`/tracking?emp=${empId}`)} title="Locate on map" className="text-indigo-500 hover:text-indigo-700"><MapPin size={14} /></button>
+                        )}
                       </div>
                     );
                   })

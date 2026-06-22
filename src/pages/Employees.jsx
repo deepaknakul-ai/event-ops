@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import {
   Plus, Edit, User, Key, Wallet, History, Camera, FileCheck, FileText, MapPin, Link2, Copy, ExternalLink, Printer, TrendingUp
 } from 'lucide-react';
 import { collection, addDoc, updateDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { useEmployeeLocations, isLocationLive, locationAge } from '../utils/useEmployeeLocations';
 import jsPDF from 'jspdf';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { formatCurrency, hashPassword, normalizeHourlyRateHistory, getHourlyRateForDate, generateSecureToken } from '../utils/helpers';
@@ -12,6 +14,8 @@ import { ROLE_LABELS, ROLE_COLOR, can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
 
 const Employees = ({ employees, role, db, appId, advances = [], logAction }) => {
+  const canTrack = can(role, 'tracking', 'view');
+  const liveLocations = useEmployeeLocations(db, appId, canTrack);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -480,6 +484,15 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
               {emp.address_proof_url && <span title="Addr Proof Attached" className="text-xs bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded border border-purple-100">Addr</span>}
             </div>
           </div>
+          {canTrack && liveLocations[emp.id] && (
+            <div className="mt-3 flex items-center justify-between rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${isLocationLive(liveLocations[emp.id]) ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                <span className="truncate text-slate-500">{isLocationLive(liveLocations[emp.id]) ? (liveLocations[emp.id].project_name || 'On duty') : 'Off duty'} · {locationAge(liveLocations[emp.id].at)}</span>
+              </span>
+              <Link to={`/tracking?emp=${emp.id}`} className="flex shrink-0 items-center gap-1 font-medium text-indigo-600 hover:underline"><MapPin size={12} /> Locate</Link>
+            </div>
+          )}
           <div className="mt-4 pt-2 flex gap-2">
             <button onClick={() => openEdit(emp)} className="flex-1 rounded border border-indigo-300 bg-indigo-50 text-indigo-700 py-1 text-xs font-medium hover:bg-indigo-100">Edit</button>
             <button onClick={() => { setSelectedEmp(emp); setPasswordModalOpen(true); }} className="flex-1 rounded border border-amber-300 bg-amber-50 text-amber-700 py-1 text-xs font-medium hover:bg-amber-100 flex justify-center gap-1"><Key size={12}/> Pass</button>
