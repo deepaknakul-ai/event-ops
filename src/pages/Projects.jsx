@@ -23,10 +23,11 @@ import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExce
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
-  getLogisticsLines, sumLogisticsRecord
+  getLogisticsLines, sumLogisticsRecord, getDistance
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
+import LocationPicker from '../components/LocationPicker';
 import { can } from '../utils/permissions';
 import { useEmployeeLocations, isLocationLive } from '../utils/useEmployeeLocations';
 
@@ -60,6 +61,7 @@ const INVOICE_FIELD_RESET = {
 };
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
+const fmtSiteDistance = (m) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`);
 
 const Projects = ({ projects, clients, inventory, expenses, employees, role, user, currentEmpId = null, db, appId, selectedProjectId, setSelectedProjectId, logAction, addToast, timeLogs = [], taxInvoices = [], payments = [] }) => {
   const navigate = useNavigate();
@@ -276,9 +278,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   }, [showClientDropdown]);
 
   // Initialize State (Added invoice fields and package cost)
-  const [newProj, setNewProj] = useState({ 
-    project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '', 
-    venue: '', status: 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '',
+  const [newProj, setNewProj] = useState({
+    project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '',
+    venue: '', site_lat: null, site_lng: null, status: 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '',
     items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18,
     party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''
   });
@@ -640,9 +642,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
   const openCreate = () => {
     setEditingId(null);
-    setNewProj({ 
-      project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '', 
-      venue: '', status: role === 'user' ? 'Draft' : 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '', 
+    setNewProj({
+      project_name: '', client_id: '', start_date: '', end_date: '', setup_date: '',
+      venue: '', site_lat: null, site_lng: null, status: role === 'user' ? 'Draft' : 'Quoted', invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '',
       items: [], assigned_employees: [], logistics_costs: {}, package_cost: 0, package_cost_gst: 18,
       party_company_id: '', party_company_name: '', party_company_gstin: '', party_company_address: ''
     });
@@ -655,7 +657,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setNewProj({ 
       project_name: proj.project_name, client_id: proj.client_id, 
       start_date: proj.start_date, end_date: proj.end_date, setup_date: proj.setup_date || '',
-      venue: proj.venue, status: proj.status, 
+      venue: proj.venue, site_lat: proj.site_lat ?? null, site_lng: proj.site_lng ?? null, status: proj.status,
       invoice_status: proj.invoice_status || 'Not Invoiced', // Load existing
       invoice_no: proj.invoice_no || '', 
       invoice_date: proj.invoice_date || '',
@@ -2436,6 +2438,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                           {liveLocations[empId] && <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-blue-50 ${isLocationLive(liveLocations[empId]) ? 'bg-emerald-500' : 'bg-slate-300'}`} />}
                         </div>
                         <span className="text-slate-700 font-medium">{emp?.name || 'Unknown'}</span>
+                        {can(role, 'tracking', 'view') && typeof selectedProject.site_lat === 'number' && typeof liveLocations[empId]?.lat === 'number' && (() => {
+                          const d = getDistance(selectedProject.site_lat, selectedProject.site_lng, liveLocations[empId].lat, liveLocations[empId].lng);
+                          const onSite = d <= 200;
+                          return <span className={`text-[11px] font-semibold ${onSite ? 'text-emerald-600' : 'text-amber-600'}`}>{onSite ? 'On site' : `${fmtSiteDistance(d)} away`}</span>;
+                        })()}
                         {can(role, 'tracking', 'view') && liveLocations[empId] && (
                           <button onClick={() => navigate(`/tracking?emp=${empId}`)} title="Locate on map" className="text-indigo-500 hover:text-indigo-700"><MapPin size={14} /></button>
                         )}
@@ -3884,7 +3891,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <div><label className="text-sm font-bold text-slate-800">End Date</label><input type="date" className="w-full rounded border p-2 text-slate-800" value={newProj.end_date} onChange={e => setNewProj({...newProj, end_date: e.target.value})} /></div>
           </div>
           <div><label className="text-sm font-bold text-slate-800">Venue</label><input className="w-full rounded border p-2 text-slate-800" value={newProj.venue} onChange={e => setNewProj({...newProj, venue: e.target.value})} /></div>
-          
+
+          <div>
+            <label className="text-sm font-bold text-slate-800">Site GPS location <span className="font-normal text-slate-400">(optional — enables crew distance-from-site)</span></label>
+            <LocationPicker lat={newProj.site_lat} lng={newProj.site_lng} onChange={({ lat, lng }) => setNewProj(prev => ({ ...prev, site_lat: lat, site_lng: lng }))} />
+          </div>
+
           {/* Package Cost Section */}
           <div className="border-t pt-3 mt-3">
             <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-3">
