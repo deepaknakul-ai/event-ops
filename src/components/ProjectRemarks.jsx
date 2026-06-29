@@ -1,5 +1,7 @@
 import { useState, useMemo } from 'react';
+import { Trash2 } from 'lucide-react';
 import { notify } from '../utils/toast';
+import { confirmDialog } from '../utils/dialog';
 import { formatDate } from '../utils/helpers';
 
 // Initial state for project remarks
@@ -21,6 +23,7 @@ export function ProjectRemarks({
   employees,
   clients,
   onSaveRemark,
+  onDeleteRemark,
   onClose
 }) {
   const [remarkForm, setRemarkForm] = useState(initialRemarkForm);
@@ -56,15 +59,22 @@ export function ProjectRemarks({
     return clients.find(c => c.id === project.client_id);
   }, [project, clients]);
 
-  // Check if current user is allowed to add remarks
-  const canAddRemark = useMemo(() => {
-    if (role === 'admin' || role === 'manager') return true;
-    // Tech/Employee can add only if they're in the project team
-    if (project?.team && currentUser?.employee_id) {
-      return project.team.includes(currentUser.employee_id);
+  // Adding remarks is open to everyone who can view the project.
+  const canAddRemark = !!role;
+  // Only admin or manager may delete a remark.
+  const canDelete = role === 'admin' || role === 'manager';
+
+  const handleDelete = async (remark) => {
+    if (!canDelete || !onDeleteRemark) return;
+    const ok = await confirmDialog('Delete this remark? This cannot be undone.', { title: 'Delete remark', confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    try {
+      await onDeleteRemark(project.id, remark.id);
+      notify('Remark deleted', 'success');
+    } catch {
+      notify('Failed to delete remark', 'error');
     }
-    return false;
-  }, [role, project, currentUser]);
+  };
 
   // Get addressed_to options based on role
   const addressedToOptions = useMemo(() => {
@@ -278,9 +288,21 @@ export function ProjectRemarks({
                       {remark.created_by_role || 'user'}
                     </span>
                   </div>
-                  <span className="text-xs text-gray-500">
-                    {formatDate(remark.date || remark.created_at)}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500">
+                      {formatDate(remark.date || remark.created_at)}
+                    </span>
+                    {canDelete && (
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(remark)}
+                        className="text-gray-400 hover:text-red-600"
+                        title="Delete remark (admin/manager)"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
                 </div>
                 
                 {remark.addressed_to && remark.addressed_to !== 'general' && (

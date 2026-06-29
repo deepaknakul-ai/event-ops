@@ -377,6 +377,15 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     logAction('projects', 'add_remark', projectId, newRemark, selectedProject?.project_name);
   };
 
+  // Only admin/manager may delete a remark (enforced here and in ProjectRemarks UI).
+  const handleDeleteRemark = async (projectId, remarkId) => {
+    if (!(role === 'admin' || role === 'manager')) { addToast('Only admin or manager can delete remarks.', 'error'); return; }
+    const proj = projects.find(p => p.id === projectId) || selectedProject;
+    const updated = (proj?.remarks || []).filter(r => String(r.id) !== String(remarkId));
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', projectId), { remarks: updated });
+    logAction('projects', 'delete_remark', projectId, { remarkId }, proj?.project_name);
+  };
+
   const projectExpenses = useMemo(() => {
     if (!selectedProjectId) return [];
     return expenses.filter(e => e.project_id === selectedProjectId && !isExpenseExcludedStatus(e.status));
@@ -2063,6 +2072,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                 employees={employees}
                 clients={clients}
                 onSaveRemark={handleSaveRemark}
+                onDeleteRemark={handleDeleteRemark}
                 onClose={() => setNotesOpen(false)}
               />
             </div>
