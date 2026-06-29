@@ -54,6 +54,7 @@ const Expenses = lazy(() => import('./pages/Expenses'));
 const Employees = lazy(() => import('./pages/Employees'));
 const Reports = lazy(() => import('./pages/Reports'));
 const BusinessReport = lazy(() => import('./pages/BusinessReport'));
+const DailyReport = lazy(() => import('./pages/DailyReport'));
 const Inventory = lazy(() => import('./pages/Inventory'));
 const WarehouseScan = lazy(() => import('./pages/WarehouseScan'));
 const Schedule = lazy(() => import('./pages/Schedule'));
@@ -3607,6 +3608,7 @@ const [payroll, setPayroll] = useState([]);
           {can(role,'purchase_invoices','view') && <NavItem to="/purchase-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={Receipt} label="Purchases" />}
           {can(role,'tax_invoices','view') && <NavItem to="/tax-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Tax Invoices" />}
           {can(role,'reports','view') && <NavItem to="/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Reports" />}
+          {can(role,'daily_reports','view') && <NavItem to="/daily-report" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Daily Report" />}
           {can(role,'reports','view') && <NavItem to="/business-report" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Business Report" />}
           <div className="my-3 border-t border-slate-100"></div>
           <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Human Resource</div>
@@ -3705,6 +3707,7 @@ const [payroll, setPayroll] = useState([]);
                   {can(role,'purchase_invoices','view') && <NavItem to="/purchase-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={Receipt} label="Purchases" />}
                   {can(role,'tax_invoices','view') && <NavItem to="/tax-invoices" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Tax Invoices" />}
                   {can(role,'reports','view') && <NavItem to="/reports" setMobileMenuOpen={setMobileMenuOpen} icon={FileText} label="Reports" />}
+          {can(role,'daily_reports','view') && <NavItem to="/daily-report" setMobileMenuOpen={setMobileMenuOpen} icon={CalendarDays} label="Daily Report" />}
                   {can(role,'reports','view') && <NavItem to="/business-report" setMobileMenuOpen={setMobileMenuOpen} icon={BarChart3} label="Business Report" />}
                   <div className="my-3 border-t border-slate-100"></div>
                   <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Human Resource</div>
@@ -3777,6 +3780,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/finance" element={<ProtectedRoute role={effectiveRole} resource="finance"><Finance clients={clients} employees={safeEmployees} projects={projects} payments={payments} payouts={payouts} vendorPayments={vendorPayments} expenses={expenses} advances={advances} role={effectiveRole} db={db} appId={appId} user={user} logAction={logAction} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/accounting" element={<ProtectedRoute role={effectiveRole} resource="finance"><Accounting clients={clients} projects={projects} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} payments={payments} vendorPayments={vendorPayments} payouts={payouts} expenses={expenses} advances={advances} chartOfAccounts={chartOfAccounts} manualJournalEntries={journalEntries} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} recurringRules={recurringRules} partyAccounts={partyAccounts} db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/reports" element={<ProtectedRoute role={effectiveRole} resource="reports"><Reports projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} advances={advances} role={effectiveRole} timeLogs={timeLogs} purchaseInvoices={purchaseInvoicesList} taxInvoices={taxInvoicesList} chartOfAccounts={chartOfAccounts} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} journalEntries={journalEntries} partyAccounts={partyAccounts} /></ProtectedRoute>} />
+                <Route path="/daily-report" element={<ProtectedRoute role={effectiveRole} resource="daily_reports"><DailyReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} timeLogs={timeLogs} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/business-report" element={<ProtectedRoute role={effectiveRole} resource="reports"><BusinessReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/challans" element={<ProtectedRoute role={effectiveRole} resource="challans"><ChallanManager projects={projects} clients={clients} inventory={inventory} db={db} appId={appId} logAction={logAction} user={user} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/documents" element={<ProtectedRoute role={effectiveRole} resource="documents"><DocumentsHub projects={projects} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />

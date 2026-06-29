@@ -97,6 +97,9 @@ export const PERMISSIONS = {
   reports: {
     view: ['admin', 'accountant', 'manager'],
   },
+  daily_reports: {
+    view: ['admin', 'accountant', 'manager'],
+  },
   employees: {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     create:       ['admin', 'manager'],
@@ -162,11 +165,12 @@ export const PERMISSIONS = {
     close_shift: ['admin', 'manager'],
   },
   hr_leaves: {
-    view:     ['admin', 'accountant', 'manager'],
-    view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
-    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
-    approve:  ['admin', 'manager'],
-    cancel:   ['admin', 'manager', 'accountant'],
+    view:      ['admin', 'accountant', 'manager'],
+    view_own:  ['admin', 'accountant', 'manager', 'tech', 'user'],
+    create:    ['admin', 'accountant', 'manager', 'tech', 'user'],
+    approve:   ['admin', 'manager'],
+    cancel:    ['admin', 'manager', 'accountant'],
+    edit_type: ['admin'],   // re-categorise an approved/pending leave (affects balance + payroll)
   },
   hr_shifts: {
     view:     ['admin', 'accountant', 'manager'],
@@ -213,6 +217,7 @@ export const RESOURCE_DEFS = {
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
   reports:           { label: 'Reports',             actions: ['view'] },
+  daily_reports:     { label: 'Daily Report',        actions: ['view'] },
   employees:         { label: 'Employees',           actions: ['view', 'create', 'edit', 'delete', 'manage_roles'] },
   outsourcing:       { label: 'Outsourcing / POs',   actions: ['view', 'view_amounts', 'create', 'edit', 'delete'] },
   challans:          { label: 'Challans',            actions: ['view', 'create', 'edit', 'delete'] },
@@ -225,7 +230,7 @@ export const RESOURCE_DEFS = {
   // HR Module
   hr_dashboard:      { label: 'HR Dashboard',        actions: ['view'] },
   hr_attendance:     { label: 'HR Attendance',       actions: ['view', 'create', 'edit', 'delete', 'close_shift'] },
-  hr_leaves:         { label: 'HR Leaves',           actions: ['view', 'view_own', 'create', 'approve', 'cancel'] },
+  hr_leaves:         { label: 'HR Leaves',           actions: ['view', 'view_own', 'create', 'approve', 'cancel', 'edit_type'] },
   hr_shifts:         { label: 'HR Shift Requests',   actions: ['view', 'view_own', 'create', 'approve', 'clarify'] },
   hr_penalties:      { label: 'HR Penalties',        actions: ['view', 'create', 'bulk_apply'] },
   hr_payroll:        { label: 'HR Payroll',          actions: ['view', 'generate'] },
@@ -253,6 +258,7 @@ export const ACTION_LABELS = {
   manage_roles: 'Change User Roles',
   announce:     'Post Announcements',
   moderate:     'Moderate / Delete',
+  edit_type:    'Change Leave Category',
   // HR actions
   close_shift: 'Close Open Shift',
   bulk_apply:  'Bulk Apply',
@@ -334,6 +340,7 @@ export const getNavAccess = (role) => ({
   finance:           can(role, 'finance', 'view'),
   challans:          can(role, 'challans', 'view'),
   reports:           can(role, 'reports', 'view'),
+  daily_reports:     can(role, 'daily_reports', 'view'),
   purchase_invoices: can(role, 'purchase_invoices', 'view'),
   documents:         can(role, 'documents', 'view'),
   employees:         can(role, 'employees', 'view'),

@@ -954,6 +954,36 @@ export const paidLeaveDaysInMonth = (leaves, empId, monthStart, monthEnd, paidTy
   return total;
 };
 
+// ── Daily report helpers ────────────────────────────────────────────────────
+const _ymd = (d) => (d ? String(d).slice(0, 10) : '');
+const _shiftYmd = (key, n) => { const d = new Date(key); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+
+/** True if a Confirmed/Ongoing project's window (±1 grace day) covers dateKey (YYYY-MM-DD). */
+export const isProjectActiveOnDate = (project, dateKey) => {
+  if (!project || !['Confirmed', 'Ongoing'].includes(project.status)) return false;
+  const startKey = _ymd(project.setup_date || project.start_date);
+  const endKey = _ymd(project.end_date || project.start_date);
+  if (!startKey || !endKey) return true;
+  return _shiftYmd(startKey, -1) <= dateKey && dateKey <= _shiftYmd(endKey, 1);
+};
+
+/** Inclusive number of days in a project's window (min 1) — used to prorate per-day figures. */
+export const projectDurationDays = (project) => {
+  const startKey = _ymd(project?.setup_date || project?.start_date);
+  const endKey = _ymd(project?.end_date || project?.start_date);
+  if (!startKey || !endKey) return 1;
+  return Math.max(1, Math.floor((new Date(endKey) - new Date(startKey)) / 86400000) + 1);
+};
+
+/** Total outsourcing cost for a project (active POs by effective cost + unlinked vendor allocations). */
+export const getProjectOutsourcing = (project) => {
+  const activePOs = (project?.purchase_orders || []).filter((po) => po && po.status !== 'Cancelled');
+  const fromPOs = activePOs.reduce((acc, po) => acc + (getEffectivePOCost(po).total || 0), 0);
+  const unlinked = (project?.vendor_allocations || []).filter((a) => a && !a.po_id);
+  const fromAllocs = unlinked.reduce((acc, v) => acc + (Number(v.tax_amount) || 0), 0);
+  return round2(fromPOs + fromAllocs);
+};
+
 // Service/maintenance due status for an inventory item. Uses an explicit
 // next_test_due if set, else last_service_date + service_interval_days.
 // Returns { status: 'overdue'|'due_soon'|'ok'|'none', dueDate, days }.

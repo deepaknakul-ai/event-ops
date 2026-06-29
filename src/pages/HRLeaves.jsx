@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { promptDialog } from '../utils/dialog';
+import { promptDialog, confirmDialog } from '../utils/dialog';
 import { CalendarDays, Plus, Search, CheckCircle, XCircle, Eye, Ban } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection } from 'firebase/firestore';
 import { calculateLeaveBalance } from '../utils/helpers';
@@ -114,6 +114,26 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
       logAction('leaves', 'cancel', leave.id, update, `Leave cancelled — ${getEmpName(leave.employeeId)}`);
       addToast('Approved leave cancelled — balance restored', 'info');
     } catch (e) { console.error(e); addToast('Error cancelling leave', 'error'); }
+  };
+
+  // Admin re-categorises a leave (e.g. Casual → Sick). Because balances count
+  // only 'Approved' leaves keyed on `type` and payroll's paidLeaveDaysInMonth also
+  // keys on `type`, the new category flows into balance + paid-leave pay automatically.
+  const handleChangeType = async (leave, newType) => {
+    if (!newType || newType === leave.type) return;
+    if (!can(role, 'hr_leaves', 'edit_type')) return addToast('Access denied.', 'error');
+    const ok = await confirmDialog(
+      `Change ${getEmpName(leave.employeeId)}'s leave category from ${leave.type} to ${newType}?\n\nThis re-allocates the leave balance and updates paid-leave payroll for those days.`,
+      { title: 'Change leave category', confirmLabel: `Change to ${newType}` },
+    );
+    if (!ok) return;
+    try {
+      const update = { type: newType, prevType: leave.type, typeChangedBy: currentEmpId, typeChangedAt: new Date().toISOString() };
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaves', leave.id), update);
+      logAction('leaves', 'edit_type', leave.id, update, `Leave category ${leave.type} → ${newType} — ${getEmpName(leave.employeeId)}`);
+      addToast(`Leave category changed to ${newType} — balance & payroll updated`, 'success');
+      setShowDetail((prev) => (prev && prev.id === leave.id ? { ...prev, ...update } : prev));
+    } catch (e) { console.error(e); addToast('Error changing category', 'error'); }
   };
 
   const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '-';
@@ -303,7 +323,15 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
             <h3 className="text-lg font-bold text-slate-800 mb-4">Leave Details</h3>
             <div className="space-y-2 text-sm">
               <div><span className="text-slate-500">Employee:</span> <span className="font-medium">{getEmpName(showDetail.employeeId)}</span></div>
-              <div><span className="text-slate-500">Type:</span> <span className="font-medium">{showDetail.type}</span></div>
+              <div className="flex items-center gap-2">
+                <span className="text-slate-500">Type:</span>
+                {can(role, 'hr_leaves', 'edit_type') && (showDetail.status === 'Approved' || showDetail.status === 'Pending') ? (
+                  <select value={showDetail.type} onChange={e => handleChangeType(showDetail, e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-sm text-black" title="Change leave category">
+                    {LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                ) : <span className="font-medium">{showDetail.type}</span>}
+                {showDetail.prevType && showDetail.prevType !== showDetail.type && <span className="text-[11px] text-slate-400">(was {showDetail.prevType})</span>}
+              </div>
               <div><span className="text-slate-500">Period:</span> {fmtDate(showDetail.startDate)} — {fmtDate(showDetail.endDate)} ({getDays(showDetail.startDate, showDetail.endDate)} day{getDays(showDetail.startDate, showDetail.endDate) > 1 ? 's' : ''})</div>
               <div><span className="text-slate-500">Reason:</span> {showDetail.reason}</div>
               <div><span className="text-slate-500">Status:</span> <span className={`font-bold ${showDetail.status === 'Approved' ? 'text-green-600' : showDetail.status === 'Rejected' ? 'text-red-600' : showDetail.status === 'Cancelled' ? 'text-slate-500' : 'text-amber-600'}`}>{showDetail.status}</span></div>
