@@ -4,7 +4,8 @@ import { getLogHours, calculateCompliance, calculateLeaveBalance, getProjectGran
 import { LEAVE_ENTITLEMENTS, LEAVE_TYPES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import jsPDF from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable';
+import { notify } from '../utils/toast';
 
 const REPORT_TYPES = [
   'Monthly Attendance',
@@ -673,87 +674,94 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
   }, [selectedPerformanceEmployeeData]);
 
   // ── PDF Export ─────────────────────────────────────────────────────────────
+  // Build { head, body } for the active report — shared by the PDF and CSV exporters.
+  const buildReportTable = () => {
+    const money = (value) => Number(value || 0).toFixed(2);
+    switch (reportType) {
+      case 0: // Monthly Attendance
+        return {
+          head: [['Employee', 'Date', 'Check In', 'Check Out', 'Hours', 'Location', 'Project', 'Geo']],
+          body: monthlyAttendanceData.map(l => [getEmpName(l.employeeId), fmtDate(l.checkIn), fmtTime(l.checkIn), l.checkOut ? fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.location || '-', l.project_name || '-', l.geofenceVerified === false ? 'Outside' : l.geofenceVerified === true ? 'OK' : '-']),
+        };
+      case 1: // Hours Summary
+        return {
+          head: [['Employee', 'Role', 'Shifts', 'Total Hours', 'Target', 'Compliance', 'Penalties', 'Geo Exc.']],
+          body: hoursSummaryData.map(d => [d.name, d.role || '-', d.shifts, d.totalHours, d.target || '-', d.target ? `${d.compliance}%` : '-', `${d.penaltyMins} min`, d.geoExceptions]),
+        };
+      case 2: // Leave Report
+        return {
+          head: [['Employee', ...LEAVE_TYPES.map(t => `${t} Bal`), 'Pending', 'Approved', 'Total']],
+          body: leaveReportData.map(d => [d.name, ...LEAVE_TYPES.map(t => d[t] ?? '-'), d.pending, d.approved, d.total]),
+        };
+      case 3: // Compliance
+        return {
+          head: [['Employee', 'Hours', 'Target', 'Compliance %']],
+          body: complianceData.map(d => [d.name, d.totalHours, d.target, `${d.compliance}%`]),
+        };
+      case 4: // Penalty
+        return {
+          head: [['Employee', 'Date', 'Minutes', 'Reason', 'Applied By']],
+          body: penaltyData.map(p => [getEmpName(p.employeeId), fmtDate(p.appliedAt), p.minutes, p.reason, getEmpName(p.appliedBy)]),
+        };
+      case 5: // Shift Requests
+        return {
+          head: [['Employee', 'Start', 'End', 'Location', 'Status', 'Reason']],
+          body: shiftData.map(s => [getEmpName(s.employeeId), fmtDate(s.startTime) + ' ' + fmtTime(s.startTime), fmtDate(s.endTime) + ' ' + fmtTime(s.endTime), s.location, s.status, s.reason?.slice(0, 50)]),
+        };
+      case 6: // Project Work Attendance
+        return {
+          head: [['Employee', 'Project', 'Check In', 'Check Out', 'Hours', 'GPS In', 'GPS Out']],
+          body: projectAttendanceData.map(l => [getEmpName(l.employeeId), l.project_name || '-', fmtDate(l.checkIn) + ' ' + fmtTime(l.checkIn), l.checkOut ? fmtDate(l.checkOut) + ' ' + fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.gpsCheckIn ? `${l.gpsCheckIn.lat?.toFixed(4)},${l.gpsCheckIn.lng?.toFixed(4)}` : '-', l.gpsCheckOut ? `${l.gpsCheckOut.lat?.toFixed(4)},${l.gpsCheckOut.lng?.toFixed(4)}` : '-']),
+        };
+      case 7: // Payroll
+        return {
+          head: [['Employee', 'Total Hrs', 'Penalty Hrs', 'Net Hrs', 'Rate/Hr', 'Gross', 'Deductions', 'Net Pay', 'Status']],
+          body: payrollData.map(p => [getEmpName(p.employeeId), p.totalHours, p.penaltyHours, p.netHours, `₹${p.hourlyRate}`, `₹${p.grossPay}`, `₹${p.deductions || 0}`, `₹${p.netPay}`, p.status]),
+        };
+      case 8: // Working Hours Audit
+        return {
+          head: [['Employee', 'Check In (Date/Time)', 'Check Out (Date/Time)', 'Hours', 'Band', 'Location', 'Project(s)', 'Project Source', 'Flag']],
+          body: workingHoursAuditData.map(r => [
+            getEmpName(r.employeeId),
+            `${fmtDate(r.checkIn)} ${fmtTime(r.checkIn)}`,
+            `${fmtDate(r.checkOut)} ${fmtTime(r.checkOut)}`,
+            r.hrs.toFixed(1),
+            WH_BANDS.find(b => b.key === r.band)?.label || r.band,
+            r.location || '-',
+            r.projectDisplayFull || '-',
+            r.projectSource || '-',
+            r.band === 'suspicious' ? '⚠ HIGH RISK' : r.band === 'extended' ? 'Extended' : '',
+          ]),
+        };
+      case PERFORMANCE_REPORT_INDEX: // Employee Financial Performance
+        return {
+          head: [['Rank', 'Employee', 'Role', 'Completed (Solo/Team)', 'Participated', 'Expense Reports', 'Realized Revenue', 'Employee Cost', 'Net Benefit', 'ROI %']],
+          body: performanceRows.map((r) => [
+            r.placement, r.name, r.role || '-',
+            `${r.completedProjects} (${r.soloCompletedProjects}/${r.teamCompletedProjects})`,
+            r.participatedProjects, r.expenseReportCount,
+            money(r.realizedRevenue), money(r.totalEmployeeCost), money(r.netBenefit),
+            r.roiPct == null ? '-' : `${r.roiPct}%`,
+          ]),
+        };
+      default:
+        return null;
+    }
+  };
+
   const exportPDF = () => {
+    const table = buildReportTable();
+    if (!table) return;
+    if (!table.body.length) { notify('No data to export for this report / period.', 'info'); return; }
     const pdf = new jsPDF('l', 'mm', 'a4');
     const periodLabel = reportType === PERFORMANCE_REPORT_INDEX ? performanceRange.label : monthLabel;
     const exportSuffix = reportType === PERFORMANCE_REPORT_INDEX ? periodLabel : selectedMonth;
     const safeSuffix = String(exportSuffix || 'report').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const money = (value) => Number(value || 0).toFixed(2);
-    const title = `${REPORT_TYPES[reportType]} — ${periodLabel}`;
     pdf.setFontSize(14);
-    pdf.text(title, 14, 15);
+    pdf.text(`${REPORT_TYPES[reportType]} — ${periodLabel}`, 14, 15);
     pdf.setFontSize(8);
     pdf.text(`Generated: ${new Date().toLocaleString('en-IN')}`, 14, 21);
-
-    let head, body;
-
-    switch (reportType) {
-      case 0: // Monthly Attendance
-        head = [['Employee', 'Date', 'Check In', 'Check Out', 'Hours', 'Location', 'Project', 'Geo']];
-        body = monthlyAttendanceData.map(l => [getEmpName(l.employeeId), fmtDate(l.checkIn), fmtTime(l.checkIn), l.checkOut ? fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.location || '-', l.project_name || '-', l.geofenceVerified === false ? 'Outside' : l.geofenceVerified === true ? 'OK' : '-']);
-        break;
-      case 1: // Hours Summary
-        head = [['Employee', 'Role', 'Shifts', 'Total Hours', 'Target', 'Compliance', 'Penalties', 'Geo Exc.']];
-        body = hoursSummaryData.map(d => [d.name, d.role || '-', d.shifts, d.totalHours, d.target || '-', d.target ? `${d.compliance}%` : '-', `${d.penaltyMins} min`, d.geoExceptions]);
-        break;
-      case 2: // Leave Report
-        head = [['Employee', ...LEAVE_TYPES.map(t => `${t} Bal`), 'Pending', 'Approved', 'Total']];
-        body = leaveReportData.map(d => [d.name, ...LEAVE_TYPES.map(t => d[t] ?? '-'), d.pending, d.approved, d.total]);
-        break;
-      case 3: // Compliance
-        head = [['Employee', 'Hours', 'Target', 'Compliance %']];
-        body = complianceData.map(d => [d.name, d.totalHours, d.target, `${d.compliance}%`]);
-        break;
-      case 4: // Penalty
-        head = [['Employee', 'Date', 'Minutes', 'Reason', 'Applied By']];
-        body = penaltyData.map(p => [getEmpName(p.employeeId), fmtDate(p.appliedAt), p.minutes, p.reason, getEmpName(p.appliedBy)]);
-        break;
-      case 5: // Shift Requests
-        head = [['Employee', 'Start', 'End', 'Location', 'Status', 'Reason']];
-        body = shiftData.map(s => [getEmpName(s.employeeId), fmtDate(s.startTime) + ' ' + fmtTime(s.startTime), fmtDate(s.endTime) + ' ' + fmtTime(s.endTime), s.location, s.status, s.reason?.slice(0, 50)]);
-        break;
-      case 6: // Project Work Attendance
-        head = [['Employee', 'Project', 'Check In', 'Check Out', 'Hours', 'GPS In', 'GPS Out']];
-        body = projectAttendanceData.map(l => [getEmpName(l.employeeId), l.project_name || '-', fmtDate(l.checkIn) + ' ' + fmtTime(l.checkIn), l.checkOut ? fmtDate(l.checkOut) + ' ' + fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.gpsCheckIn ? `${l.gpsCheckIn.lat?.toFixed(4)},${l.gpsCheckIn.lng?.toFixed(4)}` : '-', l.gpsCheckOut ? `${l.gpsCheckOut.lat?.toFixed(4)},${l.gpsCheckOut.lng?.toFixed(4)}` : '-']);
-        break;
-      case 7: // Payroll
-        head = [['Employee', 'Total Hrs', 'Penalty Hrs', 'Net Hrs', 'Rate/Hr', 'Gross', 'Deductions', 'Net Pay', 'Status']];
-        body = payrollData.map(p => [getEmpName(p.employeeId), p.totalHours, p.penaltyHours, p.netHours, `₹${p.hourlyRate}`, `₹${p.grossPay}`, `₹${p.deductions || 0}`, `₹${p.netPay}`, p.status]);
-        break;
-      case 8: // Working Hours Audit
-        head = [['Employee', 'Check In (Date/Time)', 'Check Out (Date/Time)', 'Hours', 'Band', 'Location', 'Project(s)', 'Project Source', 'Flag']];
-        body = workingHoursAuditData.map(r => [
-          getEmpName(r.employeeId),
-          `${fmtDate(r.checkIn)} ${fmtTime(r.checkIn)}`,
-          `${fmtDate(r.checkOut)} ${fmtTime(r.checkOut)}`,
-          r.hrs.toFixed(1),
-          WH_BANDS.find(b => b.key === r.band)?.label || r.band,
-          r.location || '-',
-          r.projectDisplayFull || '-',
-          r.projectSource || '-',
-          r.band === 'suspicious' ? '⚠ HIGH RISK' : r.band === 'extended' ? 'Extended' : '',
-        ]);
-        break;
-      case PERFORMANCE_REPORT_INDEX: // Employee Financial Performance
-        head = [['Rank', 'Employee', 'Role', 'Completed (Solo/Team)', 'Participated', 'Expense Reports', 'Realized Revenue', 'Employee Cost', 'Net Benefit', 'ROI %']];
-        body = performanceRows.map((r) => [
-          r.placement,
-          r.name,
-          r.role || '-',
-          `${r.completedProjects} (${r.soloCompletedProjects}/${r.teamCompletedProjects})`,
-          r.participatedProjects,
-          r.expenseReportCount,
-          money(r.realizedRevenue),
-          money(r.totalEmployeeCost),
-          money(r.netBenefit),
-          r.roiPct == null ? '-' : `${r.roiPct}%`,
-        ]);
-        break;
-      default:
-        return;
-    }
-
-    pdf.autoTable({ head, body, startY: 25, styles: { fontSize: 7 }, headStyles: { fillColor: [99, 102, 241] } });
+    autoTable(pdf, { head: table.head, body: table.body, startY: 25, styles: { fontSize: 7 }, headStyles: { fillColor: [99, 102, 241] } });
     pdf.save(`${REPORT_TYPES[reportType].replace(/\s/g, '_')}_${safeSuffix}.pdf`);
     const exportMeta = reportType === PERFORMANCE_REPORT_INDEX
       ? {
@@ -807,8 +815,11 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
           ]),
         ];
         break;
-      default:
-        rows = [['Report data — use PDF for full export']];
+      default: {
+        const table = buildReportTable();
+        rows = table && table.body.length ? [table.head[0], ...table.body] : [['No data for this report / period']];
+        break;
+      }
     }
     const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
