@@ -2,7 +2,8 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { DollarSign, Search, Download, FileText, CheckCircle, Clock, AlertTriangle, Users, Filter } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection, deleteDoc } from 'firebase/firestore';
-import { getLogHours, getHourlyRateForDate, formatCurrency } from '../utils/helpers';
+import { getLogHours, getHourlyRateForDate, formatCurrency, paidLeaveDaysInMonth, dailyLeaveRate } from '../utils/helpers';
+import { LEAVE_PAID_TYPES, LEAVE_ENTITLEMENTS, LEAVE_DAY_HOURS } from '../utils/constants';
 import { can } from '../utils/permissions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -10,7 +11,7 @@ import ExcelJS from 'exceljs';
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = [], role, db, appId, logAction, addToast }) => {
+const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = [], hrLeaves = [], role, db, appId, logAction, addToast }) => {
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear());
   const [search, setSearch] = useState('');
@@ -66,7 +67,10 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
       const fallbackRate = Number(getHourlyRateForDate(emp, monthStart) || 0);
       const hourlyRate = totalHours > 0 ? round2(grossFromLogs / totalHours) : round2(fallbackRate);
       const penaltyValue = round2(penaltyHours * hourlyRate);
-      const grossPayComputed = Math.max(0, round2(grossFromLogs - penaltyValue));
+      // Paid-leave credit: approved entitled-leave days (within annual quota) are paid.
+      const paidLeaveDays = paidLeaveDaysInMonth(hrLeaves, emp.id, monthStart, monthEnd, LEAVE_PAID_TYPES, LEAVE_ENTITLEMENTS);
+      const leavePay = round2(paidLeaveDays * dailyLeaveRate(hourlyRate, LEAVE_DAY_HOURS));
+      const grossPayComputed = Math.max(0, round2(grossFromLogs - penaltyValue + leavePay));
 
       const rateBreakdown = Object.entries(rateBucketsMap)
         .map(([rate, hours]) => {
@@ -97,6 +101,8 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
         standardHours,
         overtimeHours,
         grossPay: grossPayComputed,
+        paidLeaveDays,
+        leavePay,
         deductions,
         netPay: netPayComputed,
         shifts,
@@ -152,6 +158,8 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
         standardHours,
         overtimeHours,
         grossPay: grossPayComputed,
+        paidLeaveDays,
+        leavePay,
         deductions,
         netPay: netPayComputed,
         shifts,
@@ -165,7 +173,7 @@ const HRPayroll = ({ employees = [], timeLogs = [], penalties = [], payroll = []
         calculated,
       };
     });
-  }, [activeEmployees, timeLogs, penalties, payrollMap, selectedYear, selectedMonth]);
+  }, [activeEmployees, timeLogs, penalties, hrLeaves, payrollMap, selectedYear, selectedMonth]);
 
   // Filtered list
   const filtered = useMemo(() => {

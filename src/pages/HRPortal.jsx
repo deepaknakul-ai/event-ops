@@ -2,8 +2,8 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { promptDialog } from '../utils/dialog';
 import { UserCheck, Clock, MapPin, CalendarDays, FileText, AlertTriangle, CheckCircle } from 'lucide-react';
 import { addDoc, updateDoc, doc, collection } from 'firebase/firestore';
-import { getLogHours, getDistance, calculateLeaveBalance } from '../utils/helpers';
-import { LEAVE_TYPES, LEAVE_ENTITLEMENTS, LOCATION_TYPES } from '../utils/constants';
+import { getLogHours, getDistance, calculateLeaveBalance, getHourlyRateForDate, splitLeavePaidUnpaid, dailyLeaveRate, formatCurrency } from '../utils/helpers';
+import { LEAVE_TYPES, LEAVE_ENTITLEMENTS, LEAVE_PAID_TYPES, LEAVE_DAY_HOURS, LOCATION_TYPES } from '../utils/constants';
 
 const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests = [], penalties = [], hqSettings = {}, projects = [], role = '', currentEmpId, db, appId, logAction, addToast }) => {
   const [tab, setTab] = useState(0);
@@ -213,6 +213,20 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
   const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '-';
   const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '-';
   const getDays = (s, e) => !s || !e ? 0 : Math.max(1, Math.ceil((new Date(e) - new Date(s)) / 86400000) + 1);
+
+  // Live financial impact of the leave currently being filled in.
+  const leaveImpact = (() => {
+    const { type, startDate, endDate } = leaveForm;
+    if (!startDate || !endDate) return null;
+    const days = getDays(startDate, endDate);
+    if (!days) return null;
+    const isPaid = LEAVE_PAID_TYPES.includes(type);
+    const bal = Number(leaveBalance[type] || 0);
+    const { paid, lwp } = splitLeavePaidUnpaid(days, bal, isPaid);
+    const rate = Number(getHourlyRateForDate(currentEmp, startDate) || currentEmp?.hourlyRate || 0);
+    const perDay = dailyLeaveRate(rate, LEAVE_DAY_HOURS);
+    return { days, isPaid, bal, paid, lwp, perDay, loss: Math.round(lwp * perDay), rate };
+  })();
 
   const TABS = ['My Attendance', 'My Leaves', 'My Shift Requests', 'My Penalties'];
 
@@ -469,6 +483,26 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
                   <input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={leaveForm.endDate} onChange={e => setLeaveForm({ ...leaveForm, endDate: e.target.value })} />
                 </div>
               </div>
+              {leaveImpact && (
+                <div className={`rounded-lg border p-3 text-xs ${leaveImpact.lwp > 0 ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                  <div className="mb-1 flex items-center gap-1.5 font-bold text-slate-700">
+                    {leaveImpact.lwp > 0 ? <AlertTriangle size={13} className="text-amber-600" /> : <CheckCircle size={13} className="text-emerald-600" />}
+                    Financial impact
+                  </div>
+                  <div className="space-y-0.5 text-slate-600">
+                    <div>{leaveImpact.days} day(s) of {leaveForm.type} leave</div>
+                    {leaveImpact.isPaid && <div>Paid from balance: <span className="font-semibold">{leaveImpact.paid}</span> day(s) — {leaveImpact.bal} left in your {leaveForm.type} quota</div>}
+                    {leaveImpact.lwp > 0 && <div className="text-amber-700">Beyond balance → Loss of Pay: <span className="font-semibold">{leaveImpact.lwp}</span> day(s){leaveImpact.perDay > 0 ? <> × {formatCurrency(leaveImpact.perDay)}/day</> : null}</div>}
+                    <div className="pt-1 font-bold">
+                      {leaveImpact.lwp > 0
+                        ? (leaveImpact.perDay > 0
+                            ? <span className="text-amber-700">≈ {formatCurrency(leaveImpact.loss)} less in your pay</span>
+                            : <span className="text-amber-700">{leaveImpact.lwp} unpaid day(s) — set your hourly rate to see the amount</span>)
+                        : <span className="text-emerald-700">No salary impact — fully covered by your paid balance ✓</span>}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-bold text-slate-700">Reason</label>
                 <textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={3} value={leaveForm.reason} onChange={e => setLeaveForm({ ...leaveForm, reason: e.target.value })} />

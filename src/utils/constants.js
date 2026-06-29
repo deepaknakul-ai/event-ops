@@ -76,6 +76,11 @@ export const LEAVE_ENTITLEMENTS = { Casual: 12, Sick: 8, Earned: 15 };
 export const LOCATION_TYPES = ['HQ', 'Site', 'Remote'];
 export const SHIFT_REQUEST_STATUSES = ['Pending', 'Approved', 'Rejected', 'Clarification'];
 export const LEAVE_TYPES = ['Casual', 'Sick', 'Earned'];
+// Leave types that are PAID up to the employee's remaining annual entitlement.
+// Days taken beyond the remaining balance fall through to Loss of Pay (unpaid).
+export const LEAVE_PAID_TYPES = ['Casual', 'Sick', 'Earned'];
+// Standard paid hours in one leave day (used to value a leave day from hourly rate).
+export const LEAVE_DAY_HOURS = 8;
 export const HR_STATUS_COLORS = {
   Pending: 'bg-amber-100 text-amber-800 border-amber-200',
   Approved: 'bg-green-100 text-green-800 border-green-200',

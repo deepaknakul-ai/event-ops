@@ -902,6 +902,58 @@ export const calculateLeaveBalance = (leaves, entitlements) => {
   return balance;
 };
 
+// ── Leave pay (entitled = paid, excess = Loss of Pay) ───────────────────────
+/** Calendar days (inclusive) of [startDate,endDate] that fall within [rangeStart,rangeEnd]. */
+export const leaveDaysInRange = (startDate, endDate, rangeStart, rangeEnd) => {
+  if (!startDate || !endDate) return 0;
+  const day = 86400000;
+  const s = new Date(startDate); s.setHours(0, 0, 0, 0);
+  const e = new Date(endDate); e.setHours(0, 0, 0, 0);
+  const rs = new Date(rangeStart); rs.setHours(0, 0, 0, 0);
+  const re = new Date(rangeEnd); re.setHours(0, 0, 0, 0);
+  const lo = s > rs ? s : rs;
+  const hi = e < re ? e : re;
+  if (hi < lo) return 0;
+  return Math.floor((hi - lo) / day) + 1;
+};
+
+/** Split `days` of a leave into paid (within remaining balance) vs Loss-of-Pay. */
+export const splitLeavePaidUnpaid = (days, balanceForType, isPaidType) => {
+  const d = Math.max(0, Number(days) || 0);
+  if (!isPaidType) return { paid: 0, lwp: d };
+  const bal = Math.max(0, Number(balanceForType) || 0);
+  const paid = Math.min(d, bal);
+  return { paid, lwp: d - paid };
+};
+
+/** One leave day's pay = hourly rate × a standard work day (default 8h). */
+export const dailyLeaveRate = (hourlyRate, dayHours = 8) =>
+  Math.max(0, Number(hourlyRate) || 0) * (Number(dayHours) || 8);
+
+/**
+ * Approved paid-leave days for an employee inside [monthStart,monthEnd] that
+ * still fall within the type's annual entitlement (entitlement year = calendar
+ * year of monthStart). Days beyond the quota are Loss of Pay and excluded.
+ * Used by payroll to credit paid leave.
+ */
+export const paidLeaveDaysInMonth = (leaves, empId, monthStart, monthEnd, paidTypes, entitlements) => {
+  const yearStart = new Date(monthStart.getFullYear(), 0, 1);
+  const prevDayEnd = new Date(monthStart.getTime() - 86400000);
+  let total = 0;
+  (paidTypes || []).forEach((type) => {
+    const quota = Number(entitlements?.[type] || 0);
+    if (quota <= 0) return;
+    const approved = (leaves || []).filter(l => l.employeeId === empId && l.status === 'Approved' && l.type === type);
+    let before = 0, inMonth = 0;
+    approved.forEach((l) => {
+      before += leaveDaysInRange(l.startDate, l.endDate, yearStart, prevDayEnd);
+      inMonth += leaveDaysInRange(l.startDate, l.endDate, monthStart, monthEnd);
+    });
+    total += Math.min(inMonth, Math.max(0, quota - before));
+  });
+  return total;
+};
+
 // Service/maintenance due status for an inventory item. Uses an explicit
 // next_test_due if set, else last_service_date + service_interval_days.
 // Returns { status: 'overdue'|'due_soon'|'ok'|'none', dueDate, days }.
