@@ -176,8 +176,8 @@ export const PERMISSIONS = {
     view:     ['admin', 'accountant', 'manager'],
     view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
     create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
-    approve:  ['admin', 'manager'],
-    clarify:  ['admin', 'manager'],
+    approve:  ['admin'],   // only admin actions attendance/shift requests (creates the SR record)
+    clarify:  ['admin'],
   },
   hr_penalties: {
     view:       ['admin', 'accountant', 'manager'],

@@ -3,20 +3,22 @@ import { isProjectActiveOnDate, projectDurationDays, getProjectOutsourcing } fro
 
 describe('isProjectActiveOnDate', () => {
   const proj = { status: 'Confirmed', setup_date: '2026-06-10', start_date: '2026-06-10', end_date: '2026-06-12' };
-  it('is active inside the window', () => {
+  it('is active inside the window (inclusive boundaries)', () => {
+    expect(isProjectActiveOnDate(proj, '2026-06-10')).toBe(true);
     expect(isProjectActiveOnDate(proj, '2026-06-11')).toBe(true);
+    expect(isProjectActiveOnDate(proj, '2026-06-12')).toBe(true);
   });
-  it('honours the ±1 grace day', () => {
-    expect(isProjectActiveOnDate(proj, '2026-06-09')).toBe(true);  // setup - 1
-    expect(isProjectActiveOnDate(proj, '2026-06-13')).toBe(true);  // end + 1
+  it('is inactive outside the window', () => {
+    expect(isProjectActiveOnDate(proj, '2026-06-09')).toBe(false);
+    expect(isProjectActiveOnDate(proj, '2026-06-13')).toBe(false);
   });
-  it('is inactive outside the grace window', () => {
-    expect(isProjectActiveOnDate(proj, '2026-06-08')).toBe(false);
-    expect(isProjectActiveOnDate(proj, '2026-06-14')).toBe(false);
+  it('spans the earliest setup/start to the latest end', () => {
+    const p2 = { setup_date: '2026-06-08', start_date: '2026-06-10', end_date: '2026-06-12' };
+    expect(isProjectActiveOnDate(p2, '2026-06-08')).toBe(true);
+    expect(isProjectActiveOnDate(p2, '2026-06-07')).toBe(false);
   });
-  it('excludes non Confirmed/Ongoing statuses', () => {
-    expect(isProjectActiveOnDate({ ...proj, status: 'Quoted' }, '2026-06-11')).toBe(false);
-    expect(isProjectActiveOnDate({ ...proj, status: 'Ongoing' }, '2026-06-11')).toBe(true);
+  it('returns false when the project has no dates', () => {
+    expect(isProjectActiveOnDate({ status: 'Confirmed' }, '2026-06-11')).toBe(false);
   });
 });
 

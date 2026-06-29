@@ -136,8 +136,32 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
       const update = { status: action, reviewedBy: currentEmpId, reviewedAt: new Date().toISOString() };
       if (action === 'Clarification' && clarification) update.adminClarification = clarification;
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'shiftRequests', sr.id), update);
+      // On approval (from a not-yet-approved request), record the attendance as a
+      // timeLog tagged source:'SR' so it's distinguishable in every attendance view.
+      if (action === 'Approved' && sr.status !== 'Approved') {
+        const now = new Date().toISOString();
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'timeLogs'), {
+          employeeId: sr.employeeId,
+          checkIn: sr.startTime,
+          checkOut: sr.endTime || null,
+          location: sr.location || 'HQ',
+          project_id: sr.project_id || null,
+          project_name: sr.project_name || null,
+          geofenceVerified: null,
+          geoPenaltyMinutes: 0,
+          autoClosed: false,
+          lateMinutes: 0,
+          gpsCheckIn: null,
+          gpsCheckOut: null,
+          source: 'SR',
+          sourceShiftRequestId: sr.id,
+          created_at: now,
+          adminAdjustedBy: currentEmpId,
+          adminAdjustedAt: now,
+        });
+      }
       logAction('shiftRequests', action.toLowerCase(), sr.id, update, `Shift request ${action}`);
-      addToast(`Request ${action}`, 'success');
+      addToast(action === 'Approved' ? 'Approved — attendance recorded (SR)' : `Request ${action}`, 'success');
     } catch (e) { console.error(e); addToast('Error', 'error'); }
   };
 
@@ -248,7 +272,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
                 const suspiciousHour = hqSettings.suspiciousCheckoutHour ?? 22;
                 return (
                   <tr key={log.id} className={`border-b last:border-0 hover:bg-slate-50 ${isOpen ? 'bg-green-50' : isSuspicious ? 'bg-red-50' : ''}`}>
-                    <td className="p-3 font-medium text-slate-800">{getEmpName(log.employeeId)}</td>
+                    <td className="p-3 font-medium text-slate-800">{getEmpName(log.employeeId)}{log.source === 'SR' && <span title="Recorded from an approved shift request" className="ml-1.5 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">SR</span>}</td>
                     <td className="p-3 text-slate-600">{fmtDate(log.checkIn)}</td>
                     <td className="p-3 font-mono text-slate-700">{fmtTime(log.checkIn)}</td>
                     <td className="p-3 font-mono text-slate-700">

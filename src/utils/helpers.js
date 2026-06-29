@@ -958,13 +958,17 @@ export const paidLeaveDaysInMonth = (leaves, empId, monthStart, monthEnd, paidTy
 const _ymd = (d) => (d ? String(d).slice(0, 10) : '');
 const _shiftYmd = (key, n) => { const d = new Date(key); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
 
-/** True if a Confirmed/Ongoing project's window (±1 grace day) covers dateKey (YYYY-MM-DD). */
+/** True if a project's setup/start/end window covers dateKey (YYYY-MM-DD). */
 export const isProjectActiveOnDate = (project, dateKey) => {
-  if (!project || !['Confirmed', 'Ongoing'].includes(project.status)) return false;
-  const startKey = _ymd(project.setup_date || project.start_date);
-  const endKey = _ymd(project.end_date || project.start_date);
-  if (!startKey || !endKey) return true;
-  return _shiftYmd(startKey, -1) <= dateKey && dateKey <= _shiftYmd(endKey, 1);
+  if (!project || !dateKey) return false;
+
+  const projectDates = [_ymd(project.setup_date), _ymd(project.start_date), _ymd(project.end_date)].filter(Boolean);
+  if (projectDates.length === 0) return false;
+
+  const startKey = projectDates.reduce((earliest, current) => (!earliest || current < earliest ? current : earliest), '');
+  const endKey = projectDates.reduce((latest, current) => (!latest || current > latest ? current : latest), '');
+
+  return startKey <= dateKey && dateKey <= endKey;
 };
 
 /** Inclusive number of days in a project's window (min 1) — used to prorate per-day figures. */

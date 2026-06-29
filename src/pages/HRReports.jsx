@@ -680,8 +680,8 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
     switch (reportType) {
       case 0: // Monthly Attendance
         return {
-          head: [['Employee', 'Date', 'Check In', 'Check Out', 'Hours', 'Location', 'Project', 'Geo']],
-          body: monthlyAttendanceData.map(l => [getEmpName(l.employeeId), fmtDate(l.checkIn), fmtTime(l.checkIn), l.checkOut ? fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.location || '-', l.project_name || '-', l.geofenceVerified === false ? 'Outside' : l.geofenceVerified === true ? 'OK' : '-']),
+          head: [['Employee', 'Date', 'Check In', 'Check Out', 'Hours', 'Location', 'Project', 'Geo', 'Source']],
+          body: monthlyAttendanceData.map(l => [getEmpName(l.employeeId), fmtDate(l.checkIn), fmtTime(l.checkIn), l.checkOut ? fmtTime(l.checkOut) : 'Active', getLogHours(l).toFixed(1), l.location || '-', l.project_name || '-', l.geofenceVerified === false ? 'Outside' : l.geofenceVerified === true ? 'OK' : '-', l.source === 'SR' ? 'SR' : '-']),
         };
       case 1: // Hours Summary
         return {

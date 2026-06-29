@@ -341,7 +341,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
             <tbody>
               {myLogs.slice(0, 100).map(l => (
                 <tr key={l.id} className={`border-b last:border-0 hover:bg-slate-50 ${!l.checkOut ? 'bg-green-50' : ''}`}>
-                  <td className="p-3">{fmtDate(l.checkIn)}</td>
+                  <td className="p-3">{fmtDate(l.checkIn)}{l.source === 'SR' && <span title="Recorded from your approved shift request" className="ml-1.5 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">SR</span>}</td>
                   <td className="p-3 font-mono">{fmtTime(l.checkIn)}</td>
                   <td className="p-3 font-mono">{l.checkOut ? fmtTime(l.checkOut) : <span className="text-green-600 font-medium">Active</span>}{l.autoClosed && <span className="text-xs text-amber-600 ml-1">(auto)</span>}</td>
                   <td className="p-3 text-right font-mono">{getLogHours(l) > 0 ? getLogHours(l).toFixed(1) : '-'}</td>
@@ -402,7 +402,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
       {tab === 2 && (
         <div className="space-y-4">
           <div className="flex justify-end">
-            <button onClick={() => { setShiftForm({ startTime: '', endTime: '', location: 'HQ', reason: '' }); setShowShiftModal(true); }} className="rounded bg-indigo-600 px-4 py-2 text-sm text-white font-medium hover:bg-indigo-700">New Shift Request</button>
+            <button onClick={() => { setShiftForm({ startTime: '', endTime: '', location: 'HQ', reason: '' }); setShowShiftModal(true); }} className="rounded bg-indigo-600 px-4 py-2 text-sm text-white font-medium hover:bg-indigo-700">Request Attendance / Shift</button>
           </div>
           {myShifts.length === 0 && <p className="text-center text-sm text-slate-400 py-6">No shift requests.</p>}
           {myShifts.map(sr => (
@@ -520,7 +520,8 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
       {showShiftModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
-            <h3 className="text-lg font-bold text-slate-800 mb-4">New Shift Request</h3>
+            <h3 className="text-lg font-bold text-slate-800 mb-1">Request Attendance / Shift</h3>
+            <p className="mb-3 rounded bg-indigo-50 border border-indigo-200 px-3 py-1.5 text-xs text-indigo-700">Request the correct date &amp; time for a missed or wrong attendance. An <strong>admin</strong> reviews it; once approved it is recorded as your attendance and marked <strong>SR</strong>.</p>
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3">
                 <div>

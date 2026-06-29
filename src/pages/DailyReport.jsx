@@ -32,12 +32,22 @@ const DailyReport = ({ projects = [], clients = [], employees = [], expenses = [
 
     const shows = projects.filter((p) => isProjectActiveOnDate(p, D)).map((p) => {
       const dur = projectDurationDays(p);
+      const setupDay = ymd(p.setup_date);
+      const startDay = ymd(p.start_date);
+      const endDay = ymd(p.end_date);
+      const dateTags = [];
+      if (setupDay === D) dateTags.push({ label: 'Setup', className: 'bg-amber-50 text-amber-700' });
+      if (startDay === D) dateTags.push({ label: 'Start', className: 'bg-indigo-50 text-indigo-700' });
+      if (endDay === D) dateTags.push({ label: 'End', className: 'bg-emerald-50 text-emerald-700' });
+      if (dateTags.length === 0) dateTags.push({ label: 'Within project window', className: 'bg-slate-100 text-slate-600' });
+
       const onDuty = dayLogs.filter((l) => l.project_id === p.id).map((l) => ({
         name: empById[l.employeeId]?.name || l.employeeId, inTime: l.checkIn, outTime: l.checkOut, hours: getLogHours(l),
       }));
       return {
         p, dur,
         client: clientById[p.client_id]?.name || '',
+        dateTags,
         revGrandDay: getProjectGrandTotal(p) / dur,
         revNetDay: getProjectNetTotal(p) / dur,
         outsourcingDay: getProjectOutsourcing(p) / dur,
@@ -51,7 +61,7 @@ const DailyReport = ({ projects = [], clients = [], employees = [], expenses = [
       const emp = empById[l.employeeId] || {};
       const hours = getLogHours(l);
       const rate = Number(getHourlyRateForDate(emp, l.checkIn) || 0);
-      return { id: l.id, name: emp.name || l.employeeId, project_name: l.project_name || (l.location || ''), inTime: l.checkIn, outTime: l.checkOut, hours, rate, cost: hours * rate };
+      return { id: l.id, name: emp.name || l.employeeId, project_name: l.project_name || (l.location || ''), inTime: l.checkIn, outTime: l.checkOut, hours, rate, cost: hours * rate, source: l.source };
     }).sort((a, b) => new Date(a.inTime) - new Date(b.inTime));
     const manpower = crew.reduce((s, c) => s + c.cost, 0);
 
@@ -118,6 +128,11 @@ const DailyReport = ({ projects = [], clients = [], employees = [], expenses = [
                   <div className="min-w-0">
                     <div className="font-semibold text-slate-800">{s.p.project_name}</div>
                     <div className="text-xs text-slate-500">{s.client}{s.p.venue ? <> · <MapPin size={11} className="inline" /> {s.p.venue}</> : null} · {s.p.status}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {s.dateTags.map((tag) => (
+                        <span key={tag.label} className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${tag.className}`}>{tag.label}</span>
+                      ))}
+                    </div>
                   </div>
                   <div className="text-right">
                     <div className="text-sm font-bold text-emerald-700">{formatCurrency(s.revGrandDay)}/day</div>
@@ -156,7 +171,7 @@ const DailyReport = ({ projects = [], clients = [], employees = [], expenses = [
             <tbody>
               {data.crew.length === 0 ? <tr><td colSpan={7} className="p-6 text-center text-xs text-slate-400">Nobody checked in on this date.</td></tr> : data.crew.map((c) => (
                 <tr key={c.id} className="border-b last:border-0">
-                  <td className="p-2.5 font-medium text-slate-700">{c.name}</td>
+                  <td className="p-2.5 font-medium text-slate-700">{c.name}{c.source === 'SR' && <span title="Recorded from an approved shift request" className="ml-1.5 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">SR</span>}</td>
                   <td className="p-2.5 text-slate-500">{c.project_name || '—'}</td>
                   <td className="p-2.5">{hhmm(c.inTime)}</td>
                   <td className="p-2.5">{c.outTime ? hhmm(c.outTime) : <span className="text-amber-600">open</span>}</td>
