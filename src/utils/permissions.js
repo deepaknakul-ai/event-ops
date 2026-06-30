@@ -69,6 +69,10 @@ export const PERMISSIONS = {
   tracking: {
     view: ['admin', 'manager'],   // live employee map (management only)
   },
+  commission: {
+    view: ['admin', 'accountant', 'manager', 'user'],  // admin/accountant see all; others see own
+    pay:  ['admin', 'accountant'],                      // record a commission payout
+  },
   projects: {
     view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
     view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
@@ -213,6 +217,7 @@ export const RESOURCE_DEFS = {
   leads:             { label: 'Leads / CRM',         actions: ['view', 'create', 'edit', 'delete'] },
   chat:              { label: 'Team Chat',           actions: ['view', 'create', 'announce', 'moderate'] },
   tracking:          { label: 'Live Tracking',       actions: ['view'] },
+  commission:        { label: 'Referral Commission', actions: ['view', 'pay'] },
   projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
   inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
   finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
@@ -259,6 +264,7 @@ export const ACTION_LABELS = {
   announce:     'Post Announcements',
   moderate:     'Moderate / Delete',
   edit_type:    'Change Leave Category',
+  pay:          'Record Payout',
   // HR actions
   close_shift: 'Close Open Shift',
   bulk_apply:  'Bulk Apply',
@@ -335,6 +341,7 @@ export const getNavAccess = (role) => ({
   leads:             can(role, 'leads', 'view'),
   chat:              can(role, 'chat', 'view'),
   tracking:          can(role, 'tracking', 'view'),
+  commission:        can(role, 'commission', 'view'),
   inventory:         can(role, 'inventory', 'view'),
   expenses:          can(role, 'expenses', 'view_own'),
   finance:           can(role, 'finance', 'view'),

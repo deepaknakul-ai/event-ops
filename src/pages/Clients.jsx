@@ -15,13 +15,16 @@ import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
 import { generateClientManagementReportPDF } from '../utils/pdf/clientPdf';
 
-const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, db, appId, logAction }) => {
+const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, currentEmpId, db, appId, logAction }) => {
+  const canSeeAllClients = role === 'admin' || role === 'accountant';
+  const empNameById = (id) => employees.find((e) => e.id === id)?.name || '';
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [formData, setFormData] = useState({
     name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [],
-    billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: []
+    billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: [],
+    owner_id: '', referral_rate: 10
   });
   const [newCompany, setNewCompany] = useState({ name: '', gstin: '', state: '', address: '' });
   const [newContact, setNewContact] = useState({ name: '', role: '', phone: '', email: '' });
@@ -212,7 +215,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
   const openAdd = () => {
     setEditingId(null);
-    setFormData({ name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [], billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: [], opening_balance: { ...blankOpening } });
+    setFormData({ name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [], billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: [], owner_id: currentEmpId || '', referral_rate: 10, opening_balance: { ...blankOpening } });
     setNewCompany({ name: '', gstin: '', state: '', address: '' });
     setIsAddOpen(true);
   };
@@ -225,6 +228,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       address: client.address || '', contacts: client.contacts || [],
       billing_terms: client.billing_terms || 'Net 15', custom_terms: client.custom_terms || '', remarks: client.remarks || '',
       companies: client.companies || [],
+      owner_id: client.owner_id || '', referral_rate: client.referral_rate ?? 10,
       opening_balance: ob
         ? { amount: ob.amount != null ? String(ob.amount) : '', side: ob.side || 'Dr', date: ob.date || todayFyStart, remarks: ob.remarks || '' }
         : { ...blankOpening },
@@ -350,10 +354,18 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         ? { amount: obAmount, side: obSide, date: obDate, fy: getFYFromDate(obDate), remarks: obRemarks }
         : null;
 
+      // Owner (= referral employee, earns the commission). Managers always own
+      // their own creation; admin may assign/reassign via the dropdown.
+      const ownerId = (role === 'admin'
+        ? (formData.owner_id || currentEmpId)
+        : (editingId ? (formData.owner_id || currentEmpId) : currentEmpId)) || currentEmpId || '';
       const data = {
         ...formData,
         gstin: normalizedPrimaryGST,
         companies: normalizedCompanies,
+        owner_id: ownerId,
+        owner_name: empNameById(ownerId) || formData.owner_name || '',
+        referral_rate: Number(formData.referral_rate) || 10,
         opening_balance,
         updated_at: serverTimestamp()
       };
@@ -683,6 +695,8 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   }, [clients]);
 
   const filteredClients = displayParties.filter(client => {
+    // Owner scoping (UI): non admin/accountant see only clients/vendors they own.
+    if (!canSeeAllClients && (client.owner_id || client.rootClient?.owner_id) !== currentEmpId) return false;
     const q = searchTerm.toLowerCase();
     return (
       (client.display_name || '').toLowerCase().includes(q) ||
@@ -885,9 +899,14 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         <div className="space-y-4">
           {/* Back + client name */}
           <div className="flex items-center justify-between">
-            <button onClick={() => setDashboardClient(null)} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition">
-              <ArrowLeft size={16} /> All Clients
-            </button>
+            <div className="flex items-center gap-3">
+              <button onClick={() => setDashboardClient(null)} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition">
+                <ArrowLeft size={16} /> All Clients
+              </button>
+              {(() => { const rc = dashboardClient.rootClient || dashboardClient; return rc.owner_id ? (
+                <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-700">Brought by <span className="font-semibold">{rc.owner_name || empNameById(rc.owner_id) || '—'}</span></span>
+              ) : null; })()}
+            </div>
             <div className="flex items-center gap-2">
               {can(role, 'finance', 'view') && (
                 <button onClick={handleClientReport} className="flex items-center gap-1.5 text-sm rounded border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-indigo-700 font-medium hover:bg-indigo-100"><FileText size={14}/> Management Report</button>
@@ -947,6 +966,23 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Financial & Terms</h4>
             <div><label className="block text-sm font-bold text-slate-800">Credit Terms</label><select className="w-full rounded border p-2 bg-white text-slate-800" value={formData.billing_terms} onChange={e => setFormData({...formData, billing_terms: e.target.value})}><option value="Net 15">Net 15 Days</option><option value="Net 30">Net 30 Days</option><option value="Net 45">Net 45 Days</option><option value="Net 60">Net 60 Days</option><option value="Net 90">Net 90 Days</option></select></div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-sm font-bold text-slate-800">Owner / Brought by <span className="text-xs font-normal text-slate-500">(earns referral)</span></label>
+                {role === 'admin' ? (
+                  <select className="w-full rounded border p-2 bg-white text-slate-800" value={formData.owner_id || ''} onChange={e => setFormData({ ...formData, owner_id: e.target.value })}>
+                    <option value="">— select employee —</option>
+                    {employees.filter(emp => (emp.status || 'Active') === 'Active').map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+                  </select>
+                ) : (
+                  <div className="w-full rounded border p-2 bg-slate-50 text-sm text-slate-600">{empNameById(formData.owner_id || currentEmpId) || 'You'}</div>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-800">Referral rate %</label>
+                <input type="number" min="0" max="100" step="0.5" className="w-full rounded border p-2 text-sm bg-white text-black disabled:bg-slate-50" value={formData.referral_rate ?? 10} disabled={role !== 'admin'} onChange={e => setFormData({ ...formData, referral_rate: e.target.value })} />
+              </div>
+            </div>
             <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-bold text-slate-800">Opening Balance <span className="text-xs font-normal text-slate-500">(for existing party with prior balance)</span></label>

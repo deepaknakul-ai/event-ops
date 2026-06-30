@@ -988,6 +988,45 @@ export const getProjectOutsourcing = (project) => {
   return round2(fromPOs + fromAllocs);
 };
 
+// ── Project net profit (for referral commission) ────────────────────────────
+// Direct costs = logistics (incl GST) + reimbursable expenses + dated project
+// expenses (excluding rejected/disapproved). Mirrors BusinessReport.jsx exactly.
+export const getProjectDirectCosts = (project, expenses = []) => {
+  let logistics = 0;
+  if (project?.logistics_costs) {
+    Object.values(project.logistics_costs).forEach((c) => {
+      logistics += (Number(c?.amount) || 0) * (1 + (Number(c?.gst) || 0) / 100);
+    });
+  }
+  const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + (Number(e?.amount) || 0), 0);
+  const projectExpenses = (expenses || [])
+    .filter((e) => e.project_id === project?.id && e.status !== 'Rejected' && e.status !== 'Disapproved')
+    .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  return round2(logistics + reimbursable + projectExpenses);
+};
+
+/** Net profit = revenue − direct costs − outsourcing (excludes manpower) — the
+ *  basis for the referral commission. */
+export const getProjectNetProfit = (project, expenses = []) => {
+  if (!project) return 0;
+  return round2(getProjectGrandTotal(project) - getProjectDirectCosts(project, expenses) - getProjectOutsourcing(project));
+};
+
+/** Sum of recorded payments for a project (cash received to date). */
+export const getProjectPaidToDate = (projectId, payments = []) =>
+  round2((payments || []).filter((p) => p.project_id === projectId).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0));
+
+/** Realized referral commission for a project: rate% × net profit × fraction paid. */
+export const getProjectCommission = (project, expenses = [], payments = [], ratePct = 10) => {
+  if (!project) return { netProfit: 0, paid: 0, grand: 0, paidFraction: 0, commission: 0 };
+  const netProfit = getProjectNetProfit(project, expenses);
+  const grand = getProjectGrandTotal(project);
+  const paid = getProjectPaidToDate(project.id, payments);
+  const paidFraction = grand > 0 ? Math.min(1, paid / grand) : 0;
+  const commission = round2(netProfit * (Number(ratePct) || 0) / 100 * paidFraction);
+  return { netProfit, paid, grand, paidFraction, commission };
+};
+
 // Service/maintenance due status for an inventory item. Uses an explicit
 // next_test_due if set, else last_service_date + service_interval_days.
 // Returns { status: 'overdue'|'due_soon'|'ok'|'none', dueDate, days }.
