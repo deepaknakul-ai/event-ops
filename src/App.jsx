@@ -3053,8 +3053,33 @@ const [payroll, setPayroll] = useState([]);
       return () => unsubEmployees();
     }
 
-    const unsubProjects = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'projects'), (snap) => setProjects(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubClients = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'clients'), (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // Owner-scoping: ONLY the manager role is isolated (manager-vs-manager). A
+    // manager loads only the clients they own + those clients' projects
+    // (denormalised client_owner_id) + projects they're assigned to. Admin,
+    // accountant, user and tech load everything (unchanged). user.uid === emp id,
+    // and the scoped client query is REQUIRED — a global query is denied by rules.
+    const projectsCol = collection(db, 'artifacts', appId, 'public', 'data', 'projects');
+    const clientsCol = collection(db, 'artifacts', appId, 'public', 'data', 'clients');
+    const scopeParties = role === 'manager';
+    const myEmpId = user.uid;
+
+    let unsubProjects;
+    let unsubClients;
+    if (scopeParties) {
+      unsubClients = onSnapshot(query(clientsCol, where('owner_id', '==', myEmpId)),
+        (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
+      // Two project listeners (owned clients' projects + projects I'm assigned to), merged by id.
+      let projOwn = [], projAssigned = [];
+      const mergeProjects = () => { const m = {}; [...projOwn, ...projAssigned].forEach(p => { m[p.id] = p; }); setProjects(Object.values(m)); };
+      const uProjOwn = onSnapshot(query(projectsCol, where('client_owner_id', '==', myEmpId)),
+        (snap) => { projOwn = snap.docs.map(d => ({ id: d.id, ...d.data() })); mergeProjects(); }, () => {});
+      const uProjAssigned = onSnapshot(query(projectsCol, where('assigned_employees', 'array-contains', myEmpId)),
+        (snap) => { projAssigned = snap.docs.map(d => ({ id: d.id, ...d.data() })); mergeProjects(); }, () => {});
+      unsubProjects = () => { uProjOwn(); uProjAssigned(); };
+    } else {
+      unsubProjects = onSnapshot(projectsCol, (snap) => setProjects(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+      unsubClients = onSnapshot(clientsCol, (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    }
     const unsubInventory = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), (snap) => {
       setInventory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });

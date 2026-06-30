@@ -61,6 +61,14 @@ service cloud.firestore {
       return hasRole(appId, 'admin');
     }
 
+    // Admin + Accountant get full (unscoped) visibility of clients/projects.
+    function isAccountant(appId) {
+      return hasRole(appId, 'accountant');
+    }
+    function seesAllParties(appId) {
+      return isAdmin(appId) || isAccountant(appId);
+    }
+
     // ── Default deny for anything outside /artifacts ─────────────────────────
     match /{document=**} {
       allow read, write: if false;
@@ -92,15 +100,18 @@ service cloud.firestore {
                   && collection != 'settings'
                   // chat_* are excluded here so the stricter chat rules below are
                   // authoritative (OR-semantics would otherwise expose private DMs).
+                  // clients is excluded so the owner-scoped client rules below are
+                  // authoritative (managers see only their own clients/vendors).
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
-                                      'employee_locations', 'location_history']);
+                                      'employee_locations', 'location_history',
+                                      'clients']);
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients']
       ) ? false
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
@@ -161,7 +172,7 @@ service cloud.firestore {
 
       // Deletes: finance collections admin-only; everything else admin/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -358,5 +369,30 @@ service cloud.firestore {
       allow update: if false;
       allow delete: if hasAnyRole(appId, ['admin', 'manager']);
     }
+
+    // ── Client / vendor ownership scoping ──────────────────────────────────────
+    // Excluded from the generic wildcard above so these owner-scoped rules are
+    // authoritative. Admin + Accountant see all; everyone else sees only clients
+    // they own (owner_id == their employee id = auth.uid). A manager may create/
+    // edit only clients they own and cannot reassign ownership; admin reassigns.
+    // Only the MANAGER role is isolated (manager-vs-manager): a manager reads only
+    // clients they own. Admin, accountant, user and tech keep full visibility
+    // (zero behaviour change for them).
+    match /artifacts/{appId}/public/data/clients/{cid} {
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && (!hasRole(appId, 'manager') || resource.data.get('owner_id', '') == userEmpId());
+      allow create: if isAdmin(appId)
+                    || (hasRole(appId, 'manager') && request.resource.data.get('owner_id', '') == userEmpId());
+      allow update: if isAdmin(appId)
+                    || (hasRole(appId, 'manager')
+                        && resource.data.get('owner_id', '') == userEmpId()
+                        && request.resource.data.get('owner_id', '') == userEmpId());
+      allow delete: if isAdmin(appId);
+    }
+    // NOTE: project READS are intentionally NOT hard-scoped here yet — that would
+    // also restrict field/warehouse techs to assigned projects and could break
+    // dispatch/challan flows. Projects are owner-scoped at the loader/UI level
+    // (App.jsx) for managers; harden the rule once a tech login can be tested.
   }
 }

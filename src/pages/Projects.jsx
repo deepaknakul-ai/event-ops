@@ -714,6 +714,8 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       party_company_name: selectedCompany?.name || '',
       party_company_gstin: selectedCompany?.gstin || '',
       party_company_address: selectedCompany?.address || '',
+      // Denormalised owner of the project's client — drives owner-scoped reads.
+      client_owner_id: selectedClient?.owner_id || '',
         updated_at: serverTimestamp()
     };
 

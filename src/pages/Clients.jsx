@@ -16,7 +16,7 @@ import { upsertPartyAccount } from '../utils/partyAccounts';
 import { generateClientManagementReportPDF } from '../utils/pdf/clientPdf';
 
 const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, currentEmpId, db, appId, logAction }) => {
-  const canSeeAllClients = role === 'admin' || role === 'accountant';
+  const canSeeAllClients = role !== 'manager'; // only managers are owner-scoped
   const empNameById = (id) => employees.find((e) => e.id === id)?.name || '';
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);

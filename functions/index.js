@@ -16,7 +16,7 @@
  */
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
-const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
@@ -1111,5 +1111,35 @@ exports.pruneLocationHistory = onSchedule(
       catch (e) { logger.warn(`pruneLocationHistory failed for ${appId}`, e); }
     }
     logger.info(`pruneLocationHistory removed ${total} old point(s) across ${appIds.length} app(s)`);
+  },
+);
+
+// ── Keep projects' denormalised client_owner_id in sync ─────────────────────
+// When a client's owner_id changes (incl. an admin assigning an owner to a
+// legacy client), stamp client_owner_id onto all of that client's projects so
+// owner-scoped project reads work. Also backfills on first assignment.
+exports.onClientWritten = onDocumentWritten(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 120, document: 'artifacts/{appId}/public/data/clients/{cid}' },
+  async (event) => {
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    if (!after) return; // client deleted — leave projects untouched
+    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
+    const newOwner = after.owner_id || '';
+    const oldOwner = before ? (before.owner_id || '') : ' none';
+    if (newOwner === oldOwner) return; // owner unchanged
+    const { appId, cid } = event.params;
+    const projSnap = await db.collection(`artifacts/${appId}/public/data/projects`).where('client_id', '==', cid).get();
+    if (projSnap.empty) return;
+    let batch = db.batch();
+    let pending = 0;
+    let stamped = 0;
+    for (const d of projSnap.docs) {
+      if ((d.data().client_owner_id || '') === newOwner) continue;
+      batch.update(d.ref, { client_owner_id: newOwner });
+      pending += 1; stamped += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`onClientWritten: client ${cid} owner '${oldOwner}'->'${newOwner}', stamped ${stamped} project(s)`);
   },
 );
