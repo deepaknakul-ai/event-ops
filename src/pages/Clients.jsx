@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { notify } from '../utils/toast';
+import { confirmDialog } from '../utils/dialog';
 import {
   Users, Plus, Search, Edit, Trash2, MapPin, Copy, Box,
   BarChart2, TrendingUp, TrendingDown, X, ArrowLeft, AlertTriangle,
@@ -212,6 +213,24 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
   })();
 
   const blankOpening = { amount: '', side: 'Dr', date: todayFyStart, remarks: '' };
+
+  // One-time migration: assign every un-owned (legacy) client/vendor to the admin
+  // running this. Their projects get tagged by the onClientWritten function.
+  const unownedClients = clients.filter((c) => !c.owner_id);
+  const handleClaimUnowned = async () => {
+    if (role !== 'admin') return notify('Admin only.', 'error');
+    if (!currentEmpId) return notify('Your admin account has no employee id to own clients.', 'error');
+    if (unownedClients.length === 0) return notify('No un-owned clients to assign.', 'info');
+    const ok = await confirmDialog(`Assign ${unownedClients.length} un-owned client(s)/vendor(s) to you (admin)?\n\nTheir projects are tagged automatically. You can reassign any to a manager later.`, { title: 'Claim un-owned clients', confirmLabel: 'Assign to me' });
+    if (!ok) return;
+    const ownerName = empNameById(currentEmpId) || 'Administrator';
+    let done = 0;
+    for (const c of unownedClients) {
+      try { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', c.id), { owner_id: currentEmpId, owner_name: ownerName }); done += 1; } catch { /* skip */ }
+    }
+    logAction('clients', 'backfill_owner', 'bulk', { count: done, owner: currentEmpId }, 'Assigned legacy clients to admin');
+    notify(`${done} client(s)/vendor(s) now owned by you.`, 'success');
+  };
 
   const openAdd = () => {
     setEditingId(null);
@@ -724,6 +743,9 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               <Search size={16} className="text-slate-400 mr-2" />
               <input placeholder="Search..." className="text-sm outline-none text-black" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             </div>
+          )}
+          {role === 'admin' && activeTab === 'list' && unownedClients.length > 0 && (
+            <button onClick={handleClaimUnowned} title="Assign all legacy (un-owned) clients/vendors to admin" className="flex items-center justify-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-700 hover:bg-amber-100 whitespace-nowrap text-sm font-medium"><Plus size={16} /> Claim {unownedClients.length} un-owned</button>
           )}
           {role !== 'tech' && role !== 'auditor' && activeTab === 'list' && (
             <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap flex-1 md:flex-none"><Plus size={18} /> Add Client/Vendor</button>
