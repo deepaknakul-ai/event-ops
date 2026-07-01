@@ -123,7 +123,12 @@ service cloud.firestore {
                   // denied at the rule level (managers keep read; cross-manager money is
                   // hidden in the UI).
                   && (seesAllParties(appId) || hasRole(appId, 'manager')
-                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices']));
+                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices']))
+                  // Leads / CRM pipeline: Owner/Accountant see all; a Manager sees ONLY
+                  // leads they created (manager-vs-manager pipeline isolation); tech/user
+                  // denied entirely.
+                  && (seesAllParties(appId) || collection != 'leads'
+                      || (hasRole(appId, 'manager') && resource.data.get('created_by', '') == userEmpId()));
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

@@ -55,6 +55,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('tax_invoices', 'ti1')), { client_id: 'cA', final_amount: 5000 });
       await setDoc(doc(db, path('vendor_payments', 'vp1')), { vendor_id: 'vX', amount: 300 });
       await setDoc(doc(db, path('purchase_invoices', 'pi1')), { vendor_id: 'vX', amount: 400 });
+      await setDoc(doc(db, path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 90000 });
+      await setDoc(doc(db, path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 50000 });
     });
   });
 
@@ -152,6 +154,27 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('user CANNOT list tax_invoices', async () => {
       await assertFails(getDocs(collection(asUser('u1'), path('tax_invoices'))));
+    });
+  });
+
+  describe('leads — Owner/Accountant all, Manager own only (Slice C-4)', () => {
+    test('admin reads any lead', async () => {
+      await assertSucceeds(getDoc(doc(asUser('admin1'), path('leads', 'ld_mgrB'))));
+    });
+    test('manager reads OWN lead', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('leads', 'ld_mgrA'))));
+    });
+    test("manager CANNOT read another manager's lead", async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('leads', 'ld_mgrB'))));
+    });
+    test('tech CANNOT read leads', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('leads', 'ld_mgrA'))));
+    });
+    test('manager CAN list own leads (scoped query)', async () => {
+      await assertSucceeds(getDocs(query(collection(asUser('mgrA'), path('leads')), where('created_by', '==', 'mgrA'))));
+    });
+    test('manager CANNOT list all leads (global denied)', async () => {
+      await assertFails(getDocs(collection(asUser('mgrA'), path('leads'))));
     });
   });
 

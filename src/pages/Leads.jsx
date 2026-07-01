@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, where } from 'firebase/firestore';
 import { Target, Plus, Phone, Mail, Calendar, TrendingUp, Edit, Trash2, ArrowRightCircle, AlertTriangle } from 'lucide-react';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { notify } from '../utils/toast';
@@ -27,11 +27,15 @@ const Leads = ({ role = 'manager', db, appId, currentEmpId, logAction }) => {
 
   useEffect(() => {
     if (!db) return undefined;
-    const unsub = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leads'), (snap) => {
+    // A manager sees ONLY their own leads (rule-enforced by created_by); admin +
+    // accountant see all. The scoped query is required once the rule restricts reads.
+    const col = collection(db, 'artifacts', appId, 'public', 'data', 'leads');
+    const q = role === 'manager' ? query(col, where('created_by', '==', currentEmpId)) : col;
+    const unsub = onSnapshot(q, (snap) => {
       setLeads(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
+    }, () => {});
     return unsub;
-  }, [db, appId]);
+  }, [db, appId, role, currentEmpId]);
 
   const openAdd = () => { setEditingId(null); setForm(blankLead()); setIsOpen(true); };
   const openEdit = (l) => { setEditingId(l.id); setForm({ ...blankLead(), ...l }); setIsOpen(true); };
