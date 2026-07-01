@@ -651,10 +651,12 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
           <button onClick={() => setViewMode('payments')} className={`px-2 sm:px-3 py-1 text-xs sm:text-sm rounded ${viewMode === 'payments' ? 'bg-emerald-100 text-emerald-700 font-medium' : 'text-slate-600'}`}>
             <span className="flex items-center gap-1"><IndianRupee size={13} /> Payments</span>
           </button>
-          {(role === 'admin' || role === 'manager') && (
+          {can(role, 'expenses', 'approve') && (
             <button onClick={() => setViewMode('approvals')} className={`px-2 sm:px-3 py-1 text-xs sm:text-sm rounded ${viewMode === 'approvals' ? 'bg-indigo-100 text-indigo-700 font-medium' : 'text-slate-600'}`}>Approvals</button>
           )}
-          {(role === 'admin' || role === 'manager') && (
+          {/* Tracker / Employee Dashboard exposes company-wide payouts/salary/advances/
+              net balances — payroll data, so it is Owner + Accountant only. */}
+          {can(role, 'expenses', 'view_payments') && (
             <button onClick={() => setViewMode('tracker')} className={`px-2 sm:px-3 py-1 text-xs sm:text-sm rounded ${viewMode === 'tracker' || viewMode === 'empDash' ? 'bg-purple-100 text-purple-700 font-medium' : 'text-slate-600'}`}>
               <span className="flex items-center gap-1"><Users size={13} /> Tracker</span>
             </button>
@@ -1152,7 +1154,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
       )}
 
       {/* ====== ALL TRACKER VIEW ====== */}
-      {viewMode === 'tracker' && (
+      {viewMode === 'tracker' && can(role, 'expenses', 'view_payments') && (
         <div className="space-y-4">
           {/* Summary bar */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1280,7 +1282,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
       )}
 
       {/* ====== EMPLOYEE DASHBOARD VIEW ====== */}
-      {viewMode === 'empDash' && empDashEmployee && (
+      {viewMode === 'empDash' && empDashEmployee && can(role, 'expenses', 'view_payments') && (
         <div className="space-y-5">
           <div className="flex items-center gap-3">
             <button onClick={() => setViewMode('tracker')} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition">

@@ -596,7 +596,7 @@ function inventorySearch(ctx, itemName) {
     rows: rows.slice(0, 30).map((i) => ({
       id: i.id,
       line1: i.name || '—',
-      line2: `Qty ${i.qty || 0} · ${fmtINR(i.rate_per_day || 0)}/day`,
+      line2: `Qty ${i.qty || 0}${ctx.canViewInventoryRates ? ` · ${fmtINR(i.rate_per_day || 0)}/day` : ''}`,
       line3: i.category || '',
     })),
   };
@@ -952,7 +952,7 @@ function inventoryByCategory(ctx, category) {
     rows: rows.slice(0, 200).map((i) => ({
       id: i.id,
       line1: i.name || '—',
-      line2: `Qty ${i.qty || 0} · ${fmtINR(i.rate_per_day || 0)}/day`,
+      line2: `Qty ${i.qty || 0}${ctx.canViewInventoryRates ? ` · ${fmtINR(i.rate_per_day || 0)}/day` : ''}`,
       line3: i.category || '',
     })),
   };

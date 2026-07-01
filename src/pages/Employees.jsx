@@ -280,6 +280,9 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
     setFormData({ ...formData, [field]: newVal });
   };
 
+  // Salary / hourly rate / advances / ledger are financial — Owner + Accountant
+  // only (managers manage staff but do NOT see pay per the role model).
+  const canViewPay = can(role, 'employees', 'view_pay');
   const empAdvances = selectedEmp ? advances.filter(a => String(a.employee_id) === String(selectedEmp.id)) : [];
   const promotionHistory = promotionEmployee
     ? [...normalizeHourlyRateHistory(promotionEmployee)].sort((a, b) => new Date(b.effectiveFrom) - new Date(a.effectiveFrom))
@@ -477,8 +480,8 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
           <div className="mt-4 space-y-2 text-sm text-slate-600">
             <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Role:</span><span className={`text-xs font-bold px-2 py-0.5 rounded-full text-white ${ROLE_COLOR[emp.role] || 'bg-slate-400'}`}>{ROLE_LABELS[emp.role] || emp.role}</span></div>
             <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Mobile:</span><span>{emp.mobile1 || '-'}</span></div>
-            <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Hourly Rate:</span><span>{Number.isFinite(Number(emp.hourlyRate)) ? `${formatCurrency(emp.hourlyRate)}/hr` : '-'}</span></div>
-            <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Rate History:</span><span>{Array.isArray(emp.hourlyRateHistory) ? emp.hourlyRateHistory.length : 0} entries</span></div>
+            {canViewPay && <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Hourly Rate:</span><span>{Number.isFinite(Number(emp.hourlyRate)) ? `${formatCurrency(emp.hourlyRate)}/hr` : '-'}</span></div>}
+            {canViewPay && <div className="flex justify-between border-b pb-1"><span className="text-slate-400">Rate History:</span><span>{Array.isArray(emp.hourlyRateHistory) ? emp.hourlyRateHistory.length : 0} entries</span></div>}
             <div className="flex gap-2 pt-1">
               {emp.id_proof_url && <span title="ID Proof Attached" className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded border border-blue-100">ID</span>}
               {emp.address_proof_url && <span title="Addr Proof Attached" className="text-xs bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded border border-purple-100">Addr</span>}
@@ -501,14 +504,14 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
               <button onClick={() => handleDelete(emp)} className="flex-1 rounded border border-red-300 bg-red-50 text-red-600 py-1 text-xs font-medium hover:bg-red-100">Delete</button>
             )}
           </div>
-          {(role === 'admin' || role === 'manager') && (
+          {canViewPay && (
              <div className="grid grid-cols-3 gap-2 mt-2">
                <button onClick={() => { setSelectedEmp(emp); setIsAdvanceModalOpen(true); }} className="flex-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-100 py-1 text-xs font-medium hover:bg-emerald-100 flex items-center justify-center gap-1"><Wallet size={12} /> Advance</button>
                <button onClick={() => { setSelectedEmp(emp); setIsHistoryOpen(true); }} className="flex-1 rounded bg-slate-50 text-slate-700 border border-slate-100 py-1 text-xs font-medium hover:bg-slate-100 flex items-center justify-center gap-1"><History size={12} /> View</button>
                <button onClick={() => openPromotionModal(emp)} className="flex-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-100 py-1 text-xs font-medium hover:bg-indigo-100 flex items-center justify-center gap-1"><TrendingUp size={12} /> Promote</button>
              </div>
           )}
-          {(role === 'admin' || role === 'manager') && (
+          {canViewPay && (
              <div className="mt-2">
                <div className="grid grid-cols-2 gap-2">
                  <button onClick={() => handleStatementLink(emp)} className="w-full rounded bg-violet-50 text-violet-700 border border-violet-100 py-1 text-xs font-medium hover:bg-violet-100 flex items-center justify-center gap-1"><Link2 size={12} /> Ledger Share</button>
@@ -565,7 +568,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
                 <div><label className="text-xs font-bold text-slate-700">Father's Name</label><input className="w-full rounded border border-slate-300 p-2 text-black" value={formData.fatherName} onChange={e => setFormData({...formData, fatherName: e.target.value})} /></div>
                 <div><label className="text-xs font-bold text-slate-700">Emergency Contact</label><input className="w-full rounded border border-slate-300 p-2 text-black" value={formData.emergencyContact} onChange={e => setFormData({...formData, emergencyContact: e.target.value})} /></div>
                 <div><label className="text-xs font-bold text-slate-700">Emergency Phone</label><input className="w-full rounded border border-slate-300 p-2 text-black" value={formData.emergencyPhone} onChange={e => setFormData({...formData, emergencyPhone: e.target.value})} /></div>
-                <div>
+                {canViewPay && <div>
                   <label className="text-xs font-bold text-slate-700">Hourly Rate (₹)</label>
                   <input
                     type="number"
@@ -575,7 +578,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
                     disabled={!!editingId}
                   />
                   {editingId && <p className="text-[11px] text-slate-500 mt-1">Use Promote action to revise hourly rate with effective period.</p>}
-                </div>
+                </div>}
                  <div className="md:col-span-2"><label className="text-xs font-bold text-slate-700">Monthly Target Hours</label><input type="number" className="w-full rounded border border-slate-300 p-2 text-black" value={formData.monthlyTargetHours} onChange={e => setFormData({...formData, monthlyTargetHours: e.target.value})} /></div>
              </div>
           </div>

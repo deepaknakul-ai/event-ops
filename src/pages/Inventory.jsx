@@ -374,7 +374,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
               <th className="p-4 font-medium">Asset / Model</th>
               <th className="p-4 font-medium hidden md:table-cell">Brand</th>
               <th className="p-4 font-medium hidden md:table-cell">Category</th>
-              {role !== 'tech' && <th className="p-4 font-medium text-right">Rate/Day</th>}
+              {can(role, 'inventory', 'view_rates') && <th className="p-4 font-medium text-right">Rate/Day</th>}
               <th className="p-4 font-medium text-center">Qty</th>
               <th className="p-4 font-medium hidden md:table-cell">Loc</th>
               <th className="p-4 font-medium text-center">Avail.</th>
@@ -401,7 +401,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                 </td>
                 <td className="p-4 text-slate-500 hidden md:table-cell">{item.brand || '-'}</td>
                 <td className="p-4 text-slate-500 hidden md:table-cell">{item.category}</td>
-                {role !== 'tech' && <td className="p-4 text-right text-slate-800 font-mono">{formatCurrency(item.rate_per_day || 0)}</td>}
+                {can(role, 'inventory', 'view_rates') && <td className="p-4 text-right text-slate-800 font-mono">{formatCurrency(item.rate_per_day || 0)}</td>}
                 <td className="p-4 text-center text-slate-800">
                     {(() => {
                       const total = parseInt(item.total) || 0;
@@ -464,7 +464,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                     { id: 'general', label: 'General', icon: Box },
                     { id: 'composition', label: 'Composition', icon: Layers },
                     { id: 'suppliers', label: 'Suppliers', icon: Users },
-                    (role !== 'tech' ? { id: 'commercial', label: 'Commercial', icon: DollarSign } : null),
+                    (can(role, 'inventory', 'view_rates') ? { id: 'commercial', label: 'Commercial', icon: DollarSign } : null),
                     { id: 'logistics', label: 'Logistics', icon: Truck },
                     { id: 'specs', label: 'Tech Specs', icon: Settings },
                     { id: 'maintenance', label: 'Maintenance', icon: Hammer },
@@ -774,8 +774,8 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                                         </div>
                                         <div className="text-xs text-slate-500">
                                             {sup.brand && <span>Brand: {sup.brand} | </span>}
-                                            {sup.spec && <span>Spec: {sup.spec} | </span>}
-                                            Rate: {sup.rate}
+                                            {sup.spec && <span>Spec: {sup.spec}</span>}
+                                            {can(role, 'inventory', 'view_rates') && <span> | Rate: {sup.rate}</span>}
                                         </div>
                                     </div>
                                     <button onClick={() => removeSupplier(idx)} className="text-red-500 hover:text-red-700"><Trash2 size={14}/></button>

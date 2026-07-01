@@ -299,7 +299,8 @@ export default function AppAssistant({
     payments, payouts, vendorPayments,
     taxInvoices, purchaseInvoices,
     inventory, journalEntries, hrLeaves,
-  }), [projects, clients, employees, expenses, payments, payouts, vendorPayments, taxInvoices, purchaseInvoices, inventory, journalEntries, hrLeaves]);
+    canViewInventoryRates: can(role, 'inventory', 'view_rates'),
+  }), [projects, clients, employees, expenses, payments, payouts, vendorPayments, taxInvoices, purchaseInvoices, inventory, journalEntries, hrLeaves, role]);
 
   useEffect(() => {
     if (scrollerRef.current) scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
