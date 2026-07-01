@@ -33,3 +33,9 @@ firestore-backup-2026-05-01/
 
 # Claude Code session temp files
 tmpclaude-*
+
+# Firebase emulator logs
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
+database-debug.log
