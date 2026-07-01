@@ -52,6 +52,9 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('payouts', 'po_u1')), { employee_id: 'u1', amount: 500 });
       await setDoc(doc(db, path('payouts', 'po_mgrA')), { employee_id: 'mgrA', amount: 700 });
       await setDoc(doc(db, path('advances', 'adv_u1')), { employee_id: 'u1', amount: 200 });
+      await setDoc(doc(db, path('tax_invoices', 'ti1')), { client_id: 'cA', final_amount: 5000 });
+      await setDoc(doc(db, path('vendor_payments', 'vp1')), { vendor_id: 'vX', amount: 300 });
+      await setDoc(doc(db, path('purchase_invoices', 'pi1')), { vendor_id: 'vX', amount: 400 });
     });
   });
 
@@ -134,14 +137,32 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
+  describe('invoices + vendor payments — Owner/Accountant/Manager only (Slice C-3)', () => {
+    test('manager reads a tax invoice', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('tax_invoices', 'ti1'))));
+    });
+    test('accountant reads a purchase invoice', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('purchase_invoices', 'pi1'))));
+    });
+    test('tech CANNOT read a tax invoice', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('tax_invoices', 'ti1'))));
+    });
+    test('user CANNOT read a vendor payment', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('vendor_payments', 'vp1'))));
+    });
+    test('user CANNOT list tax_invoices', async () => {
+      await assertFails(getDocs(collection(asUser('u1'), path('tax_invoices'))));
+    });
+  });
+
   // Documents the CURRENT baseline gaps that later Slice-C steps will close.
   // If one starts FAILING, the rule was tightened (flip it to assertFails).
   describe('baseline gaps — still open at the rule layer (later Slice-C steps)', () => {
     test('GAP: tech can still read any project', async () => {
       await assertSucceeds(getDoc(doc(asUser('tech1'), path('projects', 'projA'))));
     });
-    test('GAP: tech can still read payments (party-linked finance, needs owner denorm)', async () => {
-      await assertSucceeds(getDoc(doc(asUser('tech1'), path('payments', 'pay1'))));
+    test('GAP: payments still global (user commission reads it — needs owner denorm)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('payments', 'pay1'))));
     });
   });
 });

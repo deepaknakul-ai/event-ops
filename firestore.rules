@@ -117,7 +117,13 @@ service cloud.firestore {
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
                   && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
-                      || resource.data.get('employee_id', '') == userEmpId());
+                      || resource.data.get('employee_id', '') == userEmpId())
+                  // Invoices + vendor payments: Owner/Accountant/Manager only. Tech and
+                  // Coordinator have no stake in any invoice/vendor-payment, so they are
+                  // denied at the rule level (managers keep read; cross-manager money is
+                  // hidden in the UI).
+                  && (seesAllParties(appId) || hasRole(appId, 'manager')
+                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices']));
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

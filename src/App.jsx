@@ -3092,12 +3092,14 @@ const [payroll, setPayroll] = useState([]);
       financeViewer ? finCol('payouts') : query(finCol('payouts'), where('employee_id', '==', myEmpId)),
       (snap) => setPayouts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop);
     //version 1.3.0 finance implementation enabled code
-    // payments / vendor_payments / purchase_invoices / tax_invoices remain global
-    // for now (owner-denormalisation scoping is a later Slice-C step).
+    // Invoices + vendor payments: Owner/Accountant/Manager only (tech/user have no
+    // stake). payments stays global for now — the 'user' commission view reads it
+    // (owner-denormalisation scoping is a dedicated later Slice-C step).
+    const partyFinanceViewer = financeViewer || role === 'manager';
     const unsubPayments = onSnapshot(finCol('payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubVendorPayments = onSnapshot(finCol('vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubPurchaseInvoices = onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubTaxInvoices = onSnapshot(finCol('tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubVendorPayments = partyFinanceViewer ? onSnapshot(finCol('vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubPurchaseInvoices = partyFinanceViewer ? onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubTaxInvoices = partyFinanceViewer ? onSnapshot(finCol('tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     // Company-wide accounting ledgers are Owner/Accountant-only at the rule level;
     // only subscribe for those roles (others would get permission-denied).
     const unsubChartOfAccounts = financeViewer ? onSnapshot(finCol('chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
