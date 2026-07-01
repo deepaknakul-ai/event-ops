@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
-import { getDocs, query, collection, where, getDoc, doc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
 import { formatCurrency, getProjectGrandTotal, getEffectivePOCost } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
@@ -34,72 +33,21 @@ const PublicLedger = () => {
       setLoading(true);
       setError('');
       try {
-        const clientSnap = await getDocs(
-          query(
-            collection(db, 'artifacts', appId, 'public', 'data', 'clients'),
-            where('ledger_link_token', '==', token)
-          )
-        );
-
-        if (clientSnap.empty) {
-          if (isMounted) {
-            setClient(null);
-            setError('Invalid or expired ledger link.');
-            setLoading(false);
-          }
-          return;
-        }
-
-        const clientDoc = clientSnap.docs[0];
-        const clientData = { id: clientDoc.id, ...clientDoc.data() };
-
-        // Validate token state BEFORE fetching any other data.
-        if (clientData.ledger_link_enabled === false) {
-          if (isMounted) {
-            setClient(null);
-            setError('This ledger link has been disabled.');
-            setLoading(false);
-          }
-          return;
-        }
-
-        if (clientData.ledger_link_expires_at) {
-          const expiresAt = new Date(clientData.ledger_link_expires_at);
-          if (Number.isNaN(expiresAt.getTime()) || expiresAt < new Date()) {
-            if (isMounted) {
-              setClient(null);
-              setError('This ledger link has expired.');
-              setLoading(false);
-            }
-            return;
-          }
-        }
-
-        // Fetch only data belonging to this specific client — never full collections.
-        // This prevents other clients' data from appearing in the network payload.
-        const cid = clientData.id;
-        const col = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
-        const [projectsSnap, paymentsSnap, vendorPaymentsSnap, orgSnap, purchaseInvoicesSnap, taxInvoicesSnap] = await Promise.all([
-          getDocs(query(col('projects'),          where('client_id',  '==', cid))),
-          getDocs(query(col('payments'),          where('client_id',  '==', cid))),
-          getDocs(query(col('vendor_payments'),   where('vendor_id',  '==', cid))),
-          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization')),
-          getDocs(query(col('purchase_invoices'), where('vendor_id',  '==', cid))),
-          getDocs(query(col('tax_invoices'),      where('client_id',  '==', cid)))
-        ]);
-
+        // Token validation + scoped data all happen server-side (Admin SDK).
+        const fn = httpsCallable(getFunctions(), 'getLedgerData');
+        const res = await fn({ appId, token });
+        const data = res.data || {};
         if (!isMounted) return;
-
-        setClient(clientData);
-        setProjects(projectsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setPayments(paymentsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setVendorPayments(vendorPaymentsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
-        setPurchaseInvoices(purchaseInvoicesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setTaxInvoices(taxInvoicesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setClient(data.client || null);
+        setProjects(data.projects || []);
+        setPayments(data.payments || []);
+        setVendorPayments(data.vendorPayments || []);
+        setOrgSettings(data.org || null);
+        setPurchaseInvoices(data.purchaseInvoices || []);
+        setTaxInvoices(data.taxInvoices || []);
       } catch (err) {
         console.error('Public ledger load failed:', err);
-        if (isMounted) setError('Failed to load ledger. Please try again later.');
+        if (isMounted) { setClient(null); setError(err?.message || 'Failed to load ledger. Please try again later.'); }
       } finally {
         if (isMounted) setLoading(false);
       }

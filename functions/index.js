@@ -857,6 +857,153 @@ exports.getPortalData = onCall(
   }
 );
 
+// ── Public token pages: server-side, token-validated data access ───────────
+// These mirror getPortalData: the public pages (client ledger, employee
+// statement, reimbursable list, quote approval) hold NO Firestore access. Each
+// function validates a per-record token (+ enabled/expiry) via the Admin SDK and
+// returns ONLY that record's scoped data, so a logged-in staff member can no
+// longer abuse the browser SDK to read these collections, and logged-out clients
+// can use the links. Token/secret fields are stripped from parent docs.
+function stripSecrets(obj) {
+  const {
+    ledger_link_token, statement_link_token, reimbursable_token, quote_approval_token,
+    portal_token, password, password_hash, passwordHash, pin, ...safe
+  } = obj || {};
+  return safe;
+}
+
+// Client / vendor ledger — keyed on ledger_link_token.
+exports.getLedgerData = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token } = req.data || {};
+    if (!appId || !token) throw new HttpsError('invalid-argument', 'appId and token required');
+    const q = await db.collection(`artifacts/${appId}/public/data/clients`).where('ledger_link_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired ledger link.');
+    const cDoc = q.docs[0]; const client = cDoc.data(); const cid = cDoc.id;
+    if (client.ledger_link_enabled === false) throw new HttpsError('permission-denied', 'This ledger link has been disabled.');
+    if (client.ledger_link_expires_at && new Date(client.ledger_link_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This ledger link has expired.');
+    const col = (name) => db.collection(`artifacts/${appId}/public/data/${name}`);
+    const [projSnap, paySnap, vpaySnap, orgSnap, piSnap, tiSnap] = await Promise.all([
+      col('projects').where('client_id', '==', cid).get(),
+      col('payments').where('client_id', '==', cid).get(),
+      col('vendor_payments').where('vendor_id', '==', cid).get(),
+      db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
+      col('purchase_invoices').where('vendor_id', '==', cid).get(),
+      col('tax_invoices').where('client_id', '==', cid).get(),
+    ]);
+    const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
+    return {
+      client: { id: cid, ...stripSecrets(client) },
+      projects: mapDocs(projSnap),
+      payments: mapDocs(paySnap),
+      vendorPayments: mapDocs(vpaySnap),
+      purchaseInvoices: mapDocs(piSnap),
+      taxInvoices: mapDocs(tiSnap),
+      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+    };
+  }
+);
+
+// Employee statement — keyed on statement_link_token.
+exports.getEmployeeStatement = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token } = req.data || {};
+    if (!appId || !token) throw new HttpsError('invalid-argument', 'appId and token required');
+    const q = await db.collection(`artifacts/${appId}/public/data/employees`).where('statement_link_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired statement link.');
+    const eDoc = q.docs[0]; const emp = eDoc.data(); const eid = eDoc.id;
+    if (emp.statement_link_enabled === false) throw new HttpsError('permission-denied', 'This statement link has been disabled.');
+    if (emp.statement_link_expires_at && new Date(emp.statement_link_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This statement link has expired.');
+    const col = (name) => db.collection(`artifacts/${appId}/public/data/${name}`);
+    const [payoutsSnap, advancesSnap, orgSnap] = await Promise.all([
+      col('payouts').where('employee_id', '==', eid).get(),
+      col('advances').where('employee_id', '==', eid).get(),
+      db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
+    ]);
+    const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
+    return {
+      employee: { id: eid, ...stripSecrets(emp) },
+      payouts: mapDocs(payoutsSnap),
+      advances: mapDocs(advancesSnap),
+      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+    };
+  }
+);
+
+// Client reimbursable-expense list — keyed on reimbursable_token. Returns a
+// CURATED project (only the reimbursable list + display fields; internal
+// costs/margins/vendor allocations are never sent).
+exports.getReimbursableData = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token } = req.data || {};
+    if (!appId || !token) throw new HttpsError('invalid-argument', 'appId and token required');
+    const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('reimbursable_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired link.');
+    const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.reimbursable_token_expires_at && new Date(p.reimbursable_token_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This link has expired. Please request a new link.');
+    let client = null;
+    if (p.client_id) {
+      const cSnap = await db.doc(`artifacts/${appId}/public/data/clients/${p.client_id}`).get().catch(() => null);
+      if (cSnap && cSnap.exists) { const c = cSnap.data(); client = { id: cSnap.id, name: c.name || '', gstin: c.gstin || '', address: c.address || '' }; }
+    }
+    const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
+    return {
+      project: {
+        id: pDoc.id,
+        project_name: p.project_name || '',
+        start_date: p.start_date || '',
+        end_date: p.end_date || '',
+        venue: p.venue || '',
+        client_id: p.client_id || '',
+        reimbursable_expenses: p.reimbursable_expenses || [],
+      },
+      client,
+      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+    };
+  }
+);
+
+// Quote approval — read (display the quotation) + write (approve/reject).
+exports.getQuoteApprovalData = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token } = req.data || {};
+    if (!appId || !token) throw new HttpsError('invalid-argument', 'appId and token required');
+    const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('quote_approval_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired quote approval link.');
+    const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
+    // Drop internal cost fields — the client approves the QUOTE (their price), not our costs.
+    const { vendor_allocations, purchase_orders, vendor_pos, margin, expenses, ...quoteSafe } = p;
+    const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
+    return {
+      project: { id: pDoc.id, ...stripSecrets(quoteSafe) },
+      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+    };
+  }
+);
+
+exports.submitQuoteApproval = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId, token, decision } = req.data || {};
+    if (!appId || !token || !['approved', 'rejected'].includes(decision)) throw new HttpsError('invalid-argument', 'appId, token and a valid decision are required');
+    const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('quote_approval_token', '==', token).limit(1).get();
+    if (q.empty) throw new HttpsError('not-found', 'Invalid or expired quote approval link.');
+    const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
+    const now = new Date().toISOString();
+    const update = decision === 'approved'
+      ? { status: 'Confirmed', quote_status: 'approved', quote_approved_at: now }
+      : { quote_status: 'rejected', quote_rejected_at: now };
+    await pDoc.ref.update(update);
+    return { ok: true, decision };
+  }
+);
+
 // ── Payments: Razorpay payment links + webhook auto-reconcile ───────────────
 async function readPaymentConfig(appId) {
   const snap = await db.doc(`artifacts/${appId}/public/data/settings/payments`).get();

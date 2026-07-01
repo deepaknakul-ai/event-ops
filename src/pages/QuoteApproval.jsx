@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { getDocs, query, collection, where, updateDoc, doc, getDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
 import { formatCurrency, getProjectGrandTotal } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
@@ -19,41 +18,21 @@ const QuoteApproval = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [projSnap, orgSnap] = await Promise.all([
-          getDocs(
-            query(
-              collection(db, 'artifacts', appId, 'public', 'data', 'projects'),
-              where('quote_approval_token', '==', token)
-            )
-          ),
-          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
-        ]);
-
-        if (projSnap.empty) {
-          setError('Invalid or expired quote approval link. Please contact us for a new link.');
-          setLoading(false);
-          return;
-        }
-
-        const projData = { id: projSnap.docs[0].id, ...projSnap.docs[0].data() };
-
-        // Check token expiration
-        if (projData.quote_approval_expires_at && new Date(projData.quote_approval_expires_at) < new Date()) {
-          setError('This quote approval link has expired. Please contact us for a new link.');
-          setLoading(false);
-          return;
-        }
-
+        // Token validation happens server-side; internal cost fields are stripped.
+        const fn = httpsCallable(getFunctions(), 'getQuoteApprovalData');
+        const res = await fn({ appId, token });
+        const data = res.data || {};
+        const projData = data.project || null;
         setProject(projData);
-        setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
+        setOrgSettings(data.org || null);
 
         // Already responded
-        if (projData.quote_status === 'approved' || projData.quote_status === 'rejected') {
+        if (projData && (projData.quote_status === 'approved' || projData.quote_status === 'rejected')) {
           setActionStatus(projData.quote_status);
         }
       } catch (err) {
         console.error(err);
-        setError('Failed to load quote details. Please try again later.');
+        setError(err?.message || 'Failed to load quote details. Please try again later.');
       }
       setLoading(false);
     };
@@ -63,11 +42,8 @@ const QuoteApproval = () => {
   const handleApprove = async () => {
     setProcessing(true);
     try {
-      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', project.id), {
-        status: 'Confirmed',
-        quote_status: 'approved',
-        quote_approved_at: new Date().toISOString(),
-      });
+      const fn = httpsCallable(getFunctions(), 'submitQuoteApproval');
+      await fn({ appId, token, decision: 'approved' });
       setActionStatus('approved');
     } catch (err) {
       alert('Could not process approval. Please try again or contact us directly.');
@@ -78,10 +54,8 @@ const QuoteApproval = () => {
   const handleReject = async () => {
     setProcessing(true);
     try {
-      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', project.id), {
-        quote_status: 'rejected',
-        quote_rejected_at: new Date().toISOString(),
-      });
+      const fn = httpsCallable(getFunctions(), 'submitQuoteApproval');
+      await fn({ appId, token, decision: 'rejected' });
       setActionStatus('rejected');
     } catch (err) {
       alert('Could not process your response. Please try again or contact us directly.');

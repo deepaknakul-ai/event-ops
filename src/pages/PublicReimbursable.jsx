@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { getDocs, query, collection, where, getDoc, doc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
 import { formatCurrency } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
@@ -24,48 +23,19 @@ const PublicReimbursable = () => {
       setLoading(true);
       setError('');
       try {
-        // Find project by reimbursable_token
-        const projSnap = await getDocs(
-          query(
-            collection(db, 'artifacts', appId, 'public', 'data', 'projects'),
-            where('reimbursable_token', '==', token)
-          )
-        );
-        if (projSnap.empty) {
-          if (isMounted) { setError('Invalid or expired link.'); setLoading(false); }
-          return;
-        }
-        const projDoc = projSnap.docs[0];
-        const projData = { id: projDoc.id, ...projDoc.data() };
-
-        // Check expiry
-        if (projData.reimbursable_token_expires_at) {
-          const exp = new Date(projData.reimbursable_token_expires_at);
-          if (exp < new Date()) {
-            if (isMounted) { setError('This link has expired. Please request a new link.'); setLoading(false); }
-            return;
-          }
-        }
-
-        // Fetch client and org settings
-        const [orgSnap] = await Promise.all([
-          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
-        ]);
-        let clientData = null;
-        if (projData.client_id) {
-          const clientSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'clients', projData.client_id));
-          if (clientSnap.exists()) clientData = { id: clientSnap.id, ...clientSnap.data() };
-        }
-
+        // Token validation + scoped (curated) data all happen server-side.
+        const fn = httpsCallable(getFunctions(), 'getReimbursableData');
+        const res = await fn({ appId, token });
+        const data = res.data || {};
         if (isMounted) {
-          setProject(projData);
-          setClient(clientData);
-          setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
+          setProject(data.project || null);
+          setClient(data.client || null);
+          setOrgSettings(data.org || null);
           setLoading(false);
         }
       } catch (err) {
         console.error(err);
-        if (isMounted) { setError('Failed to load data.'); setLoading(false); }
+        if (isMounted) { setError(err?.message || 'Failed to load data.'); setLoading(false); }
       }
     };
     if (token) fetchData();

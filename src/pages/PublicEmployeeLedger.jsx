@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
-import { getDocs, query, collection, where, getDoc, doc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
 import { formatCurrency } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
@@ -26,65 +25,18 @@ const PublicEmployeeLedger = () => {
       setLoading(true);
       setError('');
       try {
-        // Find employee by token
-        const empSnap = await getDocs(
-          query(
-            collection(db, 'artifacts', appId, 'public', 'data', 'employees'),
-            where('statement_link_token', '==', token)
-          )
-        );
-
-        if (empSnap.empty) {
-          if (isMounted) {
-            setEmployee(null);
-            setError('Invalid or expired statement link.');
-            setLoading(false);
-          }
-          return;
-        }
-
-        const empDoc = empSnap.docs[0];
-        const empData = { id: empDoc.id, ...empDoc.data() };
-
-        if (empData.statement_link_enabled === false) {
-          if (isMounted) {
-            setEmployee(null);
-            setError('This statement link has been disabled.');
-            setLoading(false);
-          }
-          return;
-        }
-
-        if (empData.statement_link_expires_at) {
-          const expiresAt = new Date(empData.statement_link_expires_at);
-          if (Number.isNaN(expiresAt.getTime()) || expiresAt < new Date()) {
-            if (isMounted) {
-              setEmployee(null);
-              setError('This statement link has expired.');
-              setLoading(false);
-            }
-            return;
-          }
-        }
-
-        // Fetch payouts, advances, and org settings — filtered to this employee only.
-        const eid = empData.id;
-        const col = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
-        const [payoutsSnap, advancesSnap, orgSnap] = await Promise.all([
-          getDocs(query(col('payouts'),   where('employee_id', '==', eid))),
-          getDocs(query(col('advances'),  where('employee_id', '==', eid))),
-          getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
-        ]);
-
+        // Token validation + scoped data all happen server-side (Admin SDK).
+        const fn = httpsCallable(getFunctions(), 'getEmployeeStatement');
+        const res = await fn({ appId, token });
+        const data = res.data || {};
         if (!isMounted) return;
-
-        setEmployee(empData);
-        setPayouts(payoutsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setAdvances(advancesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        setOrgSettings(orgSnap.exists() ? orgSnap.data() : null);
+        setEmployee(data.employee || null);
+        setPayouts(data.payouts || []);
+        setAdvances(data.advances || []);
+        setOrgSettings(data.org || null);
       } catch (err) {
         console.error('Employee statement load failed:', err);
-        if (isMounted) setError('Failed to load statement. Please try again later.');
+        if (isMounted) { setEmployee(null); setError(err?.message || 'Failed to load statement. Please try again later.'); }
       } finally {
         if (isMounted) setLoading(false);
       }
