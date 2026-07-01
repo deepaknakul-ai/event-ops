@@ -49,10 +49,15 @@ export const ROLE_COLOR = {
 
 export const PERMISSIONS = {
   clients: {
-    view:   ['admin', 'accountant', 'manager', 'user'],
+    view:   ['admin', 'accountant', 'manager'],   // financial dashboard — Coordinators use `contacts` instead
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
+  },
+  // Stripped contact directory (name / phone / address only — NO financials) for
+  // roles that must not see the client financial dashboard.
+  contacts: {
+    view: ['admin', 'accountant', 'manager', 'tech', 'user'],
   },
   leads: {
     view:   ['admin', 'manager', 'accountant'],
@@ -86,56 +91,61 @@ export const PERMISSIONS = {
     allocation:   ['admin', 'manager'],
   },
   inventory: {
-    view:        ['admin', 'accountant', 'manager', 'tech', 'user'],
-    view_rates:  ['admin', 'accountant', 'manager'],
-    create:      ['admin', 'manager'],
-    edit:        ['admin', 'manager'],
-    delete:      ['admin'],
+    view:          ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view_rates:    ['admin', 'accountant'],                     // rental/purchase rates — finance only
+    create:        ['admin', 'manager'],
+    edit:          ['admin', 'manager'],
+    delete:        ['admin'],
+    scan_movement: ['admin', 'manager', 'tech'],                // warehouse dispatch scan (functional, not financial)
   },
   finance: {
-    view:   ['admin', 'accountant', 'manager'],
-    create: ['admin', 'accountant', 'manager'],
-    edit:   ['admin', 'accountant'],
-    delete: ['admin', 'accountant'],
+    view:               ['admin', 'accountant'],
+    create:             ['admin', 'accountant'],
+    create_own_receipt: ['admin', 'accountant', 'manager'],     // manager: scoped on-site receipt from OWN clients only
+    edit:               ['admin', 'accountant'],
+    delete:             ['admin', 'accountant'],
   },
   reports: {
-    view: ['admin', 'accountant', 'manager'],
+    view: ['admin', 'accountant'],   // company-wide P&L / receivables / margins / analytics — no manager
   },
   daily_reports: {
-    view: ['admin', 'accountant', 'manager'],
+    view: ['admin', 'accountant'],
   },
   employees: {
-    view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view:         ['admin', 'accountant', 'manager'],   // full staff records (Coordinators/Techs use `contacts`)
+    view_pay:     ['admin', 'accountant'],              // salary / hourly rate / advances / ledger — finance only
     create:       ['admin', 'manager'],
     edit:         ['admin', 'manager'],
     delete:       ['admin'],
     manage_roles: ['admin'],              // only admin can change a user's role
   },
   outsourcing: {
-    view:        ['admin', 'accountant', 'manager'],
+    view:        ['admin', 'accountant', 'manager'],   // manager scoped to OWN projects in the page UI
     view_amounts:['admin', 'accountant', 'manager'],
     create:      ['admin', 'manager'],
     edit:         ['admin', 'manager'],
     delete:      ['admin'],
   },
   challans: {
-    view:   ['admin', 'accountant', 'manager', 'tech', 'user'],
-    create: ['admin', 'manager', 'tech'],
-    edit:   ['admin', 'manager', 'tech'],
-    delete: ['admin'],
+    view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view_amounts: ['admin', 'accountant', 'manager'],  // pricing on challan docs/PDF — hidden from tech/user
+    create:       ['admin', 'manager', 'tech'],
+    edit:         ['admin', 'manager', 'tech'],
+    delete:       ['admin'],
   },
   expenses: {
-    view_all: ['admin', 'accountant', 'manager'],   // see everyone's expenses
-    view_own: ['admin', 'accountant', 'manager', 'tech', 'user'],
-    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],
-    edit:     ['admin', 'accountant', 'manager'],
-    delete:   ['admin', 'accountant'],
-    approve:  ['admin', 'accountant', 'manager'],
+    view_all:      ['admin', 'accountant', 'manager'],   // see everyone's expenses (manager scoped to team in UI)
+    view_own:      ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view_payments: ['admin', 'accountant'],              // payout/salary statements — finance only
+    create:        ['admin', 'accountant', 'manager', 'tech', 'user'],
+    edit:          ['admin', 'accountant', 'manager'],
+    delete:        ['admin', 'accountant'],
+    approve:       ['admin', 'accountant', 'manager'],
   },
   purchase_invoices: {
-    view:   ['admin', 'accountant', 'manager'],
-    create: ['admin', 'accountant', 'manager'],
-    edit:   ['admin', 'accountant', 'manager'],
+    view:   ['admin', 'accountant'],
+    create: ['admin', 'accountant'],
+    edit:   ['admin', 'accountant'],
     delete: ['admin', 'accountant'],
   },
   tax_invoices: {
@@ -145,7 +155,7 @@ export const PERMISSIONS = {
     delete: ['admin', 'accountant'],
   },
   documents: {
-    view:   ['admin', 'accountant', 'manager', 'tech'],
+    view:   ['admin', 'accountant', 'manager'],   // PO amounts / cost breakdown / PI totals — no tech
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
@@ -155,7 +165,7 @@ export const PERMISSIONS = {
     edit:   ['admin'],
   },
   audit_logs: {
-    view: ['admin', 'accountant'],
+    view: ['admin'],   // security/impersonation trail + raw mutation payloads — Owner only
   },
   // ── HR Module Resources ──────────────────────────────────────────────────────
   hr_dashboard: {
@@ -193,8 +203,8 @@ export const PERMISSIONS = {
     generate: ['admin', 'accountant'],
   },
   hr_reports: {
-    view:   ['admin', 'accountant', 'manager'],
-    export: ['admin', 'accountant', 'manager'],
+    view:   ['admin', 'accountant'],   // includes payroll summary + employee financial performance — finance only
+    export: ['admin', 'accountant'],
   },
   hr_settings: {
     view: ['admin'],
@@ -214,19 +224,20 @@ export const PERMISSIONS = {
 // ── Human-readable resource definitions (used by RBACManager matrix) ─────────
 export const RESOURCE_DEFS = {
   clients:           { label: 'Clients & Vendors',   actions: ['view', 'create', 'edit', 'delete'] },
+  contacts:          { label: 'Contact Directory',   actions: ['view'] },
   leads:             { label: 'Leads / CRM',         actions: ['view', 'create', 'edit', 'delete'] },
   chat:              { label: 'Team Chat',           actions: ['view', 'create', 'announce', 'moderate'] },
   tracking:          { label: 'Live Tracking',       actions: ['view'] },
   commission:        { label: 'Referral Commission', actions: ['view', 'pay'] },
   projects:          { label: 'Projects / Quotes',   actions: ['view', 'view_rates', 'create', 'create_draft', 'edit', 'delete', 'close', 'invoice', 'team_manage', 'allocation'] },
-  inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete'] },
-  finance:           { label: 'Finance',             actions: ['view', 'create', 'edit', 'delete'] },
+  inventory:         { label: 'Inventory',           actions: ['view', 'view_rates', 'create', 'edit', 'delete', 'scan_movement'] },
+  finance:           { label: 'Finance',             actions: ['view', 'create', 'create_own_receipt', 'edit', 'delete'] },
   reports:           { label: 'Reports',             actions: ['view'] },
   daily_reports:     { label: 'Daily Report',        actions: ['view'] },
-  employees:         { label: 'Employees',           actions: ['view', 'create', 'edit', 'delete', 'manage_roles'] },
+  employees:         { label: 'Employees',           actions: ['view', 'view_pay', 'create', 'edit', 'delete', 'manage_roles'] },
   outsourcing:       { label: 'Outsourcing / POs',   actions: ['view', 'view_amounts', 'create', 'edit', 'delete'] },
-  challans:          { label: 'Challans',            actions: ['view', 'create', 'edit', 'delete'] },
-  expenses:          { label: 'Expenses',            actions: ['view_all', 'view_own', 'create', 'edit', 'delete', 'approve'] },
+  challans:          { label: 'Challans',            actions: ['view', 'view_amounts', 'create', 'edit', 'delete'] },
+  expenses:          { label: 'Expenses',            actions: ['view_all', 'view_own', 'view_payments', 'create', 'edit', 'delete', 'approve'] },
   purchase_invoices: { label: 'Purchase Invoices',   actions: ['view', 'create', 'edit', 'delete'] },
   tax_invoices:      { label: 'Tax Invoices',        actions: ['view', 'create', 'edit', 'delete'] },
   documents:         { label: 'Documents',           actions: ['view', 'create', 'edit', 'delete'] },
@@ -250,8 +261,12 @@ export const ACTION_LABELS = {
   view:         'View',
   view_rates:   'View Rates/Amounts',
   view_amounts: 'View Amounts',
+  view_pay:     'View Pay/Salary',
+  view_payments:'View Payout Statements',
   view_all:     'View All (any user)',
   view_own:     'View Own',
+  create_own_receipt: 'Record Own-Client Receipt',
+  scan_movement:'Scan Warehouse Movement',
   create:       'Create / Add',
   edit:         'Edit / Update',
   delete:       'Delete',
@@ -304,10 +319,42 @@ let _liveConfig = null;
 export const setLiveConfig = (config) => { _liveConfig = config; };
 export const getLiveConfig = () => _liveConfig;
 
+// ── Security floor: locked resource/actions ──────────────────────────────────
+// These financial/admin capabilities are ALWAYS evaluated from the static
+// PERMISSIONS below — never from the UI-editable live (settings/rbac) config.
+// The financial-segregation model is therefore authoritative in code: a stale,
+// mistaken, or tampered live config can neither re-open a financial leak nor
+// escalate privilege into the admin/security surface (RBAC Manager cannot grant
+// these to a role the code doesn't allow).
+export const LOCKED_PERMISSIONS = {
+  finance:           ['view', 'create', 'create_own_receipt', 'edit', 'delete'],
+  reports:           ['view'],
+  daily_reports:     ['view'],
+  purchase_invoices: ['view', 'create', 'edit', 'delete'],
+  tax_invoices:      ['view', 'create', 'edit', 'delete'],
+  outsourcing:       ['view', 'view_amounts'],
+  inventory:         ['view_rates'],
+  challans:          ['view_amounts'],
+  expenses:          ['view_all', 'view_payments'],
+  employees:         ['view', 'view_pay', 'manage_roles'],
+  clients:           ['view'],
+  commission:        ['pay'],
+  hr_payroll:        ['view', 'generate'],
+  hr_reports:        ['view', 'export'],
+  audit_logs:        ['view'],
+  admin_tools:       ['view', 'edit'],
+};
+const isLockedPermission = (resource, action) => {
+  const actions = LOCKED_PERMISSIONS[resource];
+  return !!actions && actions.indexOf(action) !== -1;
+};
+
 // ── Main helper: can(role, resource, action) ─────────────────────────────────
 /**
  * Returns true if `role` is allowed to perform `action` on `resource`.
- * Checks Firestore-stored live config first; falls back to static PERMISSIONS.
+ * Security-floor (LOCKED_PERMISSIONS) resources always use static defaults;
+ * all other resources honour the Firestore-stored live config first, then fall
+ * back to static PERMISSIONS.
  * @param {string} role - The user's role
  * @param {string} resource - The resource (e.g. 'finance', 'projects')
  * @param {string} action - The action (e.g. 'create', 'delete', 'view_rates')
@@ -315,13 +362,13 @@ export const getLiveConfig = () => _liveConfig;
  */
 export const can = (role, resource, action) => {
   if (!role || !resource || !action) return false;
-  // Use Firestore-loaded live config if available, but fall back to static for missing resources
-  if (_liveConfig) {
+  // Non-locked resources: honour the live config if it has an explicit entry.
+  if (!isLockedPermission(resource, action) && _liveConfig) {
     const liveResult = _liveConfig.permissions?.[role]?.[resource]?.[action];
     if (liveResult !== undefined) return liveResult;
     // Resource not in live config — fall through to static defaults
   }
-  // Fallback: static compile-time permissions
+  // Static compile-time permissions (authoritative for locked resources).
   const resource_perms = PERMISSIONS[resource];
   if (!resource_perms) return false;
   const allowed = resource_perms[action];
@@ -338,6 +385,7 @@ export const getNavAccess = (role) => ({
   projects:          can(role, 'projects', 'view'),
   outsourcing:       can(role, 'outsourcing', 'view'),
   clients:           can(role, 'clients', 'view'),
+  contacts:          can(role, 'contacts', 'view'),
   leads:             can(role, 'leads', 'view'),
   chat:              can(role, 'chat', 'view'),
   tracking:          can(role, 'tracking', 'view'),
