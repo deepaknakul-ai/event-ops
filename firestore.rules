@@ -100,11 +100,11 @@ service cloud.firestore {
                   && collection != 'settings'
                   // chat_* are excluded here so the stricter chat rules below are
                   // authoritative (OR-semantics would otherwise expose private DMs).
-                  // clients is excluded so the owner-scoped client rules below are
-                  // authoritative (managers see only their own clients/vendors).
+                  // clients + projects are excluded so their owner-scoped rules
+                  // below are authoritative (managers see only their own).
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients']);
+                                      'clients', 'projects']);
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
@@ -390,9 +390,29 @@ service cloud.firestore {
                         && request.resource.data.get('owner_id', '') == userEmpId());
       allow delete: if isAdmin(appId);
     }
-    // NOTE: project READS are intentionally NOT hard-scoped here yet — that would
-    // also restrict field/warehouse techs to assigned projects and could break
-    // dispatch/challan flows. Projects are owner-scoped at the loader/UI level
-    // (App.jsx) for managers; harden the rule once a tech login can be tested.
+    // ── Project owner-scoping (managers only) ──────────────────────────────────
+    // Excluded from the generic read wildcard above so this rule is authoritative.
+    // Mirrors the clients rule: ONLY the manager role is isolated (manager-vs-
+    // manager). A manager may READ a project only if they own its client
+    // (denormalised client_owner_id), created it, or are on the assigned crew —
+    // exactly matching the two scoped project listeners in App.jsx (where
+    // client_owner_id == me / assigned_employees array-contains me). Admin,
+    // accountant, tech and user keep FULL read access (byte-for-byte unchanged),
+    // so field/warehouse dispatch + challan flows and the public token pages
+    // (quote approval, reimbursable) are untouched. Writes remain governed by the
+    // generic wildcard above (create/update = any role; delete = admin/manager).
+    match /artifacts/{appId}/public/data/projects/{pid} {
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && (!hasRole(appId, 'manager')
+                      || resource.data.get('client_owner_id', '') == userEmpId()
+                      || resource.data.get('created_by', '') == userEmpId()
+                      || (resource.data.get('assigned_employees', []) is list
+                          && userEmpId() in resource.data.get('assigned_employees', [])));
+    }
+    // NOTE: tech/user project reads are intentionally NOT scoped to assigned-only
+    // yet — that risks breaking field/warehouse dispatch + challan flows and the
+    // 'user'-role commission view, none of which can be exercised without a
+    // non-admin test login or the rules emulator. Deferred to a later phase.
   }
 }
