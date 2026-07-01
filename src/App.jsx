@@ -3077,28 +3077,36 @@ const [payroll, setPayroll] = useState([]);
       setInventory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
     const unsubExpenses = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'expenses'), (snap) => setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubAdvances = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'advances'), (snap) => {
-      setAdvances(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }); 
-    //version 1.3.0 finance implementation enabled code
-    const unsubPayments = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubPayouts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payouts'), (snap) => setPayouts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubVendorPayments = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubPurchaseInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubTaxInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    // Company-wide accounting ledgers are Owner/Accountant-only at the rule level;
-    // only subscribe for those roles (others would get permission-denied). A no-op
-    // error handler keeps a transient denial from spamming the console.
+    // Finance-viewer gate + helpers. Owner/Accountant see all finance data; other
+    // roles are scoped (self-scoped for payroll, none for company ledgers) so a
+    // restricted read never hits permission-denied once the rules tighten.
     const financeViewer = role === 'admin' || role === 'accountant';
     const noop = () => {};
-    const ledgerCol = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
-    const unsubChartOfAccounts = financeViewer ? onSnapshot(ledgerCol('chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
-    const unsubJournalEntries = financeViewer ? onSnapshot(ledgerCol('journal_entries'), (snap) => setJournalEntries(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
-    const unsubOpeningBalances = financeViewer ? onSnapshot(ledgerCol('opening_balances'), (snap) => setOpeningBalances(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
-    const unsubFiscalYearClosings = financeViewer ? onSnapshot(ledgerCol('fiscal_year_closings'), (snap) => setFiscalYearClosings(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
-    const unsubRecurringRules = financeViewer ? onSnapshot(ledgerCol('recurring_rules'), (snap) => setRecurringRules(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const finCol = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
+    // advances + payouts carry employee_id → admin/accountant all; everyone else
+    // sees ONLY their own (the scoped query is required once rules restrict reads).
+    const unsubAdvances = onSnapshot(
+      financeViewer ? finCol('advances') : query(finCol('advances'), where('employee_id', '==', myEmpId)),
+      (snap) => setAdvances(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop);
+    const unsubPayouts = onSnapshot(
+      financeViewer ? finCol('payouts') : query(finCol('payouts'), where('employee_id', '==', myEmpId)),
+      (snap) => setPayouts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop);
+    //version 1.3.0 finance implementation enabled code
+    // payments / vendor_payments / purchase_invoices / tax_invoices remain global
+    // for now (owner-denormalisation scoping is a later Slice-C step).
+    const unsubPayments = onSnapshot(finCol('payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubVendorPayments = onSnapshot(finCol('vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubPurchaseInvoices = onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubTaxInvoices = onSnapshot(finCol('tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // Company-wide accounting ledgers are Owner/Accountant-only at the rule level;
+    // only subscribe for those roles (others would get permission-denied).
+    const unsubChartOfAccounts = financeViewer ? onSnapshot(finCol('chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubJournalEntries = financeViewer ? onSnapshot(finCol('journal_entries'), (snap) => setJournalEntries(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubOpeningBalances = financeViewer ? onSnapshot(finCol('opening_balances'), (snap) => setOpeningBalances(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubFiscalYearClosings = financeViewer ? onSnapshot(finCol('fiscal_year_closings'), (snap) => setFiscalYearClosings(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubRecurringRules = financeViewer ? onSnapshot(finCol('recurring_rules'), (snap) => setRecurringRules(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     // M-5: stable party-name registry for ledger display-name resolution
-    const unsubPartyAccounts = financeViewer ? onSnapshot(ledgerCol('party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubPartyAccounts = financeViewer ? onSnapshot(finCol('party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubOrgSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), (snap) => {
       if (snap.exists()) setLockedFYs(snap.data().locked_fys || []);
     });

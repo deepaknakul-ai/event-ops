@@ -112,7 +112,12 @@ service cloud.firestore {
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
-                       'party_accounts']));
+                       'party_accounts']))
+                  // Payroll (payouts) + advances carry employee_id: Owner/Accountant
+                  // read all; everyone else reads ONLY their own record. Enforced for
+                  // GET (resource.data) and for the self-scoped list query the app runs.
+                  && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
+                      || resource.data.get('employee_id', '') == userEmpId());
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

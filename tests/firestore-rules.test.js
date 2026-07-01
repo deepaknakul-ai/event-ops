@@ -11,9 +11,9 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, afterAll, beforeEach, describe, test } from 'vitest';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, getDocs, query, where, collection } from 'firebase/firestore';
 
-const HAS_EMULATOR = !!process.env.FIRESTORE_EMULATOR_HOST;
+const HAS_EMULATOR = !!(globalThis.process?.env?.FIRESTORE_EMULATOR_HOST);
 const APP = 'TERMS 1.0.0';
 const path = (...segs) => ['artifacts', APP, 'public', 'data', ...segs].join('/');
 
@@ -49,6 +49,9 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('audit_logs', 'log1')), { action: 'test' });
       await setDoc(doc(db, path('journal_entries', 'je1')), { debit_amount: 100 });
       await setDoc(doc(db, path('chart_of_accounts', 'coa1')), { name: 'Cash' });
+      await setDoc(doc(db, path('payouts', 'po_u1')), { employee_id: 'u1', amount: 500 });
+      await setDoc(doc(db, path('payouts', 'po_mgrA')), { employee_id: 'mgrA', amount: 700 });
+      await setDoc(doc(db, path('advances', 'adv_u1')), { employee_id: 'u1', amount: 200 });
     });
   });
 
@@ -100,6 +103,34 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('user CANNOT read chart_of_accounts', async () => {
       await assertFails(getDoc(doc(asUser('u1'), path('chart_of_accounts', 'coa1'))));
+    });
+  });
+
+  describe('payouts + advances — self-scoped (Slice C-2)', () => {
+    test('user reads OWN payout', async () => {
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('payouts', 'po_u1'))));
+    });
+    test("user CANNOT read another employee's payout", async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('payouts', 'po_mgrA'))));
+    });
+    test('user reads OWN advance', async () => {
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('advances', 'adv_u1'))));
+    });
+    test('accountant reads any payout', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('payouts', 'po_mgrA'))));
+    });
+    test('tech CANNOT read another employee payout', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('payouts', 'po_u1'))));
+    });
+    test('user CAN list own payouts (scoped query the loader runs)', async () => {
+      const db = asUser('u1');
+      await assertSucceeds(getDocs(query(collection(db, path('payouts')), where('employee_id', '==', 'u1'))));
+    });
+    test('user CANNOT list ALL payouts (global query denied)', async () => {
+      await assertFails(getDocs(collection(asUser('u1'), path('payouts'))));
+    });
+    test('accountant CAN list all payouts (global query)', async () => {
+      await assertSucceeds(getDocs(collection(asUser('acct1'), path('payouts'))));
     });
   });
 
