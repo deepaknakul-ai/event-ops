@@ -236,15 +236,24 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const itemsPerPage = 15;
   const [sortConfig, setSortConfig] = useState({ key: 'start_date', direction: 'desc' });
 
-  const canViewProjectFinancials = can(role, 'projects', 'view_rates');
+  // Financial visibility is per-project for managers: admin/accountant see all
+  // money; a manager sees rates/margins ONLY on projects they own (their client)
+  // or created; tech/user never see project money. Enforces the spec's
+  // "assigned-but-not-owner manager → operational access only" (Rule 3).
+  const seesAllProjectFinance = role === 'admin' || role === 'accountant';
+  const canViewRatesRole = can(role, 'projects', 'view_rates'); // admin/accountant/manager (role capability)
+  const projectFinanceVisible = (proj) => seesAllProjectFinance
+    || (canViewRatesRole && !!currentEmpId
+        && (((proj?.client_owner_id || '') === currentEmpId)
+            || ((proj?.created_by || '') === currentEmpId)));
   const canManageProjectInvoices = can(role, 'projects', 'invoice');
   const canEditProjects = can(role, 'projects', 'edit');
 
   useEffect(() => {
-    if (!canViewProjectFinancials && sortConfig.key === 'total_value') {
+    if (!canViewRatesRole && sortConfig.key === 'total_value') {
       setSortConfig(prev => ({ ...prev, key: 'start_date' }));
     }
-  }, [canViewProjectFinancials, sortConfig.key]);
+  }, [canViewRatesRole, sortConfig.key]);
 
   const [isAllocationModalOpen, setIsAllocationModalOpen] = useState(false);
   const [allocationForm, setAllocationForm] = useState({ item_id: '', qty: 1, rate: 0, days: 1, gst_rate: 18, available_qty: 0, description: '', is_led: false, tilesWide: 0, tilesHigh: 0, tileModelData: null });
@@ -330,6 +339,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     const targetId = String(selectedProjectId);
     return projects.find(p => String(p.id) === targetId) || null;
   }, [projects, selectedProjectId]);
+
+  // Detail-view financial visibility for the currently open project (owner-aware).
+  const canViewProjectFinancials = projectFinanceVisible(selectedProject);
 
   // Derived values for project notes
   const currentUserObj = useMemo(() => {
@@ -3707,7 +3719,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                 <select className="w-full text-xs rounded border p-1 bg-slate-50 text-black" value={sortConfig.key} onChange={e => setSortConfig({...sortConfig, key: e.target.value})}>
                     <option value="start_date">Start Date</option>
                     <option value="client">Client</option>
-                  {canViewProjectFinancials && <option value="total_value">Total Value</option>}
+                  {canViewRatesRole && <option value="total_value">Total Value</option>}
                 </select>
                 <button onClick={() => setSortConfig(prev => ({ ...prev, direction: prev.direction === 'asc' ? 'desc' : 'asc' }))} className="px-2 rounded border bg-slate-50 hover:bg-slate-100 text-slate-800" title="Toggle Direction">
                     {sortConfig.direction === 'asc' ? '↑' : '↓'}
@@ -3778,7 +3790,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
 
               {/* Column 3: Project Value & Items */}
               <div className="space-y-2">
-                {canViewProjectFinancials ? (
+                {projectFinanceVisible(project) ? (
                   <div className="bg-indigo-50 rounded p-2 border border-indigo-100">
                     <div className="text-xs text-indigo-600 font-semibold uppercase">Project Value</div>
                     <div className="font-bold text-indigo-700">{formatCurrency(getProjectGrandTotal(project))}</div>

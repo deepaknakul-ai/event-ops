@@ -13,8 +13,15 @@ import { applyPendingAction } from '../utils/assistant/writeOps';
 import { loadModel, saveModel, recordUsage, topUsedPrompts } from '../utils/assistant/learning';
 import { can } from '../utils/permissions';
 
-const QUICK_ACTIONS = [
+// Operational quick actions — safe for every role (no money surfaced).
+const QUICK_ACTIONS_OPS = [
   "Today's projects",
+  'Low stock',
+  'Help',
+];
+// Financial quick actions — only shown to roles that can view reports
+// (admin/accountant/manager). Tapping one as tech/user would be blocked anyway.
+const QUICK_ACTIONS_FIN = [
   'My pending',
   'Pending expenses',
   'Outstanding receivables',
@@ -23,10 +30,26 @@ const QUICK_ACTIONS = [
   'Top clients by revenue',
   'Tax invoices this month',
   'Expense breakdown this month',
-  'Low stock',
   'P&L',
-  'Help',
 ];
+
+// Intents that surface money, margins, or financial ledgers. These are gated on
+// can(role,'reports','view') at execution time so Field Techs / Coordinators
+// (tech/user) get an access-restricted card instead of company financials.
+const FINANCIAL_INTENTS = new Set([
+  'projects.topMargin', 'projects.lossMaking', 'projects.bottomMargin',
+  'clients.top', 'client.ledger', 'client.outstanding',
+  'finance.receivables', 'finance.payables',
+  'vendor.payments', 'payments.pending', 'payments.byDate',
+  'taxInvoices.list', 'taxInvoices.byClient',
+  'purchaseInvoices.list', 'purchaseInvoices.byVendor',
+  'reports.pl', 'reports.revenue', 'reports.expenses', 'reports.cashPosition',
+  'employee.balance',
+  'expenses.pending', 'expenses.approve', 'expense.disapprove',
+  'expenses.byEmployee', 'expenses.byDateRange', 'expenses.byCategory',
+  'expenses.byStatus', 'expenses.statistics',
+  'digest.myPending', 'payment.record',
+]);
 
 // Map intent → row entity type for conversational memory ("#2", "first one").
 const INTENT_TO_ROW_TYPE = {
@@ -291,7 +314,19 @@ export default function AppAssistant({
     const prompt = String(text || '').trim();
     if (!prompt) return;
     const parsed = parseAssistantMessage(prompt, nluCtx, memory, learning);
-    let result = executeAssistantIntent(parsed, execCtx);
+    // Zero-Trust gate: financial intents are limited to report-viewing roles
+    // (admin/accountant/manager). tech/user never see company money via the
+    // assistant, regardless of how the question is phrased.
+    let result;
+    if (FINANCIAL_INTENTS.has(parsed.intent) && !can(role, 'reports', 'view')) {
+      result = {
+        type: 'error',
+        title: 'Access restricted',
+        subtitle: 'Financial details are limited to management. You can ask about projects, schedules, inventory, or your own tasks.',
+      };
+    } else {
+      result = executeAssistantIntent(parsed, execCtx);
+    }
     // Help message uses structured help card.
     if (parsed.intent === 'help' && result.type === 'help') {
       // ok
@@ -329,7 +364,14 @@ export default function AppAssistant({
         return next;
       });
     }
-  }, [nluCtx, execCtx, memory, learning, currentUserId]);
+  }, [nluCtx, execCtx, memory, learning, currentUserId, role]);
+
+  // Report-viewing roles (admin/accountant/manager) get the financial quick
+  // actions; tech/user get operational ones only.
+  const quickActions = useMemo(
+    () => (can(role, 'reports', 'view') ? [...QUICK_ACTIONS_OPS, ...QUICK_ACTIONS_FIN] : QUICK_ACTIONS_OPS),
+    [role],
+  );
 
   const handleSubmit = (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -424,7 +466,7 @@ export default function AppAssistant({
 
         <div className="border-t border-slate-200 bg-white p-2">
           <div className="mb-2 flex flex-wrap gap-1">
-            {QUICK_ACTIONS.map((q) => (
+            {quickActions.map((q) => (
               <button
                 key={q}
                 type="button"

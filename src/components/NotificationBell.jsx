@@ -72,8 +72,8 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
       });
     }
 
-    // 3. Unpaid invoices — only for admin/manager
-    if (role === 'admin' || role === 'manager') {
+    // 3. Unpaid invoices — finance roles (admin/manager/accountant)
+    if (['admin', 'manager', 'accountant'].includes(role)) {
       projects
         .filter(p => ['Completed', 'Closed'].includes(p.status))
         .forEach(p => {
@@ -93,7 +93,10 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
             });
           }
         });
+    }
 
+    // 4/5. Inventory alerts (low stock + service due) — operations (admin/manager)
+    if (role === 'admin' || role === 'manager') {
       // 4. Low inventory — items >= 80% booked in next 30 days
       inventory.forEach(item => {
         if (!item.total || item.total <= 0 || item.is_external) return;
