@@ -104,7 +104,15 @@ service cloud.firestore {
                   // authoritative (managers see only their own clients/vendors).
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients']);
+                                      'clients'])
+                  // Company-wide accounting ledgers: Owner + Accountant only. They
+                  // carry no per-project owner and no operational role needs them, so
+                  // they must never be SDK-readable by manager / tech / user.
+                  && (seesAllParties(appId) || !(collection in [
+                       'journal_entries', 'journal_drafts', 'journal_templates',
+                       'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
+                       'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
+                       'party_accounts']));
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

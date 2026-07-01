@@ -42,10 +42,13 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('employees', 'mgrA')), { role: 'manager', name: 'Mgr A' });
       await setDoc(doc(db, path('employees', 'mgrB')), { role: 'manager', name: 'Mgr B' });
       await setDoc(doc(db, path('employees', 'tech1')), { role: 'tech', name: 'Tech' });
+      await setDoc(doc(db, path('employees', 'u1')), { role: 'user', name: 'Coordinator' });
       await setDoc(doc(db, path('clients', 'cA')), { name: 'Client A', owner_id: 'mgrA' });
       await setDoc(doc(db, path('payments', 'pay1')), { amount: 1000, client_id: 'cA' });
       await setDoc(doc(db, path('projects', 'projA')), { project_name: 'Proj A', client_owner_id: 'mgrA' });
       await setDoc(doc(db, path('audit_logs', 'log1')), { action: 'test' });
+      await setDoc(doc(db, path('journal_entries', 'je1')), { debit_amount: 100 });
+      await setDoc(doc(db, path('chart_of_accounts', 'coa1')), { name: 'Cash' });
     });
   });
 
@@ -79,13 +82,34 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
-  // Documents the CURRENT baseline gaps that Slice C will close. If these start
-  // FAILING, it means the rules were tightened (update these to assertFails).
-  describe('baseline gaps — still open at the rule layer (to close in Slice C)', () => {
+  describe('company ledgers — Owner + Accountant only (Slice C-1)', () => {
+    test('admin reads journal_entries', async () => {
+      await assertSucceeds(getDoc(doc(asUser('admin1'), path('journal_entries', 'je1'))));
+    });
+    test('accountant reads journal_entries', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('journal_entries', 'je1'))));
+    });
+    test('accountant reads chart_of_accounts', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('chart_of_accounts', 'coa1'))));
+    });
+    test('manager CANNOT read journal_entries', async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('journal_entries', 'je1'))));
+    });
+    test('tech CANNOT read journal_entries', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('journal_entries', 'je1'))));
+    });
+    test('user CANNOT read chart_of_accounts', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('chart_of_accounts', 'coa1'))));
+    });
+  });
+
+  // Documents the CURRENT baseline gaps that later Slice-C steps will close.
+  // If one starts FAILING, the rule was tightened (flip it to assertFails).
+  describe('baseline gaps — still open at the rule layer (later Slice-C steps)', () => {
     test('GAP: tech can still read any project', async () => {
       await assertSucceeds(getDoc(doc(asUser('tech1'), path('projects', 'projA'))));
     });
-    test('GAP: tech can still read finance collections (payments)', async () => {
+    test('GAP: tech can still read payments (party-linked finance, needs owner denorm)', async () => {
       await assertSucceeds(getDoc(doc(asUser('tech1'), path('payments', 'pay1'))));
     });
   });

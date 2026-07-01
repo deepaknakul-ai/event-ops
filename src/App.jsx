@@ -3086,13 +3086,19 @@ const [payroll, setPayroll] = useState([]);
     const unsubVendorPayments = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubPurchaseInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubTaxInvoices = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubChartOfAccounts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubJournalEntries = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), (snap) => setJournalEntries(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubOpeningBalances = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'opening_balances'), (snap) => setOpeningBalances(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubFiscalYearClosings = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'fiscal_year_closings'), (snap) => setFiscalYearClosings(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubRecurringRules = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'recurring_rules'), (snap) => setRecurringRules(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // Company-wide accounting ledgers are Owner/Accountant-only at the rule level;
+    // only subscribe for those roles (others would get permission-denied). A no-op
+    // error handler keeps a transient denial from spamming the console.
+    const financeViewer = role === 'admin' || role === 'accountant';
+    const noop = () => {};
+    const ledgerCol = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
+    const unsubChartOfAccounts = financeViewer ? onSnapshot(ledgerCol('chart_of_accounts'), (snap) => setChartOfAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubJournalEntries = financeViewer ? onSnapshot(ledgerCol('journal_entries'), (snap) => setJournalEntries(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubOpeningBalances = financeViewer ? onSnapshot(ledgerCol('opening_balances'), (snap) => setOpeningBalances(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubFiscalYearClosings = financeViewer ? onSnapshot(ledgerCol('fiscal_year_closings'), (snap) => setFiscalYearClosings(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubRecurringRules = financeViewer ? onSnapshot(ledgerCol('recurring_rules'), (snap) => setRecurringRules(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     // M-5: stable party-name registry for ledger display-name resolution
-    const unsubPartyAccounts = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    const unsubPartyAccounts = financeViewer ? onSnapshot(ledgerCol('party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubOrgSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), (snap) => {
       if (snap.exists()) setLockedFYs(snap.data().locked_fys || []);
     });
