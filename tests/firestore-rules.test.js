@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, afterAll, beforeEach, describe, test } from 'vitest';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, getDocs, query, where, collection } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc, getDocs, query, where, collection } from 'firebase/firestore';
 
 const HAS_EMULATOR = !!(globalThis.process?.env?.FIRESTORE_EMULATOR_HOST);
 const APP = 'TERMS 1.0.0';
@@ -278,12 +278,45 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
-  describe('party_accounts writes — finance-writers only (round-4 fix)', () => {
-    test('manager CAN write party_accounts (client-upsert side-effect)', async () => {
-      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_m')), { current_name: 'ACME' }));
+  describe('party_accounts writes — admin/accountant only (round-7 fix)', () => {
+    test('accountant CAN write party_accounts', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('party_accounts', 'pa_a')), { current_name: 'ACME' }));
+    });
+    // Manager READ of party_accounts is denied and upsertPartyAccount getDocs first,
+    // so managers never wrote it in practice; the rule now matches (tamper hole closed).
+    test('manager CANNOT write party_accounts', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_m')), { current_name: 'ACME' }));
     });
     test('tech CANNOT write party_accounts', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('party_accounts', 'pa_t')), { current_name: 'X' }));
+    });
+  });
+
+  describe('finance-doc DELETE — admin/accountant only, manager walled off (round-7 fix)', () => {
+    // A manager must not be able to DELETE finance docs it can neither read nor create.
+    test('manager CANNOT delete payroll', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('payroll', 'pr1'))));
+    });
+    test('manager CANNOT delete a payout', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('payouts', 'po_u1'))));
+    });
+    test('manager CANNOT delete an advance', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('advances', 'adv_u1'))));
+    });
+    test('manager CANNOT delete party_accounts', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_seed'))));
+    });
+    test('manager CANNOT delete a purchase_invoice', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('purchase_invoices', 'pi1'))));
+    });
+    test('tech CANNOT delete a payout', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('payouts', 'po_u1'))));
+    });
+    test('accountant CAN delete a payout', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('payouts', 'po_mgrA'))));
+    });
+    test('accountant CAN delete payroll', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('payroll', 'pr1'))));
     });
   });
 

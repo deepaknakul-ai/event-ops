@@ -171,12 +171,15 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['ai_reviewed', 'ai_reviewed_by', 'ai_reviewed_by_name', 'ai_reviewed_at']))
           // Managers may WRITE only the transactional collections they legitimately
-          // use (payments receipt, own-client tax invoices, the party registry via
-          // client-upsert, vendor payments). The pure accounting ledgers
-          // (journal/chart/opening/fiscal/recurring/reconcile/payouts/purchase_
-          // invoices) require admin/accountant — a manager must not create/overwrite
-          // GL data it cannot even read.
-          || (((collection in ['payments', 'tax_invoices', 'party_accounts', 'vendor_payments'])
+          // use (payments receipt, own-client tax invoices, vendor payments). The
+          // pure accounting ledgers (journal/chart/opening/fiscal/recurring/reconcile/
+          // payouts/purchase_invoices) require admin/accountant — a manager must not
+          // create/overwrite GL data it cannot even read.
+          // party_accounts is admin/accountant only (round-7 fix): its READ is already
+          // admin/accountant-only, and the client-upsert side-write (upsertPartyAccount)
+          // does a getDoc first that a manager cannot pass, so managers never wrote it
+          // in practice — this closes the unbounded cross-party tamper hole.
+          || (((collection in ['payments', 'tax_invoices', 'vendor_payments'])
                  ? isFinanceWriter(appId) : seesAllParties(appId)) && (
             collection != 'journal_drafts'
             || isAdmin(appId)
@@ -220,7 +223,18 @@ service cloud.firestore {
           )))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 
-      // Deletes: finance collections admin-only; everything else admin/manager.
+      // Deletes:
+      //   - append-only / privacy collections: nobody here (their own rules apply).
+      //   - pure GL ledgers: admin only.
+      //   - finance/accounting docs a manager can neither READ nor CREATE
+      //     (payroll, payouts, advances, party_accounts, purchase_invoices,
+      //     reconcile_sessions, journal_drafts, journal_templates): admin/accountant
+      //     only. ROUND-7 FIX: the old default let isFinanceWriter (which INCLUDES
+      //     manager) delete these, so a manager could destroy salary/payout/advance/
+      //     GL-draft records it is walled off from everywhere else. Delete must mirror
+      //     the create/read gate: seesAllParties = admin/accountant.
+      //   - everything else (manager-transactional payments/tax_invoices/
+      //     vendor_payments + operational collections): admin/accountant/manager.
       allow delete: if (
         collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users']
       ) ? false
@@ -229,7 +243,9 @@ service cloud.firestore {
                        'recurring_rules', 'fiscal_year_closings',
                        'opening_balances', 'chart_of_accounts']
       ) ? isAdmin(appId)
-        : (collection in ['reconcile_sessions', 'journal_drafts', 'journal_templates']) ? isFinanceWriter(appId)
+        : (collection in ['payroll', 'payouts', 'advances', 'party_accounts',
+                          'purchase_invoices', 'reconcile_sessions',
+                          'journal_drafts', 'journal_templates']) ? seesAllParties(appId)
         : isFinanceWriter(appId);
     }
 
