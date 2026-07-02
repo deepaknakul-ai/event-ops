@@ -59,6 +59,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('purchase_invoices', 'pi1')), { vendor_id: 'vX', amount: 400 });
       await setDoc(doc(db, path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 90000 });
       await setDoc(doc(db, path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 50000 });
+      await setDoc(doc(db, path('payroll', 'pr1')), { employee_id: 'tech1', grossPay: 50000, netPay: 45000, deductions: 5000 });
+      await setDoc(doc(db, path('penalties', 'pen1')), { employee_id: 'tech1', minutes: 30, reason: 'late' });
     });
   });
 
@@ -201,6 +203,39 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('coordinator CANNOT list all payments (global denied)', async () => {
       await assertFails(getDocs(collection(asUser('u1'), path('payments'))));
+    });
+  });
+
+  describe('payroll — Owner/Accountant only (verification fix)', () => {
+    test('accountant reads payroll', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('payroll', 'pr1'))));
+    });
+    test('manager CANNOT read payroll', async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('payroll', 'pr1'))));
+    });
+    test('tech CANNOT read payroll (own or otherwise)', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('payroll', 'pr1'))));
+    });
+    test('tech CANNOT list payroll', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('payroll'))));
+    });
+  });
+
+  describe('penalties — Owner/Accountant/Manager only (verification fix)', () => {
+    test('manager reads penalties', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('penalties', 'pen1'))));
+    });
+    test('tech CANNOT read penalties', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('penalties', 'pen1'))));
+    });
+  });
+
+  describe('isFinanceWriter now includes accountant (regression fix)', () => {
+    test('accountant CAN create a payment', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('payments', 'newpay_acct')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'UPI' }));
+    });
+    test('tech CANNOT create a payment', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('payments', 'newpay_tech')), { client_id: 'cA', amount: 100 }));
     });
   });
 

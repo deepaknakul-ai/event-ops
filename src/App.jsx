@@ -3133,8 +3133,10 @@ const [payroll, setPayroll] = useState([]);
     const unsubTimeLogs = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'timeLogs'), (snap) => setTimeLogs(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubHrLeaves = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'leaves'), (snap) => setHrLeaves(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     const unsubShiftRequests = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'shiftRequests'), (snap) => setShiftRequests(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubPenalties = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'penalties'), (snap) => setPenalties(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-    const unsubPayroll = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payroll'), (snap) => setPayroll(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // penalties (HR disciplinary): Owner/Accountant/Manager only. payroll (salary):
+    // Owner/Accountant only. Others don't subscribe (rules deny them).
+    const unsubPenalties = partyFinanceViewer ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'penalties'), (snap) => setPenalties(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubPayroll = financeViewer ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payroll'), (snap) => setPayroll(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubHqSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'hq'), (snap) => {
       if (snap.exists()) setHqSettings({ ...DEFAULT_HQ_SETTINGS, ...snap.data() });
     });

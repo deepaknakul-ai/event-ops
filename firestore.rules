@@ -53,8 +53,11 @@ service cloud.firestore {
       return hasAnyRole(appId, ['admin', 'accountant', 'manager', 'tech', 'user']);
     }
 
+    // Finance writers: Owner + Accountant (the finance operators) + Manager (needed
+    // for the scoped own-client receipt form). Accountant was previously missing,
+    // which silently blocked every accountant finance/accounting write.
     function isFinanceWriter(appId) {
-      return hasAnyRole(appId, ['admin', 'manager']);
+      return hasAnyRole(appId, ['admin', 'accountant', 'manager']);
     }
 
     function isAdmin(appId) {
@@ -105,25 +108,26 @@ service cloud.firestore {
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
                                       'clients'])
-                  // Company-wide accounting ledgers: Owner + Accountant only. They
-                  // carry no per-project owner and no operational role needs them, so
-                  // they must never be SDK-readable by manager / tech / user.
+                  // Company-wide accounting ledgers + payroll: Owner + Accountant only.
+                  // They carry no per-project owner and no operational role needs them,
+                  // so they must never be SDK-readable by manager / tech / user.
+                  // (payroll docs hold every employee's gross/net/deductions/rate.)
                   && (seesAllParties(appId) || !(collection in [
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
-                       'party_accounts']))
+                       'party_accounts', 'payroll']))
                   // Payroll (payouts) + advances carry employee_id: Owner/Accountant
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
                   && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
                       || resource.data.get('employee_id', '') == userEmpId())
-                  // Invoices + vendor payments: Owner/Accountant/Manager only. Tech and
-                  // Coordinator have no stake in any invoice/vendor-payment, so they are
-                  // denied at the rule level (managers keep read; cross-manager money is
-                  // hidden in the UI).
+                  // Invoices + vendor payments + HR penalties: Owner/Accountant/Manager
+                  // only. Tech and Coordinator have no stake in invoices/vendor-payments
+                  // and are excluded from hr_penalties, so they are denied at the rule
+                  // level (managers keep read; cross-manager money is hidden in the UI).
                   && (seesAllParties(appId) || hasRole(appId, 'manager')
-                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices']))
+                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices', 'penalties']))
                   // Leads / CRM pipeline: Owner/Accountant see all; a Manager sees ONLY
                   // leads they created (manager-vs-manager pipeline isolation); tech/user
                   // denied entirely.
