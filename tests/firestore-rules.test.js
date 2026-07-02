@@ -266,6 +266,18 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
+  describe('advances writes — admin/accountant only (round-6 fix)', () => {
+    test('accountant CAN create an advance', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('advances', 'adv_new')), { employee_id: 'tech1', amount: 1000 }));
+    });
+    test('tech CANNOT create/forge an advance', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('advances', 'adv_forge')), { employee_id: 'tech1', amount: 999999 }));
+    });
+    test('manager CANNOT create an advance', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('advances', 'adv_m')), { employee_id: 'tech1', amount: 1 }));
+    });
+  });
+
   describe('party_accounts writes — finance-writers only (round-4 fix)', () => {
     test('manager CAN write party_accounts (client-upsert side-effect)', async () => {
       await assertSucceeds(setDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_m')), { current_name: 'ACME' }));

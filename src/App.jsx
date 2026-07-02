@@ -1179,7 +1179,16 @@ const _ClientsOld = ({ clients, inventory, role, db, appId, logAction }) => {
 // };
 
 
-const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction }) => {
+const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, db, appId, logAction }) => {
+  // A manager sees outsourcing (PO costs, vendor allocations, PI totals) only for
+  // their OWN projects — never another manager's client's. (This is the inline,
+  // routed copy; keep it in sync with src/pages/Outsourcing.jsx.)
+  const scopedProjects = useMemo(
+    () => (role === 'manager'
+      ? (projects || []).filter(p => p.client_owner_id === currentEmpId || p.created_by === currentEmpId)
+      : (projects || [])),
+    [projects, role, currentEmpId],
+  );
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [activeTab, setActiveTab] = useState('allocations');
   
@@ -2080,7 +2089,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
   const allPOs = useMemo(() => {
       if (selectedProjectId) return [];
       const list = [];
-      projects.forEach(p => {
+      scopedProjects.forEach(p => {
           if (p.purchase_orders) {
               p.purchase_orders.forEach(po => list.push({ ...po, projectName: p.project_name, projectId: p.id }));
           }
@@ -2090,7 +2099,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
           if (dateDiff !== 0) return dateDiff;
           return (b.po_no || '').localeCompare(a.po_no || '');
       });
-  }, [projects, selectedProjectId]);
+  }, [scopedProjects, selectedProjectId]);
 
   const exportAllocationSummary = async () => {
       try {
@@ -2255,7 +2264,7 @@ const Outsourcing = ({ projects, clients, inventory, role, db, appId, logAction 
             onChange={(e) => { setSelectedProjectId(e.target.value); setEditingAlloc(null); setVendorForm({ vendor_id: '', item_id: '', qty: 1, rate: 0, days: 1, gst: 18, description: '' }); setActiveTab('allocations'); setAllocWizardSelection({}); }}
           >
             <option value="">-- Select Project --</option>
-            {projects.filter(p => ['Confirmed', 'Ongoing'].includes(p.status)).map(p => (
+            {scopedProjects.filter(p => ['Confirmed', 'Ongoing'].includes(p.status)).map(p => (
               <option key={p.id} value={p.id}>{p.project_name}</option>
             ))}
           </select>

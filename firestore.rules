@@ -161,7 +161,7 @@ service cloud.firestore {
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts',
                        'opening_balances', 'fiscal_year_closings',
-                       'payments', 'payouts', 'vendor_payments',
+                       'payments', 'payouts', 'advances', 'vendor_payments',
                        'tax_invoices', 'purchase_invoices', 'party_accounts']
       ) ? (
           // Review-only metadata update on an AI journal entry — allow any finance
