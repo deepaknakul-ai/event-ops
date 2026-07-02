@@ -107,7 +107,7 @@ service cloud.firestore {
                   // authoritative (managers see only their own clients/vendors).
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients', 'users'])
+                                      'clients', 'users', 'expenses'])
                   // Company-wide accounting ledgers + payroll: Owner + Accountant only.
                   // They carry no per-project owner and no operational role needs them,
                   // so they must never be SDK-readable by manager / tech / user.
@@ -149,9 +149,10 @@ service cloud.firestore {
       allow create, update: if (
         collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users']
       ) ? false
-        // Inventory carries rate_per_day / purchase_cost — only admin/manager may
-        // create or edit it (tech/user must not tamper with rate/cost via the SDK).
-        : (collection == 'inventory') ? hasAnyRole(appId, ['admin', 'manager'])
+        // Inventory carries rate_per_day / purchase_cost, and penalties are salary
+        // deductions — only admin/manager may create/edit them (tech/user must not
+        // tamper via the SDK).
+        : (collection in ['inventory', 'penalties']) ? hasAnyRole(appId, ['admin', 'manager'])
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
                        'journal_entries', 'journal_drafts', 'journal_templates',
@@ -246,7 +247,12 @@ service cloud.firestore {
     // the record for minor self-corrections.
     // Delete restricted to admin and accountant only.
     match /artifacts/{appId}/public/data/expenses/{docId} {
-      allow read: if isAuthed();
+      // Read: admin/accountant/manager see all; everyone else (tech/user) reads
+      // ONLY their own expenses (amounts are financial — no company-wide read).
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && (hasAnyRole(appId, ['admin', 'accountant', 'manager'])
+                      || resource.data.get('employee_id', '') == userEmpId());
       allow create: if isRoleUser(appId);
       allow update: if hasAnyRole(appId, ['admin', 'accountant', 'manager'])
                     || (isRoleUser(appId)

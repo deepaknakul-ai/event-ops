@@ -332,10 +332,10 @@ export const LOCKED_PERMISSIONS = {
   daily_reports:     ['view'],
   purchase_invoices: ['view', 'create', 'edit', 'delete'],
   tax_invoices:      ['view', 'create', 'edit', 'delete'],
-  outsourcing:       ['view', 'view_amounts'],
+  outsourcing:       ['view', 'view_amounts', 'create', 'edit', 'delete'],  // PO / vendor-cost writes
   inventory:         ['view_rates'],
   challans:          ['view_amounts'],
-  expenses:          ['view_all', 'view_payments'],
+  expenses:          ['view_all', 'view_payments', 'approve', 'edit', 'delete'],  // approval/edit = money control
   employees:         ['view', 'view_pay', 'manage_roles'],
   clients:           ['view'],
   leads:             ['view', 'create', 'edit', 'delete'],  // pipeline deal values — manager-own-scoped
@@ -344,7 +344,8 @@ export const LOCKED_PERMISSIONS = {
   commission:        ['view', 'pay'],
   hr_payroll:        ['view', 'generate'],
   hr_reports:        ['view', 'export'],
-  hr_penalties:      ['view'],
+  hr_penalties:      ['view', 'create', 'bulk_apply'],      // salary-deduction writes
+  hr_dashboard:      ['view'],                              // HR attendance/penalty aggregates
   audit_logs:        ['view'],
   admin_tools:       ['view', 'edit'],
 };

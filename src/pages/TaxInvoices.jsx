@@ -79,7 +79,7 @@ const STATUS_COLORS = {
 
 // ─── component ────────────────────────────────────────────────────────────────
 const TaxInvoices = ({
-  db, appId, role, user, logAction, addToast,
+  db, appId, role, currentEmpId = null, user, logAction, addToast,
   taxInvoices = [], projects = [], clients = [], payments = [], lockedFYs = []
 }) => {
   const [search, setSearch]             = useState('');
@@ -230,8 +230,11 @@ const TaxInvoices = ({
       .filter(p => (p.status === 'Completed' || p.status === 'Closed') &&
                    p.invoice_status !== 'Invoiced' &&
                    !p.tax_invoice_id)
+      // Managers see only their OWN unbilled projects (grand totals are money) —
+      // no cross-manager receivables in the Pending Invoices tab.
+      .filter(p => role !== 'manager' || p.client_owner_id === currentEmpId || p.created_by === currentEmpId)
       .sort((a, b) => (a.end_date || '').localeCompare(b.end_date || ''));
-  }, [projects]);
+  }, [projects, role, currentEmpId]);
 
   const openCreateForProject = (project) => {
     setEditingId(null);

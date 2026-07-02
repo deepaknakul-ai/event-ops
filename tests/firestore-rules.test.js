@@ -61,6 +61,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 50000 });
       await setDoc(doc(db, path('payroll', 'pr1')), { employee_id: 'tech1', grossPay: 50000, netPay: 45000, deductions: 5000 });
       await setDoc(doc(db, path('inventory', 'inv1')), { name: 'LED Panel', rate_per_day: 500, purchase_cost: 40000 });
+      await setDoc(doc(db, path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 500, status: 'Approved' });
+      await setDoc(doc(db, path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 800, status: 'Approved' });
       await setDoc(doc(db, path('penalties', 'pen1')), { employee_id: 'tech1', minutes: 30, reason: 'late' });
     });
   });
@@ -246,6 +248,33 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT create a payment', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('payments', 'newpay_tech')), { client_id: 'cA', amount: 100 }));
+    });
+  });
+
+  describe('expenses — self-scoped for tech/user (round-3 fix)', () => {
+    test('tech reads OWN expense', async () => {
+      await assertSucceeds(getDoc(doc(asUser('tech1'), path('expenses', 'exp_tech'))));
+    });
+    test('tech CANNOT read another employee expense', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('expenses', 'exp_mgr'))));
+    });
+    test('manager reads any expense', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('expenses', 'exp_mgr'))));
+    });
+    test('tech CAN list own expenses (scoped query)', async () => {
+      await assertSucceeds(getDocs(query(collection(asUser('tech1'), path('expenses')), where('employee_id', '==', 'tech1'))));
+    });
+    test('tech CANNOT list ALL expenses (global denied)', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('expenses'))));
+    });
+  });
+
+  describe('penalties writes — admin/manager only (round-3 fix)', () => {
+    test('manager CAN create a penalty', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('penalties', 'pen_m')), { employee_id: 'tech1', minutes: 15 }));
+    });
+    test('tech CANNOT create a penalty', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('penalties', 'pen_t')), { employee_id: 'tech1', minutes: 0 }));
     });
   });
 

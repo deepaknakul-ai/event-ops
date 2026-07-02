@@ -23,7 +23,7 @@ import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExce
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
-  getLogisticsLines, sumLogisticsRecord, getDistance
+  getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
@@ -824,7 +824,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const handleShareQuoteForApproval = async () => {
     if (!can(role, 'projects', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
     if (!selectedProject) return;
-    const token = selectedProject.quote_approval_token || Date.now().toString(36) + Math.random().toString(36).slice(2);
+    const token = selectedProject.quote_approval_token || generateSecureToken();
     // Token expires in 30 days
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     try {
@@ -937,7 +937,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const handleShareReimbursable = async () => {
     if (!can(role, 'projects', 'edit')) return addToast('Access denied.', 'error');
     if (!selectedProject) return;
-    const token = selectedProject.reimbursable_token || Date.now().toString(36) + Math.random().toString(36).slice(2);
+    const token = selectedProject.reimbursable_token || generateSecureToken();
     const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
       reimbursable_token: token, reimbursable_token_expires_at: expiresAt

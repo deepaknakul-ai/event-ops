@@ -3087,7 +3087,13 @@ const [payroll, setPayroll] = useState([]);
     const unsubInventory = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), (snap) => {
       setInventory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
-    const unsubExpenses = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'expenses'), (snap) => setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // Expenses: admin/accountant/manager see all; tech/user see ONLY their own
+    // (amounts are financial). The scoped query is required once the rule restricts.
+    const expensesViewer = role === 'admin' || role === 'accountant' || role === 'manager';
+    const expensesCol = collection(db, 'artifacts', appId, 'public', 'data', 'expenses');
+    const unsubExpenses = onSnapshot(
+      expensesViewer ? expensesCol : query(expensesCol, where('employee_id', '==', user.uid)),
+      (snap) => setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
     // Finance-viewer gate + helpers. Owner/Accountant see all finance data; other
     // roles are scoped (self-scoped for payroll, none for company ledgers) so a
     // restricted read never hits permission-denied once the rules tighten.

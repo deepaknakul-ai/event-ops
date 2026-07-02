@@ -376,7 +376,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, currentEmpId = null, 
               <select className="mt-1 w-full rounded border border-slate-300 p-1.5 text-sm text-slate-800"
                 value={projectFilter} onChange={e => { setProjectFilter(e.target.value); setPage(1); }}>
                 <option value="">All Projects</option>
-                {[...new Map(projects.map(p => [p.id, p])).values()].map(p => (
+                {[...new Map(scopedProjects.map(p => [p.id, p])).values()].map(p => (
                   <option key={p.id} value={p.id}>{p.project_name}</option>
                 ))}
               </select>

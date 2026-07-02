@@ -556,8 +556,18 @@ exports.postScheduledDrafts = onSchedule(
 );
 
 // ── Manual callables (admin-only) ──────────────────────────────────────────
+// Reject if the caller's token was minted for a different workspace than the one
+// being acted on (defense-in-depth against cross-tenant use of a role claim).
+function assertAppMatch(auth, appId) {
+  const tokenApp = auth && auth.token && auth.token.appId;
+  if (tokenApp && appId && tokenApp !== appId) {
+    throw new HttpsError('permission-denied', 'Token was issued for a different workspace.');
+  }
+}
+
 async function assertAdmin(auth, appId) {
   if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+  assertAppMatch(auth, appId);
   const claimRole = auth.token && auth.token.role;
   if (claimRole === 'admin') return;
   if (!appId) throw new HttpsError('invalid-argument', 'appId required');
@@ -630,6 +640,7 @@ exports.runRecurringTemplatesNow = onCall(
 // chosen in settings/communication. Inert until the admin configures it.
 async function assertAppUser(auth, appId) {
   if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+  assertAppMatch(auth, appId);
   const prov = auth.token && auth.token.firebase && auth.token.firebase.sign_in_provider;
   if (prov === 'anonymous') throw new HttpsError('permission-denied', 'Anonymous sessions cannot send mail');
   if (auth.token && auth.token.role) return;
@@ -648,6 +659,7 @@ async function assertAppUser(auth, appId) {
 // Field Tech or Coordinator.
 async function assertRole(auth, appId, allowed) {
   if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+  assertAppMatch(auth, appId);
   let role = auth.token && auth.token.role;
   if (!role) {
     if (!appId) throw new HttpsError('invalid-argument', 'appId required');
