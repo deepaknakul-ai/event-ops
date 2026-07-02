@@ -910,7 +910,11 @@ function stripSecrets(obj) {
 // only vendor/PO costs, margin and internal expenses are removed.
 function stripProjectInternalCosts(p) {
   const {
-    vendor_allocations, purchase_orders, vendor_pos, margin, expenses, ...safe
+    vendor_allocations, purchase_orders, vendor_pos, margin, expenses,
+    // Also drop per-project magic-link tokens — a client holding a LEDGER link
+    // must not harvest a project's quote-approval / reimbursable tokens.
+    quote_approval_token, reimbursable_token, quote_approval_enabled, reimbursable_token_enabled,
+    ...safe
   } = p || {};
   return safe;
 }

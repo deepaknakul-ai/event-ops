@@ -2995,9 +2995,19 @@ const [payroll, setPayroll] = useState([]);
   const chatUnread = useChatUnread(db, appId, effectiveEmpId);            // unread badge for the Chat nav item
 
   // Strip sensitive fields from employees before passing to child components
+  // Strip password always; strip pay fields (hourlyRate + history) for roles
+  // without employees.view_pay so colleague salary never enters their client
+  // state. (The raw employees doc still embeds pay — SDK-readable — which is the
+  // same accepted embedded-financial carve-out as projects/inventory, closed by
+  // the future financial-field-split migration.)
+  const canSeePayFields = can(effectiveRole, 'employees', 'view_pay');
   const safeEmployees = useMemo(() =>
-    employees.map(({ password, password_hashed, ...rest }) => rest),
-    [employees]
+    employees.map(({ password, password_hashed, ...rest }) => {
+      if (canSeePayFields) return rest;
+      const { hourlyRate, hourlyRateHistory, monthly_ctc, ctc, salary, ...noPay } = rest;
+      return noPay;
+    }),
+    [employees, canSeePayFields]
   );
 
   useEffect(() => {

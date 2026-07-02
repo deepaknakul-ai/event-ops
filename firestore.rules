@@ -153,13 +153,16 @@ service cloud.firestore {
         // deductions — only admin/manager may create/edit them (tech/user must not
         // tamper via the SDK).
         : (collection in ['inventory', 'penalties']) ? hasAnyRole(appId, ['admin', 'manager'])
+        // Payroll (salary docs): Owner/Accountant only — a role denied even READ
+        // must never be able to forge/overwrite a salary record via the SDK.
+        : (collection == 'payroll') ? hasAnyRole(appId, ['admin', 'accountant'])
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts',
                        'opening_balances', 'fiscal_year_closings',
                        'payments', 'payouts', 'vendor_payments',
-                       'tax_invoices', 'purchase_invoices']
+                       'tax_invoices', 'purchase_invoices', 'party_accounts']
       ) ? (
           // Review-only metadata update on an AI journal entry — allow any finance
           // role (incl. accountant) to flag it reviewed without unlocking financials.
@@ -227,7 +230,7 @@ service cloud.firestore {
     // Append-only: any role-bearing user may create; nobody may edit or delete.
     // Read restricted to admin and accountant (matches the permissions model).
     match /artifacts/{appId}/public/data/audit_logs/{docId} {
-      allow read: if hasAnyRole(appId, ['admin', 'accountant']);
+      allow read: if hasRole(appId, 'admin');   // security/impersonation trail + raw payloads — Owner only
       allow create: if isRoleUser(appId);
       allow update, delete: if false;
     }

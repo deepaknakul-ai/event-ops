@@ -104,6 +104,9 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     test('tech CANNOT read audit_logs', async () => {
       await assertFails(getDoc(doc(asUser('tech1'), path('audit_logs', 'log1'))));
     });
+    test('accountant CANNOT read audit_logs (Owner-only now)', async () => {
+      await assertFails(getDoc(doc(asUser('acct1'), path('audit_logs', 'log1'))));
+    });
   });
 
   describe('company ledgers — Owner + Accountant only (Slice C-1)', () => {
@@ -230,6 +233,24 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT list payroll', async () => {
       await assertFails(getDocs(collection(asUser('tech1'), path('payroll'))));
+    });
+    test('accountant CAN write payroll', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('payroll', 'pr_new')), { employee_id: 'tech1', grossPay: 10000 }));
+    });
+    test('tech CANNOT write/forge payroll', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('payroll', 'pr_forge')), { employee_id: 'tech1', grossPay: 999999 }));
+    });
+    test('manager CANNOT write payroll', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('payroll', 'pr_mgr')), { employee_id: 'tech1', grossPay: 1 }));
+    });
+  });
+
+  describe('party_accounts writes — finance-writers only (round-4 fix)', () => {
+    test('manager CAN write party_accounts (client-upsert side-effect)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_m')), { current_name: 'ACME' }));
+    });
+    test('tech CANNOT write party_accounts', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('party_accounts', 'pa_t')), { current_name: 'X' }));
     });
   });
 

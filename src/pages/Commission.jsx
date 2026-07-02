@@ -61,6 +61,11 @@ const Commission = ({ clients = [], projects = [], expenses = [], payments = [],
     <div className="space-y-4 p-1">
       <h2 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Percent size={20} className="text-indigo-600" /> Referral Commission</h2>
       <p className="text-xs text-slate-500">Earned as the client's projects are paid: <span className="font-medium">rate% × net profit (revenue − direct costs − outsourcing) × fraction paid</span>.</p>
+      {!seeAll && (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          These figures are <span className="font-semibold">indicative</span>. Some project costs are not visible to your role, so net profit here is an estimate — your final commission is confirmed and paid by Accounts.
+        </p>
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="text-[11px] font-semibold uppercase text-slate-400">Accrued</div><div className="mt-0.5 text-xl font-bold text-slate-700">{formatCurrency(totals.accrued)}</div></div>
