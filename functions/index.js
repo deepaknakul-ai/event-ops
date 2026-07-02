@@ -642,6 +642,25 @@ async function assertAppUser(auth, appId) {
   if (!ok) throw new HttpsError('permission-denied', 'No role in this workspace');
 }
 
+// Resolve the caller's role (custom-token claim first, then Firestore) and throw
+// unless it is in `allowed`. For action/mutation callables (payment links, IRN,
+// outbound email) that must be limited to finance/management roles — never a
+// Field Tech or Coordinator.
+async function assertRole(auth, appId, allowed) {
+  if (!auth) throw new HttpsError('unauthenticated', 'Must be signed in');
+  let role = auth.token && auth.token.role;
+  if (!role) {
+    if (!appId) throw new HttpsError('invalid-argument', 'appId required');
+    const [rolesSnap, empSnap] = await Promise.all([
+      db.doc(`artifacts/${appId}/public/data/userRoles/${auth.uid}`).get().catch(() => null),
+      db.doc(`artifacts/${appId}/public/data/employees/${auth.uid}`).get().catch(() => null),
+    ]);
+    role = (rolesSnap && rolesSnap.exists && rolesSnap.data().role) || (empSnap && empSnap.exists && empSnap.data().role) || null;
+  }
+  if (!allowed.includes(role)) throw new HttpsError('permission-denied', 'You do not have permission for this action.');
+  return role;
+}
+
 async function readCommunicationConfig(appId) {
   const snap = await db.doc(`artifacts/${appId}/public/data/settings/communication`).get();
   if (!snap.exists) throw new HttpsError('failed-precondition', 'Email is not configured. Add it in Admin Tools → Communication.');
@@ -698,7 +717,7 @@ exports.sendDocumentEmail = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60 },
   async (req) => {
     const { appId, to, cc, subject, html, text, attachment } = req.data || {};
-    await assertAppUser(req.auth, appId);
+    await assertRole(req.auth, appId, ['admin', 'accountant', 'manager']); // no tech/coordinator outbound mail
     if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(to))) throw new HttpsError('invalid-argument', 'Valid recipient email required');
     if (!subject) throw new HttpsError('invalid-argument', 'Subject required');
     if (attachment && attachment.contentBase64 && attachment.contentBase64.length > 9000000) throw new HttpsError('invalid-argument', 'Attachment too large (max ~7MB)');
@@ -990,6 +1009,7 @@ exports.getQuoteApprovalData = onCall(
     const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('quote_approval_token', '==', token).limit(1).get();
     if (q.empty) throw new HttpsError('not-found', 'Invalid or expired quote approval link.');
     const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.quote_approval_enabled === false) throw new HttpsError('permission-denied', 'This quote approval link has been disabled.');
     if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
     // Drop internal cost fields + reimbursable estimates — the client approves the
     // QUOTE (their price), not our costs or internal reimbursable working notes.
@@ -1037,8 +1057,10 @@ exports.getContacts = onCall(
     if (!appId) throw new HttpsError('invalid-argument', 'appId required');
     await assertAppUser(req.auth, appId);
     const snap = await db.collection(`artifacts/${appId}/public/data/clients`).get();
+    const callerEmpId = (req.auth && req.auth.uid) || '';
     const contacts = snap.docs.map((d) => {
       const c = d.data();
+      const owner = c.owner_id || '';
       return {
         id: d.id,
         name: c.name || '',
@@ -1047,6 +1069,11 @@ exports.getContacts = onCall(
         address: c.address || '',
         state: c.state || '',
         contacts: (c.contacts || []).map((p) => ({ name: p.name || '', phone: p.phone || '', email: p.email || '' })),
+        // owner_id identifies the referrer (needed so a Coordinator's own-referral
+        // commission page can match its clients). referral_rate (the %) is returned
+        // ONLY for the caller's own clients — never another owner's.
+        owner_id: owner,
+        ...(owner && owner === callerEmpId ? { referral_rate: c.referral_rate } : {}),
       };
     }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
     return { contacts };
@@ -1063,7 +1090,7 @@ exports.createPaymentLink = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
   async (req) => {
     const { appId, amount, description, customer, reference, callbackUrl } = req.data || {};
-    await assertAppUser(req.auth, appId);
+    await assertRole(req.auth, appId, ['admin', 'accountant', 'manager']); // payment links = finance/management only
     if (!(Number(amount) > 0)) throw new HttpsError('invalid-argument', 'A positive amount is required');
     const cfg = await readPaymentConfig(appId);
     if (!cfg || cfg.provider !== 'razorpay' || !cfg.key_id || !cfg.key_secret) {
@@ -1143,7 +1170,7 @@ exports.generateIRN = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
   async (req) => {
     const { appId, invoiceId } = req.data || {};
-    await assertAppUser(req.auth, appId);
+    await assertRole(req.auth, appId, ['admin', 'accountant']); // GST e-invoicing = finance only
     if (!invoiceId) throw new HttpsError('invalid-argument', 'invoiceId required');
     const cfg = await db.doc(`artifacts/${appId}/public/data/settings/einvoice`).get().then((s) => (s.exists ? s.data() : null));
     if (!cfg || !cfg.enabled) throw new HttpsError('failed-precondition', 'E-invoicing is not enabled. Configure it in Admin Tools → GST E-Invoice.');

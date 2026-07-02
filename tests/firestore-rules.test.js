@@ -60,6 +60,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 90000 });
       await setDoc(doc(db, path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 50000 });
       await setDoc(doc(db, path('payroll', 'pr1')), { employee_id: 'tech1', grossPay: 50000, netPay: 45000, deductions: 5000 });
+      await setDoc(doc(db, path('inventory', 'inv1')), { name: 'LED Panel', rate_per_day: 500, purchase_cost: 40000 });
       await setDoc(doc(db, path('penalties', 'pen1')), { employee_id: 'tech1', minutes: 30, reason: 'late' });
     });
   });
@@ -248,11 +249,41 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
-  // Documents the CURRENT baseline gaps that later steps will close.
-  // If one starts FAILING, the rule was tightened (flip it to assertFails).
-  describe('baseline gaps — still open at the rule layer (by decision/risk)', () => {
-    test('GAP: tech can still read any project (dispatch-flow risk — deferred)', async () => {
+  describe('users/{uid} mirror — no privilege escalation (verification fix)', () => {
+    test('tech CANNOT self-create mirror as admin via a forged employee_id', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('users', 'tech1')), { role: 'admin', employee_id: 'admin1' }));
+    });
+    test('tech CAN create own mirror with the role matching its OWN employee doc', async () => {
+      await assertSucceeds(setDoc(doc(asUser('tech1'), path('users', 'tech1')), { role: 'tech' }));
+    });
+    test('tech CANNOT write a mirror at another uid', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('users', 'admin1')), { role: 'tech' }));
+    });
+  });
+
+  describe('inventory writes — admin/manager only (verification fix)', () => {
+    test('admin CAN create inventory', async () => {
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('inventory', 'inv_a')), { name: 'LED', rate_per_day: 500 }));
+    });
+    test('manager CAN create inventory', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('inventory', 'inv_m')), { name: 'Truss', rate_per_day: 200 }));
+    });
+    test('tech CANNOT create/edit inventory (rate/cost tamper)', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('inventory', 'inv_t')), { name: 'X', rate_per_day: 999 }));
+    });
+    test('coordinator CANNOT create inventory', async () => {
+      await assertFails(setDoc(doc(asUser('u1'), path('inventory', 'inv_u')), { name: 'Y', rate_per_day: 1 }));
+    });
+  });
+
+  // Documents the CURRENT accepted carve-out (by decision/risk). If one starts
+  // FAILING, the rule was tightened (flip it to assertFails).
+  describe('accepted carve-out — operational reads with money hidden in the UI', () => {
+    test('tech CAN read a project operationally (dispatch/challan flows; money UI-hidden)', async () => {
       await assertSucceeds(getDoc(doc(asUser('tech1'), path('projects', 'projA'))));
+    });
+    test('tech CAN read inventory operationally (rate/cost embedded; hidden in UI; field-split is the future fix)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('tech1'), path('inventory', 'inv1'))));
     });
   });
 });

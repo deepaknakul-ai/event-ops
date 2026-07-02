@@ -8,7 +8,17 @@ import { can } from '../utils/permissions';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
-const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, user, role }) => {
+const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, user, role, currentEmpId = null }) => {
+  // Challan pricing (Rate/Amount on the doc + PDF) is view_amounts-gated
+  // (admin/accountant/manager); a manager additionally sees only their OWN
+  // projects' challans — never another manager's client's priced challan.
+  const canViewAmounts = can(role, 'challans', 'view_amounts');
+  const scopedProjects = useMemo(
+    () => (role === 'manager'
+      ? (projects || []).filter(p => p.client_owner_id === currentEmpId || p.created_by === currentEmpId)
+      : (projects || [])),
+    [projects, role, currentEmpId],
+  );
   const [sortOrder, setSortOrder] = useState('desc'); // 'asc' or 'desc'
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -22,7 +32,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
 
   const allChallans = useMemo(() => {
     const list = [];
-    projects.forEach(p => {
+    scopedProjects.forEach(p => {
       if (p.challans && p.challans.length > 0) {
         p.challans.forEach(c => {
           list.push({
@@ -44,7 +54,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
       const valB = b.challan_no || '';
       return sortOrder === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
     });
-  }, [projects, clients, sortOrder, searchTerm]);
+  }, [scopedProjects, clients, sortOrder, searchTerm]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -335,20 +345,22 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
             if (i.serial_numbers && i.serial_numbers.length > 0) {
                 snText = i.serial_numbers.join(', ');
             }
-            return [
+            const base = [
                 idx + 1,
                 `${i.item_name}\nSN: ${snText}`,
                 invItem?.hsn_code || '-',
                 i.qty,
                 `${i.days} Days`,
-                formatCurrencyPDF(i.rate),
-                formatCurrencyPDF(i.total)
             ];
+            // Pricing columns only for roles allowed to see challan amounts.
+            return canViewAmounts ? [...base, formatCurrencyPDF(i.rate), formatCurrencyPDF(i.total)] : base;
         });
 
         autoTable(pdfDoc, {
             startY: y,
-            head: [['#', 'Description of Goods', 'HSN/SAC', 'Qty', 'Duration', 'Rate', 'Amount']],
+            head: [canViewAmounts
+                ? ['#', 'Description of Goods', 'HSN/SAC', 'Qty', 'Duration', 'Rate', 'Amount']
+                : ['#', 'Description of Goods', 'HSN/SAC', 'Qty', 'Duration']],
             body: items,
             theme: 'grid',
             margin: { left: 14, right: 14 },

@@ -338,9 +338,10 @@ export const LOCKED_PERMISSIONS = {
   expenses:          ['view_all', 'view_payments'],
   employees:         ['view', 'view_pay', 'manage_roles'],
   clients:           ['view'],
+  leads:             ['view', 'create', 'edit', 'delete'],  // pipeline deal values — manager-own-scoped
   documents:         ['view', 'create', 'edit', 'delete'],  // PO amounts / cost breakdowns / PI totals
   projects:          ['view_rates', 'invoice'],             // project rates / margins / invoice actions
-  commission:        ['pay'],
+  commission:        ['view', 'pay'],
   hr_payroll:        ['view', 'generate'],
   hr_reports:        ['view', 'export'],
   hr_penalties:      ['view'],
