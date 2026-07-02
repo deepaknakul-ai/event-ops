@@ -415,9 +415,13 @@ service cloud.firestore {
     // clients they own. Admin, accountant, user and tech keep full visibility
     // (zero behaviour change for them).
     match /artifacts/{appId}/public/data/clients/{cid} {
+      // Admin + Accountant read all; everyone else (manager/tech/user) reads only
+      // clients they OWN. Tech/Coordinator own none, so they cannot SDK-read raw
+      // client docs (which carry opening_balance / referral_rate) — they use the
+      // stripped getContacts function instead.
       allow read: if isAuthed()
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
-                  && (!hasRole(appId, 'manager') || resource.data.get('owner_id', '') == userEmpId());
+                  && (seesAllParties(appId) || resource.data.get('owner_id', '') == userEmpId());
       allow create: if isAdmin(appId)
                     || (hasRole(appId, 'manager') && request.resource.data.get('owner_id', '') == userEmpId());
       allow update: if isAdmin(appId)

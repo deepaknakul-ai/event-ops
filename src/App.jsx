@@ -3063,16 +3063,26 @@ const [payroll, setPayroll] = useState([]);
     // REQUIRED — a global client query is denied by rules for a manager.
     const projectsCol = collection(db, 'artifacts', appId, 'public', 'data', 'projects');
     const clientsCol = collection(db, 'artifacts', appId, 'public', 'data', 'clients');
+    const seesAllClients = role === 'admin' || role === 'accountant';
     const scopeClients = role === 'manager';
     const myEmpId = user.uid;
 
     const unsubProjects = onSnapshot(projectsCol, (snap) => setProjects(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     let unsubClients;
-    if (scopeClients) {
+    if (seesAllClients) {
+      unsubClients = onSnapshot(clientsCol, (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    } else if (scopeClients) {
       unsubClients = onSnapshot(query(clientsCol, where('owner_id', '==', myEmpId)),
         (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))), () => {});
     } else {
-      unsubClients = onSnapshot(clientsCol, (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+      // tech / user: no raw client access (rules deny it — client docs carry
+      // opening_balance/referral_rate). Load the stripped contact directory
+      // (name/phone/address only) via getContacts so name resolution + the
+      // Contacts page still work with zero financial fields.
+      unsubClients = () => {};
+      httpsCallable(getFunctions(), 'getContacts')({ appId })
+        .then((res) => setClients((res.data && res.data.contacts) || []))
+        .catch(() => setClients([]));
     }
     const unsubInventory = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), (snap) => {
       setInventory(snap.docs.map(d => ({ id: d.id, ...d.data() })));

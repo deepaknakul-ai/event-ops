@@ -83,6 +83,15 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     test('anonymous cannot read a client', async () => {
       await assertFails(getDoc(doc(asAnon(), path('clients', 'cA'))));
     });
+    test('tech CANNOT read a client (opening_balance leak closed)', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('clients', 'cA'))));
+    });
+    test('coordinator CANNOT read a client they do not own', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('clients', 'cA'))));
+    });
+    test('tech CANNOT list clients', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('clients'))));
+    });
   });
 
   describe('audit_logs (deployed rule: admin/accountant read only)', () => {

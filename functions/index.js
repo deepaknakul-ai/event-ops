@@ -872,6 +872,18 @@ function stripSecrets(obj) {
   return safe;
 }
 
+// Remove internal cost/margin fields from a project before returning it to an
+// external party (client ledger). Keeps client-facing revenue fields —
+// logistics_costs and reimbursable_expenses ARE billed to the client (they feed
+// getProjectGrandTotal / client payable), so they are intentionally retained;
+// only vendor/PO costs, margin and internal expenses are removed.
+function stripProjectInternalCosts(p) {
+  const {
+    vendor_allocations, purchase_orders, vendor_pos, margin, expenses, ...safe
+  } = p || {};
+  return safe;
+}
+
 // Client / vendor ledger — keyed on ledger_link_token.
 exports.getLedgerData = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
@@ -895,7 +907,9 @@ exports.getLedgerData = onCall(
     const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
     return {
       client: { id: cid, ...stripSecrets(client) },
-      projects: mapDocs(projSnap),
+      // Projects: strip internal vendor/PO cost + margin (client sees only their
+      // revenue-side figures — grand total, invoices, payments).
+      projects: projSnap.docs.map((d) => ({ id: d.id, ...stripProjectInternalCosts(d.data()) })),
       payments: mapDocs(paySnap),
       vendorPayments: mapDocs(vpaySnap),
       purchaseInvoices: mapDocs(piSnap),
@@ -943,6 +957,7 @@ exports.getReimbursableData = onCall(
     const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('reimbursable_token', '==', token).limit(1).get();
     if (q.empty) throw new HttpsError('not-found', 'Invalid or expired link.');
     const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.reimbursable_token_enabled === false) throw new HttpsError('permission-denied', 'This link has been disabled.');
     if (p.reimbursable_token_expires_at && new Date(p.reimbursable_token_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This link has expired. Please request a new link.');
     let client = null;
     if (p.client_id) {
@@ -976,8 +991,9 @@ exports.getQuoteApprovalData = onCall(
     if (q.empty) throw new HttpsError('not-found', 'Invalid or expired quote approval link.');
     const pDoc = q.docs[0]; const p = pDoc.data();
     if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
-    // Drop internal cost fields — the client approves the QUOTE (their price), not our costs.
-    const { vendor_allocations, purchase_orders, vendor_pos, margin, expenses, ...quoteSafe } = p;
+    // Drop internal cost fields + reimbursable estimates — the client approves the
+    // QUOTE (their price), not our costs or internal reimbursable working notes.
+    const { vendor_allocations, purchase_orders, vendor_pos, margin, expenses, reimbursable_expenses, ...quoteSafe } = p;
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
     return {
       project: { id: pDoc.id, ...stripSecrets(quoteSafe) },
@@ -994,7 +1010,13 @@ exports.submitQuoteApproval = onCall(
     const q = await db.collection(`artifacts/${appId}/public/data/projects`).where('quote_approval_token', '==', token).limit(1).get();
     if (q.empty) throw new HttpsError('not-found', 'Invalid or expired quote approval link.');
     const pDoc = q.docs[0]; const p = pDoc.data();
+    if (p.quote_approval_enabled === false) throw new HttpsError('permission-denied', 'This quote approval link has been disabled.');
     if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
+    // Finality: once the client has responded, the link cannot flip the decision
+    // (no re-confirm after reject, and no repeated status churn).
+    if (p.quote_status === 'approved' || p.quote_status === 'rejected') {
+      throw new HttpsError('failed-precondition', `This quote was already ${p.quote_status}. Please contact us if you need to change your response.`);
+    }
     const now = new Date().toISOString();
     const update = decision === 'approved'
       ? { status: 'Confirmed', quote_status: 'approved', quote_approved_at: now }
@@ -1002,6 +1024,33 @@ exports.submitQuoteApproval = onCall(
     await pDoc.ref.update(update);
     return { ok: true, decision };
   }
+);
+
+// Contact directory: returns clients stripped of ALL financial fields (no
+// opening_balance / referral_rate / tokens) for any recognised, non-anonymous
+// role. Used to populate the clients state for roles denied raw client reads
+// (Coordinators, Field Techs) so name resolution + the Contacts page still work.
+exports.getContacts = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  async (req) => {
+    const { appId } = req.data || {};
+    if (!appId) throw new HttpsError('invalid-argument', 'appId required');
+    await assertAppUser(req.auth, appId);
+    const snap = await db.collection(`artifacts/${appId}/public/data/clients`).get();
+    const contacts = snap.docs.map((d) => {
+      const c = d.data();
+      return {
+        id: d.id,
+        name: c.name || '',
+        type: c.type || 'Client',
+        gstin: c.gstin || '',
+        address: c.address || '',
+        state: c.state || '',
+        contacts: (c.contacts || []).map((p) => ({ name: p.name || '', phone: p.phone || '', email: p.email || '' })),
+      };
+    }).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return { contacts };
+  },
 );
 
 // ── Payments: Razorpay payment links + webhook auto-reconcile ───────────────
