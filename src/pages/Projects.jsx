@@ -822,7 +822,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleShareQuoteForApproval = async () => {
-    if (!can(role, 'projects', 'edit')) return addToast('Access denied: insufficient permissions.', 'error');
+    // Owner-scoped: only the owning manager (or admin/accountant) may mint a public
+    // quote-approval link — a non-owner manager must not expose another's quote amounts.
+    if (!can(role, 'projects', 'edit') || !canViewProjectFinancials) return addToast('Access denied: insufficient permissions.', 'error');
     if (!selectedProject) return;
     const token = selectedProject.quote_approval_token || generateSecureToken();
     // Token expires in 30 days
@@ -1441,7 +1443,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   // ==========================================
 
   const handleSaveProformaInvoice = async () => {
-    if (!can(role, 'projects', 'invoice')) return addToast('Access denied: insufficient permissions.', 'error');
+    if (!can(role, 'projects', 'invoice') || !canViewProjectFinancials) return addToast('Access denied: insufficient permissions.', 'error');
     if (!selectedProject) return;
     try {
       const fy = getFinancialYear();
@@ -1490,7 +1492,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const handleDeleteProformaInvoice = async (piRecord) => {
-    if (!can(role, 'projects', 'delete')) return addToast('Access denied: insufficient permissions.', 'error');
+    if (!can(role, 'projects', 'delete') || !canViewProjectFinancials) return addToast('Access denied: insufficient permissions.', 'error');
     setDeleteConfirm({
       isOpen: true,
       requireTyped: false,
@@ -1511,8 +1513,10 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     });
   };
 
-  const generateTaxInvoicePDF = () => generateTaxInvoicePDFImpl({ canManageProjectInvoices, addToast, getOrgSettings, clients, selectedProject, logAction });
-  const generateProformaInvoicePDF = (piData) => generateProformaInvoicePDFImpl(piData, { canManageProjectInvoices, addToast, getOrgSettings, clients, selectedProject });
+  // Ownership-aware: the impl's internal `if (!canManageProjectInvoices)` guard now
+  // also fails for a non-owner manager, so no PDF path leaks another manager's rates.
+  const generateTaxInvoicePDF = () => generateTaxInvoicePDFImpl({ canManageProjectInvoices: canViewProjectFinancials && canManageProjectInvoices, addToast, getOrgSettings, clients, selectedProject, logAction });
+  const generateProformaInvoicePDF = (piData) => generateProformaInvoicePDFImpl(piData, { canManageProjectInvoices: canViewProjectFinancials && canManageProjectInvoices, addToast, getOrgSettings, clients, selectedProject });
 
   const downloadEWayBillJSON = () => downloadEWayBillJSONImpl({ getOrgSettings, clients, selectedProject, challanSelection, inventory, challanForm });
 
@@ -2133,12 +2137,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                 message={`Dear ${projectClientObj().name || 'Customer'}, please find our quotation for ${selectedProject.project_name} attached.`}
               />
             )}
-            {canManageProjectInvoices && (
+            {canViewProjectFinancials && canManageProjectInvoices && (
               <button onClick={() => { setProformaForm({ date: new Date().toISOString().split('T')[0], notes: '', payment_terms: '' }); setIsProformaModalOpen(true); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-teal-50 hover:border-teal-200 text-slate-700 transition-all">
                 <Receipt size={16} className="text-teal-600" /> Proforma Invoice
               </button>
             )}
-            {canManageProjectInvoices && (selectedProject.proforma_invoices || []).length > 0 && (
+            {canViewProjectFinancials && canManageProjectInvoices && (selectedProject.proforma_invoices || []).length > 0 && (
               <button onClick={() => setIsProformaHistoryOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-100 text-slate-700 transition-all" title="Proforma Invoice History">
                 <History size={16} className="text-teal-500" />
                 <span className="font-mono text-xs bg-teal-100 text-teal-700 px-1.5 rounded">{(selectedProject.proforma_invoices || []).length}</span>
@@ -2161,7 +2165,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             <div className="h-6 w-px bg-slate-200 mx-2 hidden sm:block"></div>
             <span className="text-xs font-semibold text-slate-500 uppercase mr-2">Actions:</span>
 
-            {selectedProject.status === 'Quoted' && (role === 'admin' || role === 'manager') && (
+            {selectedProject.status === 'Quoted' && canViewProjectFinancials && (role === 'admin' || role === 'manager') && (
               <button onClick={handleShareQuoteForApproval} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-indigo-50 hover:border-indigo-200 text-slate-700 transition-all">
                 <Share2 size={16} className="text-indigo-500" /> Share for Approval
               </button>
@@ -2526,8 +2530,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               </div>
             </div>
 
-            {/* Invoice Card */}
-            {canManageProjectInvoices && (
+            {/* Invoice Card — owner-scoped: a non-owner manager must not see another
+                manager's client invoice no./amounts or print their Tax Invoice PDF. */}
+            {canViewProjectFinancials && canManageProjectInvoices && (
               <div className={`rounded-xl p-6 shadow-sm border transition-colors ${selectedProject.invoice_status === 'Invoiced' ? 'bg-green-50 border-green-200' : 'bg-white border-slate-100'}`}>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
@@ -3080,7 +3085,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             </div>
         </Modal>
 
-        {canManageProjectInvoices && (
+        {canViewProjectFinancials && canManageProjectInvoices && (
           <>
             {/* ===== PROFORMA INVOICE MODALS ===== */}
             {/* Create Proforma Invoice */}
