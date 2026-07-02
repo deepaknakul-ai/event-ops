@@ -232,6 +232,57 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     notify(`${done} client(s)/vendor(s) now owned by you.`, 'success');
   };
 
+  // Scoped receipt form: a manager can record a payment from their OWN clients
+  // (they only see their own here) without the full Finance page. Managers' entries
+  // are flagged 'Pending Review' for Owner/Accountant. client_owner_id is stamped
+  // server-side by onPaymentWritten; we also set it locally for immediacy.
+  // Managers only: they have create_own_receipt but not full finance.create
+  // (Owner/Accountant use the Finance page). Managers are finance-writers at the
+  // rule level, so the payment write succeeds.
+  const canRecordReceipt = can(role, 'finance', 'create_own_receipt') && !can(role, 'finance', 'create');
+  const blankReceipt = () => ({ client_id: '', project_id: 'general', amount: '', date: new Date().toISOString().slice(0, 10), mode: 'UPI', reference: '', remarks: '' });
+  const [receiptOpen, setReceiptOpen] = useState(false);
+  const [savingReceipt, setSavingReceipt] = useState(false);
+  const [receiptForm, setReceiptForm] = useState(blankReceipt());
+  const receiptClientProjects = useMemo(
+    () => (projects || []).filter((p) => p.client_id === receiptForm.client_id),
+    [projects, receiptForm.client_id],
+  );
+  const saveReceipt = async () => {
+    if (!canRecordReceipt) return notify('You are not permitted to record receipts.', 'error');
+    const cl = clients.find((c) => c.id === receiptForm.client_id);
+    if (!cl) return notify('Select a client.', 'error');
+    const amt = parseFloat(receiptForm.amount);
+    if (!(amt > 0)) return notify('Enter a valid amount.', 'error');
+    setSavingReceipt(true);
+    try {
+      const data = {
+        client_id: cl.id,
+        client_name: cl.name,
+        project_id: receiptForm.project_id || 'general',
+        client_owner_id: cl.owner_id || currentEmpId || '',
+        amount: amt,
+        date: receiptForm.date,
+        mode: receiptForm.mode,
+        reference: receiptForm.reference,
+        remarks: receiptForm.remarks,
+        status: role === 'manager' ? 'Pending Review' : 'Approved',
+        recorded_by_role: role,
+        created_at: new Date().toISOString(),
+        created_by: currentEmpId || '',
+        updated_at: new Date().toISOString(),
+      };
+      const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), data);
+      logAction('payments', 'receive_payment', ref.id, data, `Receipt from ${cl.name}`);
+      notify(role === 'manager' ? 'Receipt recorded — pending Owner/Accountant review.' : 'Payment recorded.', 'success');
+      setReceiptOpen(false);
+      setReceiptForm(blankReceipt());
+    } catch (e) {
+      notify(`Could not record receipt: ${e?.message || 'error'}`, 'error');
+    }
+    setSavingReceipt(false);
+  };
+
   const openAdd = () => {
     setEditingId(null);
     setFormData({ name: '', type: 'Client', gstin: '', state: '', address: '', contacts: [], billing_terms: 'Net 15', custom_terms: '', remarks: '', companies: [], owner_id: currentEmpId || '', referral_rate: 10, opening_balance: { ...blankOpening } });
@@ -747,6 +798,9 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           {role === 'admin' && activeTab === 'list' && unownedClients.length > 0 && (
             <button onClick={handleClaimUnowned} title="Assign all legacy (un-owned) clients/vendors to admin" className="flex items-center justify-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-700 hover:bg-amber-100 whitespace-nowrap text-sm font-medium"><Plus size={16} /> Claim {unownedClients.length} un-owned</button>
           )}
+          {canRecordReceipt && activeTab === 'list' && (
+            <button onClick={() => { setReceiptForm(blankReceipt()); setReceiptOpen(true); }} title="Record a payment received from your client" className="flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap text-sm font-medium"><CreditCard size={16} /> Record Receipt</button>
+          )}
           {role !== 'tech' && role !== 'auditor' && activeTab === 'list' && (
             <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap flex-1 md:flex-none"><Plus size={18} /> Add Client/Vendor</button>
           )}
@@ -946,6 +1000,56 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           </div>
         </div>
       )}
+      <Modal isOpen={receiptOpen} onClose={() => setReceiptOpen(false)} title="Record Receipt">
+        <div className="space-y-3">
+          <p className="text-xs text-slate-500">Record a payment received from one of your clients.{role === 'manager' ? ' It will be flagged for Owner/Accountant review.' : ''}</p>
+          <div>
+            <label className="text-sm font-bold text-slate-700">Client</label>
+            <select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={receiptForm.client_id} onChange={(e) => setReceiptForm({ ...receiptForm, client_id: e.target.value, project_id: 'general' })}>
+              <option value="">— Select your client —</option>
+              {[...clients].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))).map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          {receiptForm.client_id && (
+            <div>
+              <label className="text-sm font-bold text-slate-700">Against Project (optional)</label>
+              <select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={receiptForm.project_id} onChange={(e) => setReceiptForm({ ...receiptForm, project_id: e.target.value })}>
+                <option value="general">General / On account</option>
+                {receiptClientProjects.map((p) => <option key={p.id} value={p.id}>{p.project_name}</option>)}
+              </select>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-sm font-bold text-slate-700">Amount (₹)</label>
+              <input type="number" min="0" step="0.01" className="w-full rounded border border-slate-300 p-2 text-black" value={receiptForm.amount} onChange={(e) => setReceiptForm({ ...receiptForm, amount: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-sm font-bold text-slate-700">Date</label>
+              <input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={receiptForm.date} onChange={(e) => setReceiptForm({ ...receiptForm, date: e.target.value })} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-sm font-bold text-slate-700">Mode</label>
+              <select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={receiptForm.mode} onChange={(e) => setReceiptForm({ ...receiptForm, mode: e.target.value })}>
+                <option>UPI</option><option>Cash</option><option>Bank Transfer</option><option>Cheque</option><option>Card</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-bold text-slate-700">Reference</label>
+              <input className="w-full rounded border border-slate-300 p-2 text-black" placeholder="UTR / cheque no." value={receiptForm.reference} onChange={(e) => setReceiptForm({ ...receiptForm, reference: e.target.value })} />
+            </div>
+          </div>
+          <div>
+            <label className="text-sm font-bold text-slate-700">Remarks</label>
+            <input className="w-full rounded border border-slate-300 p-2 text-black" value={receiptForm.remarks} onChange={(e) => setReceiptForm({ ...receiptForm, remarks: e.target.value })} />
+          </div>
+          <button onClick={saveReceipt} disabled={savingReceipt} className="w-full rounded bg-emerald-600 text-white py-2 hover:bg-emerald-700 disabled:opacity-50">{savingReceipt ? 'Recording…' : 'Record Receipt'}</button>
+        </div>
+      </Modal>
       <Modal isOpen={isAddOpen} onClose={() => setIsAddOpen(false)} title={editingId ? "Edit Client/Vendor" : "Add Client/Vendor"}>
         <div className="space-y-6">
           <div className="space-y-3">
