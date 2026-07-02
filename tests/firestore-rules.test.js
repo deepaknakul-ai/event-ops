@@ -44,7 +44,9 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('employees', 'tech1')), { role: 'tech', name: 'Tech' });
       await setDoc(doc(db, path('employees', 'u1')), { role: 'user', name: 'Coordinator' });
       await setDoc(doc(db, path('clients', 'cA')), { name: 'Client A', owner_id: 'mgrA' });
-      await setDoc(doc(db, path('payments', 'pay1')), { amount: 1000, client_id: 'cA' });
+      // pay1: client cA is owned by mgrA. pay_u: a client referred by Coordinator u1.
+      await setDoc(doc(db, path('payments', 'pay1')), { amount: 1000, client_id: 'cA', client_owner_id: 'mgrA' });
+      await setDoc(doc(db, path('payments', 'pay_u')), { amount: 250, client_id: 'cU', client_owner_id: 'u1' });
       await setDoc(doc(db, path('projects', 'projA')), { project_name: 'Proj A', client_owner_id: 'mgrA' });
       await setDoc(doc(db, path('audit_logs', 'log1')), { action: 'test' });
       await setDoc(doc(db, path('journal_entries', 'je1')), { debit_amount: 100 });
@@ -178,14 +180,35 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
-  // Documents the CURRENT baseline gaps that later Slice-C steps will close.
-  // If one starts FAILING, the rule was tightened (flip it to assertFails).
-  describe('baseline gaps — still open at the rule layer (later Slice-C steps)', () => {
-    test('GAP: tech can still read any project', async () => {
-      await assertSucceeds(getDoc(doc(asUser('tech1'), path('projects', 'projA'))));
+  describe('payments — owner-scoped for Coordinator, all for finance/manager (Slice C-5)', () => {
+    test('admin reads any payment', async () => {
+      await assertSucceeds(getDoc(doc(asUser('admin1'), path('payments', 'pay1'))));
     });
-    test('GAP: payments still global (user commission reads it — needs owner denorm)', async () => {
-      await assertSucceeds(getDoc(doc(asUser('u1'), path('payments', 'pay1'))));
+    test('manager reads any payment', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('payments', 'pay1'))));
+    });
+    test('coordinator reads a payment of a client THEY referred', async () => {
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('payments', 'pay_u'))));
+    });
+    test('coordinator CANNOT read a payment of a client they did NOT refer', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('payments', 'pay1'))));
+    });
+    test('tech CANNOT read any payment', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('payments', 'pay_u'))));
+    });
+    test('coordinator CAN list own-referred payments (scoped query the loader runs)', async () => {
+      await assertSucceeds(getDocs(query(collection(asUser('u1'), path('payments')), where('client_owner_id', '==', 'u1'))));
+    });
+    test('coordinator CANNOT list all payments (global denied)', async () => {
+      await assertFails(getDocs(collection(asUser('u1'), path('payments'))));
+    });
+  });
+
+  // Documents the CURRENT baseline gaps that later steps will close.
+  // If one starts FAILING, the rule was tightened (flip it to assertFails).
+  describe('baseline gaps — still open at the rule layer (by decision/risk)', () => {
+    test('GAP: tech can still read any project (dispatch-flow risk — deferred)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('tech1'), path('projects', 'projA'))));
     });
   });
 });

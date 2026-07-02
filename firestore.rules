@@ -128,7 +128,15 @@ service cloud.firestore {
                   // leads they created (manager-vs-manager pipeline isolation); tech/user
                   // denied entirely.
                   && (seesAllParties(appId) || collection != 'leads'
-                      || (hasRole(appId, 'manager') && resource.data.get('created_by', '') == userEmpId()));
+                      || (hasRole(appId, 'manager') && resource.data.get('created_by', '') == userEmpId()))
+                  // Payments: Owner/Accountant/Manager read all; a Coordinator (user)
+                  // reads ONLY payments of clients they referred (denormalised
+                  // client_owner_id == uid, for their commission); tech denied. The
+                  // client_owner_id is stamped server-side by onPaymentWritten +
+                  // backfillPaymentOwners.
+                  && (seesAllParties(appId) || hasRole(appId, 'manager')
+                      || collection != 'payments'
+                      || resource.data.get('client_owner_id', '') == userEmpId());
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.

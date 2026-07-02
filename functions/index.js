@@ -1275,18 +1275,46 @@ exports.onClientWritten = onDocumentWritten(
     const oldOwner = before ? (before.owner_id || '') : ' none';
     if (newOwner === oldOwner) return; // owner unchanged
     const { appId, cid } = event.params;
-    const projSnap = await db.collection(`artifacts/${appId}/public/data/projects`).where('client_id', '==', cid).get();
-    if (projSnap.empty) return;
-    let batch = db.batch();
-    let pending = 0;
-    let stamped = 0;
-    for (const d of projSnap.docs) {
-      if ((d.data().client_owner_id || '') === newOwner) continue;
-      batch.update(d.ref, { client_owner_id: newOwner });
-      pending += 1; stamped += 1;
-      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
-    }
-    if (pending > 0) await batch.commit();
-    logger.info(`onClientWritten: client ${cid} owner '${oldOwner}'->'${newOwner}', stamped ${stamped} project(s)`);
+    // Stamp client_owner_id onto the client's projects AND payments so owner-scoped
+    // reads work (project financials + the coordinator commission view).
+    const stampByClient = async (name) => {
+      const snap = await db.collection(`artifacts/${appId}/public/data/${name}`).where('client_id', '==', cid).get();
+      let batch = db.batch(); let pending = 0; let stamped = 0;
+      for (const d of snap.docs) {
+        if ((d.data().client_owner_id || '') === newOwner) continue;
+        batch.update(d.ref, { client_owner_id: newOwner });
+        pending += 1; stamped += 1;
+        if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+      }
+      if (pending > 0) await batch.commit();
+      return stamped;
+    };
+    const stampedProjects = await stampByClient('projects');
+    const stampedPayments = await stampByClient('payments');
+    logger.info(`onClientWritten: client ${cid} owner '${oldOwner}'->'${newOwner}', stamped ${stampedProjects} project(s), ${stampedPayments} payment(s)`);
   },
 );
+
+// ── Keep payments' denormalised client_owner_id in sync ─────────────────────
+// Stamp client_owner_id onto a payment from its client on every write, so the
+// coordinator commission view (owner-scoped payment reads) works regardless of
+// which surface created the payment (Finance page, assistant, Razorpay webhook).
+// The guard makes this idempotent, so the self-triggered re-write stabilises.
+exports.onPaymentWritten = onDocumentWritten(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60, document: 'artifacts/{appId}/public/data/payments/{payId}' },
+  async (event) => {
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    if (!after) return; // deleted
+    const clientId = after.client_id || '';
+    const { appId, payId } = event.params;
+    let owner = '';
+    if (clientId) {
+      const cSnap = await db.doc(`artifacts/${appId}/public/data/clients/${clientId}`).get().catch(() => null);
+      owner = (cSnap && cSnap.exists) ? (cSnap.data().owner_id || '') : '';
+    }
+    if ((after.client_owner_id || '') === owner) return; // already correct — stops the loop
+    await event.data.after.ref.update({ client_owner_id: owner });
+    logger.info(`onPaymentWritten: payment ${payId} client_owner_id -> '${owner}'`);
+  },
+);
+

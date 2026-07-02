@@ -3096,7 +3096,14 @@ const [payroll, setPayroll] = useState([]);
     // stake). payments stays global for now — the 'user' commission view reads it
     // (owner-denormalisation scoping is a dedicated later Slice-C step).
     const partyFinanceViewer = financeViewer || role === 'manager';
-    const unsubPayments = onSnapshot(finCol('payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // payments: admin/accountant/manager see all; a Coordinator (user) sees only
+    // payments of clients they referred (client_owner_id == me, for commission);
+    // tech gets none. client_owner_id is maintained server-side (onPaymentWritten).
+    const unsubPayments = partyFinanceViewer
+      ? onSnapshot(finCol('payments'), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))))
+      : (role === 'user'
+          ? onSnapshot(query(finCol('payments'), where('client_owner_id', '==', myEmpId)), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop)
+          : noop);
     const unsubVendorPayments = partyFinanceViewer ? onSnapshot(finCol('vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubPurchaseInvoices = partyFinanceViewer ? onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubTaxInvoices = partyFinanceViewer ? onSnapshot(finCol('tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
