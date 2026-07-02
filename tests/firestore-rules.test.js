@@ -245,6 +245,27 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
+  describe('manager cannot write accounting ledgers (round-5 escalation fix)', () => {
+    test('manager CANNOT create a journal_entry', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('journal_entries', 'je_m')), { debit_amount: 100, credit_amount: 100 }));
+    });
+    test('manager CANNOT overwrite chart_of_accounts', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('chart_of_accounts', 'coa1')), { name: 'Hacked' }));
+    });
+    test('manager CANNOT write opening_balances', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('opening_balances', 'ob_m')), { debit_amount: 5 }));
+    });
+    test('admin CAN create a journal_entry', async () => {
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('journal_entries', 'je_a')), { debit_amount: 100, credit_amount: 100 }));
+    });
+    test('accountant CAN create a journal_entry', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_ac')), { debit_amount: 50, credit_amount: 50 }));
+    });
+    test('manager CAN still record a payment (receipt path preserved)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_recpt')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'Cash' }));
+    });
+  });
+
   describe('party_accounts writes — finance-writers only (round-4 fix)', () => {
     test('manager CAN write party_accounts (client-upsert side-effect)', async () => {
       await assertSucceeds(setDoc(doc(asUser('mgrA'), path('party_accounts', 'pa_m')), { current_name: 'ACME' }));

@@ -170,7 +170,14 @@ service cloud.firestore {
             && hasAnyRole(appId, ['admin', 'accountant', 'manager'])
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['ai_reviewed', 'ai_reviewed_by', 'ai_reviewed_by_name', 'ai_reviewed_at']))
-          || (isFinanceWriter(appId) && (
+          // Managers may WRITE only the transactional collections they legitimately
+          // use (payments receipt, own-client tax invoices, the party registry via
+          // client-upsert, vendor payments). The pure accounting ledgers
+          // (journal/chart/opening/fiscal/recurring/reconcile/payouts/purchase_
+          // invoices) require admin/accountant — a manager must not create/overwrite
+          // GL data it cannot even read.
+          || (((collection in ['payments', 'tax_invoices', 'party_accounts', 'vendor_payments'])
+                 ? isFinanceWriter(appId) : seesAllParties(appId)) && (
             collection != 'journal_drafts'
             || isAdmin(appId)
             // CREATE: managers may set approval_status to 'pending' only; no approver stamps.

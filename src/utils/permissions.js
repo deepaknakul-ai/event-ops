@@ -346,7 +346,9 @@ export const LOCKED_PERMISSIONS = {
   hr_reports:        ['view', 'export'],
   hr_penalties:      ['view', 'create', 'bulk_apply'],      // salary-deduction writes
   hr_dashboard:      ['view'],                              // HR attendance/penalty aggregates
-  hr_attendance:     ['view'],
+  hr_attendance:     ['view', 'create', 'edit', 'delete', 'close_shift'],  // feeds payroll hours
+  hr_leaves:         ['approve', 'edit_type', 'cancel'],    // paid-leave payroll control
+  hr_shifts:         ['approve', 'clarify'],                // approved shift → payroll timeLog
   hr_settings:       ['view', 'edit'],                      // admin-only HR/payroll config
   audit_logs:        ['view'],
   admin_tools:       ['view', 'edit'],
