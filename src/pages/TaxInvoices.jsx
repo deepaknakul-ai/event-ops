@@ -196,9 +196,17 @@ const TaxInvoices = ({
     [taxInvoices, editingId]
   );
 
+  // Managers see only their OWN clients' invoices. The `clients` prop is already
+  // owner-scoped for managers (App.jsx), so membership in it = an owned client.
+  const ownInvoices = useMemo(() => {
+    if (role !== 'manager') return taxInvoices;
+    const mine = new Set((clients || []).map(c => c.id));
+    return taxInvoices.filter(i => mine.has(i.client_id));
+  }, [taxInvoices, clients, role]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return taxInvoices
+    return ownInvoices
       .filter(inv => {
         if (!showCancelled && inv.status === 'Cancelled') return false;
         if (search && !`${inv.invoice_no} ${inv.client_name} ${inv.remarks || ''}`.toLowerCase().includes(q)) return false;
@@ -207,7 +215,7 @@ const TaxInvoices = ({
         return true;
       })
       .sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || ''));
-  }, [taxInvoices, search, filterClient, filterFY, showCancelled]);
+  }, [ownInvoices, search, filterClient, filterFY, showCancelled]);
 
   const fyOptions = useMemo(() => {
     const fys = new Set(taxInvoices.map(i => getFYFromDate(i.invoice_date)));

@@ -19,6 +19,10 @@ const ctx = {
 };
 
 const data = {
+  // Finance-capable caller: project/inventory money is shown (executor gates money
+  // rows on these ctx flags — set by AppAssistant from the caller's role).
+  canViewProjectValue: true,
+  canViewInventoryRates: true,
   projects: [
     { id: 'p1', project_name: 'Wedding Spectacular', client_id: 'c1', client_name: 'ACME Pvt Ltd', status: 'Ongoing', setup_date: D(-2), start_date: D(-1), end_date: D(2), total: 100000, items: [] },
     { id: 'p2', project_name: 'Concert Aug', client_id: 'c2', client_name: 'Sony Live', status: 'Confirmed', start_date: '2026-08-10', end_date: '2026-08-12', total: 50000 },
@@ -180,6 +184,14 @@ describe('Phase 5 executor — new builders', () => {
     expect(r.title).toBe('Wedding Spectacular');
     expect(r.rows.find((x) => x.label === 'Client').value).toBe('ACME Pvt Ltd');
     expect(r.rows.find((x) => x.label === 'Value').value).toMatch(/1,00,000/);
+  });
+
+  it('projects.details HIDES money rows when caller lacks project-value capability', () => {
+    const parsed = { intent: 'projects.details', entities: { projectName: 'Wedding Spectacular' }, issues: [] };
+    const r = executeAssistantIntent(parsed, { ...data, canViewProjectValue: false });
+    expect(r.rows.find((x) => x.label === 'Value')).toBeUndefined();
+    expect(r.rows.find((x) => x.label === 'Expenses booked')).toBeUndefined();
+    expect(r.rows.find((x) => x.label === 'Client').value).toBe('ACME Pvt Ltd'); // operational rows stay
   });
 
   it('inventory.byCategory filters', () => {

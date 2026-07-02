@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Search, X, Calendar, Users, Box, Keyboard } from 'lucide-react';
 import { formatCurrency, getProjectGrandTotal } from '../utils/helpers';
 import { STATUS_COLORS } from '../utils/constants';
+import { can } from '../utils/permissions';
 
 const SHORTCUTS = [
   { keys: 'Ctrl+K  or  /', action: 'Open Global Search' },
@@ -16,7 +17,9 @@ const SHORTCUTS = [
   { keys: '?', action: 'Show Keyboard Shortcuts' },
 ];
 
-const GlobalSearch = ({ projects = [], clients = [], inventory = [], isOpen, onClose }) => {
+const GlobalSearch = ({ projects = [], clients = [], inventory = [], isOpen, onClose, role = 'user' }) => {
+  const showProjectValue = can(role, 'projects', 'view_rates');
+  const showInventoryRate = can(role, 'inventory', 'view_rates');
   const [query, setQuery] = useState('');
   const [showShortcuts, setShowShortcuts] = useState(false);
   const inputRef = useRef(null);
@@ -154,7 +157,7 @@ const GlobalSearch = ({ projects = [], clients = [], inventory = [], isOpen, onC
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
                       <span className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_COLORS[p.status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>{p.status}</span>
-                      <span className="text-xs font-semibold text-slate-700 hidden sm:inline">{formatCurrency(getProjectGrandTotal(p))}</span>
+                      {showProjectValue && <span className="text-xs font-semibold text-slate-700 hidden sm:inline">{formatCurrency(getProjectGrandTotal(p))}</span>}
                     </div>
                   </button>
                 );
@@ -202,7 +205,7 @@ const GlobalSearch = ({ projects = [], clients = [], inventory = [], isOpen, onC
                     <div className="text-sm font-medium text-slate-800 truncate">{i.name}</div>
                     <div className="text-xs text-slate-500 truncate">{i.category} • {i.total} units available</div>
                   </div>
-                  <span className="text-xs font-semibold text-slate-700 flex-shrink-0">{formatCurrency(i.rate_per_day)}/day</span>
+                  {showInventoryRate && <span className="text-xs font-semibold text-slate-700 flex-shrink-0">{formatCurrency(i.rate_per_day)}/day</span>}
                 </button>
               ))}
             </div>

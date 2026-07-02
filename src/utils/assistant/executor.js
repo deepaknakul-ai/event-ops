@@ -124,7 +124,7 @@ function projectsByClient(ctx, clientName) {
     rows: rows.slice(0, 50).map((p) => ({
       id: p.id,
       line1: p.project_name || '—',
-      line2: `${p.status} · ${fmtINR(p.total || p.grand_total || 0)}`,
+      line2: ctx.canViewProjectValue ? `${p.status} · ${fmtINR(p.total || p.grand_total || 0)}` : `${p.status}`,
       line3: `${fmtDate(p.start_date)} → ${fmtDate(p.end_date)}`,
     })),
   };
@@ -194,7 +194,7 @@ function projectsUnbilled(ctx) {
       id: p.id,
       line1: p.project_name || '—',
       line2: `${p.client_name || '—'}`,
-      line3: `Value: ${fmtINR(p.total || p.grand_total || 0)}`,
+      line3: ctx.canViewProjectValue ? `Value: ${fmtINR(p.total || p.grand_total || 0)}` : (p.invoice_status || ''),
     })),
   };
 }
@@ -686,10 +686,15 @@ function projectsDetails(ctx, projectName) {
     { label: 'Client', value: p.client_name || '—' },
     { label: 'Status', value: p.status || '—' },
     { label: 'Window', value: `${fmtDate(p.setup_date || p.start_date)} → ${fmtDate(p.end_date || p.wrap_date)}` },
-    { label: 'Value', value: fmtINR(total) },
+    // Money rows (Value, Expenses booked) only for rate-viewing roles.
+    ...(ctx.canViewProjectValue ? [
+      { label: 'Value', value: fmtINR(total) },
+    ] : []),
     { label: 'Team', value: team.length ? team.join(', ') : '—' },
     { label: 'Items', value: String((p.items || []).length) },
-    { label: 'Expenses booked', value: `${expenses.length} · ${fmtINR(expenseTotal)}` },
+    ...(ctx.canViewProjectValue ? [
+      { label: 'Expenses booked', value: `${expenses.length} · ${fmtINR(expenseTotal)}` },
+    ] : []),
     { label: 'Invoice', value: p.invoice_status === 'Invoiced' ? `Invoiced ${p.invoice_no || ''} · ${fmtDate(p.invoice_date)}` : (p.status === 'Completed' ? 'Unbilled' : '—') },
   ];
   return {

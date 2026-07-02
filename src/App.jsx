@@ -3577,6 +3577,7 @@ const [payroll, setPayroll] = useState([]);
       <GlobalSearch
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
+        role={effectiveRole}
         projects={projects}
         clients={clients}
         inventory={inventory}
@@ -3682,6 +3683,7 @@ const [payroll, setPayroll] = useState([]);
               payments={payments}
               clients={clients}
               role={role}
+              currentEmpId={currentEmpId}
             />
             <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
               {theme === 'light' ? <Moon size={18} className="text-slate-400" /> : <Sun size={18} className="text-yellow-500" />}
@@ -3712,7 +3714,7 @@ const [payroll, setPayroll] = useState([]);
           </div>
           <div className="flex items-center gap-1">
             <OfflineIndicator offlineState={offlineState} role={role} />
-            <NotificationBell projects={projects} inventory={inventory} payments={payments} clients={clients} role={role} expenses={expenses} hrLeaves={hrLeaves} />
+            <NotificationBell projects={projects} inventory={inventory} payments={payments} clients={clients} role={role} expenses={expenses} hrLeaves={hrLeaves} currentEmpId={currentEmpId} />
             <button onClick={() => setIsSearchOpen(true)} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"><Search size={18} /></button>
             <button onClick={() => setMobileMenuOpen(true)} className="p-2 text-slate-500 hover:text-slate-700"><Menu /></button>
           </div>
@@ -3812,7 +3814,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/dashboard" element={<Dashboard projects={projects} expenses={expenses} role={effectiveRole} clients={clients} onProjectClick={(id) => setSelectedProjectId(id)} employees={safeEmployees} payments={payments} db={db} appId={appId} timeLogs={timeLogs} hqSettings={hqSettings} currentEmpId={effectiveEmpId} logAction={logAction} addToast={addToast} payouts={payouts} vendorPayments={vendorPayments} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} inventory={inventory} journalEntries={journalEntries} hrLeaves={hrLeaves} currentUserId={user?.uid} />} />
                 <Route path="/projects" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} payments={payments} /></ProtectedRoute>} />
                 <Route path="/projects/:projectId" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} payments={payments} /></ProtectedRoute>} />
-                <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} db={db} appId={appId} logAction={logAction} purchaseInvoices={purchaseInvoicesList} lockedFYs={lockedFYs} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} purchaseInvoices={purchaseInvoicesList} lockedFYs={lockedFYs} addToast={addToast} /></ProtectedRoute>} />
                 <Route path="/clients" element={<ProtectedRoute role={effectiveRole} resource="clients"><Clients clients={clients} inventory={inventory} projects={projects} payments={payments} vendorPayments={vendorPayments} expenses={expenses} timeLogs={timeLogs} employees={safeEmployees} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/contacts" element={<ProtectedRoute role={effectiveRole} resource="contacts"><Contacts clients={clients} /></ProtectedRoute>} />
                 <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
@@ -3834,9 +3836,9 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/daily-report" element={<ProtectedRoute role={effectiveRole} resource="daily_reports"><DailyReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} timeLogs={timeLogs} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/business-report" element={<ProtectedRoute role={effectiveRole} resource="reports"><BusinessReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/challans" element={<ProtectedRoute role={effectiveRole} resource="challans"><ChallanManager projects={projects} clients={clients} inventory={inventory} db={db} appId={appId} logAction={logAction} user={user} role={effectiveRole} /></ProtectedRoute>} />
-                <Route path="/documents" element={<ProtectedRoute role={effectiveRole} resource="documents"><DocumentsHub projects={projects} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
+                <Route path="/documents" element={<ProtectedRoute role={effectiveRole} resource="documents"><DocumentsHub projects={projects} clients={clients} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/purchase-invoices" element={<ProtectedRoute role={effectiveRole} resource="purchase_invoices"><PurchaseInvoices db={db} appId={appId} logAction={logAction} inventory={inventory} clients={clients} projects={projects} role={effectiveRole} purchaseInvoicesExternal={purchaseInvoicesList} setPurchaseInvoicesExternal={setPurchaseInvoicesList} lockedFYs={lockedFYs} /></ProtectedRoute>} />
-                <Route path="/tax-invoices" element={<ProtectedRoute role={effectiveRole} resource="tax_invoices"><TaxInvoices db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} taxInvoices={taxInvoicesList} projects={projects} clients={clients} payments={payments} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/tax-invoices" element={<ProtectedRoute role={effectiveRole} resource="tax_invoices"><TaxInvoices db={db} appId={appId} role={effectiveRole} currentEmpId={effectiveEmpId} user={user} logAction={logAction} addToast={addToast} taxInvoices={taxInvoicesList} projects={projects} clients={clients} payments={payments} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/audit" element={<ProtectedRoute role={effectiveRole} resource="audit_logs"><AuditLogs db={db} appId={appId} role={effectiveRole} /></ProtectedRoute>} />
                               <Route path="/data-portal" element={<ProtectedRoute role={effectiveRole} resource="admin_tools"><DataPortal db={db} appId={appId} role={effectiveRole} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
                 <Route path="/profile" element={<ProfileSettings employee={currentEmployee} db={db} appId={appId} logAction={logAction} />} />

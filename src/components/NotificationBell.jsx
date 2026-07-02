@@ -3,7 +3,7 @@ import { Bell, Calendar, FileText, AlertTriangle, Package, ChevronRight, X, Wren
 import { useNavigate } from 'react-router-dom';
 import { formatCurrency, getProjectGrandTotal, isDateOverlap, getServiceStatus } from '../utils/helpers';
 
-const NotificationBell = ({ projects = [], inventory = [], payments = [], clients = [], role = 'tech', expenses = [], hrLeaves = [] }) => {
+const NotificationBell = ({ projects = [], inventory = [], payments = [], clients = [], role = 'tech', expenses = [], hrLeaves = [], currentEmpId = null }) => {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef(null);
   const navigate = useNavigate();
@@ -72,10 +72,12 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
       });
     }
 
-    // 3. Unpaid invoices — finance roles (admin/manager/accountant)
+    // 3. Unpaid invoices — finance roles (admin/manager/accountant). A manager is
+    // scoped to their OWN clients' projects (no cross-manager receivables).
     if (['admin', 'manager', 'accountant'].includes(role)) {
       projects
         .filter(p => ['Completed', 'Closed'].includes(p.status))
+        .filter(p => role !== 'manager' || p.client_owner_id === currentEmpId || p.created_by === currentEmpId)
         .forEach(p => {
           const total = getProjectGrandTotal(p);
           const received = payments
@@ -141,7 +143,7 @@ const NotificationBell = ({ projects = [], inventory = [], payments = [], client
     }
 
     return items.sort((a, b) => (a.priority === 'high' ? -1 : 1) - (b.priority === 'high' ? -1 : 1));
-  }, [projects, inventory, payments, clients, role, navigate]);
+  }, [projects, inventory, payments, clients, role, navigate, currentEmpId]);
 
   const highCount = notifications.filter(n => n.priority === 'high').length;
   const count = notifications.length;

@@ -56,7 +56,15 @@ const fmt = (dateStr) => {
 };
 
 // ─── Main Component ─────────────────────────────────────────────────────────────
-const DocumentsHub = ({ projects = [], clients = [], role, db, appId, logAction }) => {
+const DocumentsHub = ({ projects = [], clients = [], role, currentEmpId = null, db, appId, logAction }) => {
+  // A manager sees documents (PO amounts, cost breakdowns, proforma totals) only
+  // for their OWN projects — never another manager's clients'.
+  const scopedProjects = useMemo(
+    () => (role === 'manager'
+      ? projects.filter(p => p.client_owner_id === currentEmpId || p.created_by === currentEmpId)
+      : projects),
+    [projects, role, currentEmpId],
+  );
   const navigate = useNavigate();
 
   // ── Filters ──────────────────────────────────────────────────────────────────
@@ -79,7 +87,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, db, appId, logAction 
   const allDocs = useMemo(() => {
     const list = [];
 
-    projects.forEach(p => {
+    scopedProjects.forEach(p => {
       const client = clients.find(c => c.id === p.client_id);
       const clientName = client?.name || p.client_name || '—';
 
@@ -154,7 +162,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, db, appId, logAction 
     });
 
     return list;
-  }, [projects, clients]);
+  }, [scopedProjects, clients]);
 
   // ─── Filtered + sorted list ───────────────────────────────────────────────────
   const filtered = useMemo(() => {

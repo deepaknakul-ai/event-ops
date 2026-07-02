@@ -300,6 +300,7 @@ export default function AppAssistant({
     taxInvoices, purchaseInvoices,
     inventory, journalEntries, hrLeaves,
     canViewInventoryRates: can(role, 'inventory', 'view_rates'),
+    canViewProjectValue: can(role, 'projects', 'view_rates'),
   }), [projects, clients, employees, expenses, payments, payouts, vendorPayments, taxInvoices, purchaseInvoices, inventory, journalEntries, hrLeaves, role]);
 
   useEffect(() => {
