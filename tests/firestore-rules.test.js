@@ -167,6 +167,12 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     test('accountant reads a purchase invoice', async () => {
       await assertSucceeds(getDoc(doc(asUser('acct1'), path('purchase_invoices', 'pi1'))));
     });
+    test('manager CANNOT read a purchase invoice (round-17: admin/accountant-only)', async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('purchase_invoices', 'pi1'))));
+    });
+    test('manager CANNOT list purchase_invoices (round-17)', async () => {
+      await assertFails(getDocs(collection(asUser('mgrA'), path('purchase_invoices'))));
+    });
     test('tech CANNOT read a tax invoice', async () => {
       await assertFails(getDoc(doc(asUser('tech1'), path('tax_invoices', 'ti1'))));
     });

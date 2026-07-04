@@ -3141,7 +3141,9 @@ const [payroll, setPayroll] = useState([]);
           ? onSnapshot(query(finCol('payments'), where('client_owner_id', '==', myEmpId)), (snap) => setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop)
           : noop);
     const unsubVendorPayments = partyFinanceViewer ? onSnapshot(finCol('vendor_payments'), (snap) => setVendorPayments(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
-    const unsubPurchaseInvoices = partyFinanceViewer ? onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    // purchase_invoices: admin/accountant only (permissions.js) — a manager has no
+    // stake in vendor/PO cost, and firestore.rules denies manager reads (round-17).
+    const unsubPurchaseInvoices = financeViewer ? onSnapshot(finCol('purchase_invoices'), (snap) => setPurchaseInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubTaxInvoices = partyFinanceViewer ? onSnapshot(finCol('tax_invoices'), (snap) => setTaxInvoicesList(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     // Company-wide accounting ledgers are Owner/Accountant-only at the rule level;
     // only subscribe for those roles (others would get permission-denied).

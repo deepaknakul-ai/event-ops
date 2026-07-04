@@ -116,22 +116,27 @@ service cloud.firestore {
                   // receivables aggregate ({outstanding} = billed - received). It has
                   // no client-side reader and must not expose the debtor ledger to
                   // manager/tech/user; Admin SDK writes bypass this rule.
+                  // purchase_invoices (round-17 fix): permissions.js scopes its view to
+                  // admin/accountant (vendor/PO cost is not a manager's stake); it was
+                  // wrongly grouped with the manager-readable invoices below, leaking
+                  // every vendor's PO totals to any manager.
                   && (seesAllParties(appId) || !(collection in [
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
-                       'party_accounts', 'payroll', 'reminder_log']))
+                       'party_accounts', 'payroll', 'reminder_log', 'purchase_invoices']))
                   // Payroll (payouts) + advances carry employee_id: Owner/Accountant
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
                   && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
                       || resource.data.get('employee_id', '') == userEmpId())
-                  // Invoices + vendor payments + HR penalties: Owner/Accountant/Manager
-                  // only. Tech and Coordinator have no stake in invoices/vendor-payments
-                  // and are excluded from hr_penalties, so they are denied at the rule
-                  // level (managers keep read; cross-manager money is hidden in the UI).
+                  // Tax invoices + vendor payments + HR penalties: Owner/Accountant/
+                  // Manager only. Tech and Coordinator have no stake and are denied at
+                  // the rule level (managers keep read; cross-manager money is hidden in
+                  // the UI). purchase_invoices was removed here (round-17) — it is
+                  // admin/accountant-only, handled in the seesAllParties list above.
                   && (seesAllParties(appId) || hasRole(appId, 'manager')
-                      || !(collection in ['tax_invoices', 'vendor_payments', 'purchase_invoices', 'penalties']))
+                      || !(collection in ['tax_invoices', 'vendor_payments', 'penalties']))
                   // Leads / CRM pipeline: Owner/Accountant see all; a Manager sees ONLY
                   // leads they created (manager-vs-manager pipeline isolation); tech/user
                   // denied entirely.
