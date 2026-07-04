@@ -916,31 +916,35 @@ function stripClientInternal(c) {
   return safe;
 }
 
-// Remove internal cost/margin fields from a project before returning it to an
-// external party (client ledger). Keeps client-facing revenue fields —
-// logistics_costs and reimbursable_expenses ARE billed to the client (they feed
-// getProjectGrandTotal / client payable), so they are intentionally retained;
-// only vendor/PO costs, margin and internal expenses are removed.
-function stripProjectInternalCosts(p) {
-  const {
-    vendor_allocations, purchase_orders, vendor_pos, margin, expenses,
-    // Also drop per-project magic-link tokens — a client holding a LEDGER link
-    // must not harvest a project's quote-approval / reimbursable tokens.
-    quote_approval_token, reimbursable_token, quote_approval_enabled, reimbursable_token_enabled,
-    // Round-12 fix: drop internal identity metadata — an external ledger/quote-link
-    // holder must not learn which employee owns/referred the client, the internal
-    // staff assigned to the job, or who recorded order confirmation (same class as
-    // stripClientInternal/stripRow, which scrub the client doc and money rows).
-    client_owner_id, assigned_employees, confirmation_details,
-    created_by, saved_by_uid, owner_id, owner_name,
-    // Round-13 fix: `remarks` is an internal staff-comment array (staff identity +
-    // notes), and `direct_expense_total` is the denormalised internal direct-cost
-    // base (would imply our margin against the client-facing grand total). Neither
-    // is rendered by the public pages — strip both from external responses.
-    remarks, direct_expense_total,
-    ...safe
-  } = p || {};
-  return safe;
+// WHITELIST projection of a project for the EXTERNAL client/vendor ledger.
+// Round-14: replaces the previous blacklist strip, which leaked a newly-added
+// internal field every iteration (owner UID → identity → remarks → direct_expense
+// _total). Returns ONLY the fields PublicLedger + getProjectGrandTotal render, so
+// no field ever added to a project doc can leak through a magic link. purchase_
+// orders is filtered to the recipient's OWN POs (a vendor sees their payables; a
+// client owns none). Client-facing revenue fields (items / logistics_costs /
+// package_cost / reimbursable_expenses) ARE the client's payable and are retained.
+function pickLedgerProject(data, cid) {
+  const d = data || {};
+  return {
+    client_id: d.client_id || '',
+    project_name: d.project_name || '',
+    status: d.status || '',
+    party_company_id: d.party_company_id || '',
+    start_date: d.start_date || '',
+    end_date: d.end_date || '',
+    setup_date: d.setup_date || '',
+    venue: d.venue || '',
+    invoice_no: d.invoice_no || '',
+    invoice_date: d.invoice_date || '',
+    invoice_status: d.invoice_status || '',
+    package_cost: d.package_cost ?? 0,
+    package_cost_gst: d.package_cost_gst ?? 0,
+    items: d.items || [],
+    logistics_costs: d.logistics_costs || {},
+    reimbursable_expenses: d.reimbursable_expenses || [],
+    purchase_orders: (d.purchase_orders || []).filter((po) => po && po.vendor_id === cid),
+  };
 }
 
 // Client / vendor ledger — keyed on ledger_link_token.
@@ -980,18 +984,10 @@ exports.getLedgerData = onCall(
     const mapRows = (s) => s.docs.map(stripRow);
     return {
       client: { id: cid, ...stripClientInternal(stripSecrets(client)) },
-      // Projects: strip internal vendor/PO cost + margin (client sees only their
-      // revenue-side figures — grand total, invoices, payments). Round-11 regression
-      // fix: re-attach ONLY the purchase orders addressed to THIS ledger recipient —
-      // a Vendor/Both client legitimately sees their own PO payables (the public
-      // vendor ledger renders them), while a Client-type recipient owns no POs so
-      // this stays empty (no cross-vendor cost leak). stripProjectInternalCosts had
-      // removed purchase_orders wholesale, silently erasing the vendor PO rows.
-      projects: projSnap.docs.map((d) => {
-        const data = d.data();
-        const ownPOs = (data.purchase_orders || []).filter((po) => po && po.vendor_id === cid);
-        return { id: d.id, ...stripProjectInternalCosts(data), purchase_orders: ownPOs };
-      }),
+      // Projects: whitelist projection (pickLedgerProject) — only the client/vendor-
+      // facing fields the ledger renders; purchase_orders scoped to the recipient's
+      // own PO payables. No internal field can leak through.
+      projects: projSnap.docs.map((d) => ({ id: d.id, ...pickLedgerProject(d.data(), cid) })),
       payments: mapRows(paySnap),
       vendorPayments: mapRows(vpaySnap),
       purchaseInvoices: mapRows(piSnap),
@@ -1078,20 +1074,26 @@ exports.getQuoteApprovalData = onCall(
     const pDoc = q.docs[0]; const p = pDoc.data();
     if (p.quote_approval_enabled === false) throw new HttpsError('permission-denied', 'This quote approval link has been disabled.');
     if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
-    // Drop internal cost fields + reimbursable estimates — the client approves the
-    // QUOTE (their price), not our costs or internal reimbursable working notes.
-    // Round-12 fix: also drop internal identity metadata (owner/referrer UID, assigned
-    // staff, order-confirmation staff/PO ref) — not rendered, must not leak externally.
-    const {
-      vendor_allocations, purchase_orders, vendor_pos, margin, expenses, reimbursable_expenses,
-      client_owner_id, assigned_employees, confirmation_details,
-      created_by, saved_by_uid, owner_id, owner_name,
-      remarks, direct_expense_total,
-      ...quoteSafe
-    } = p;
+    // WHITELIST projection (round-14): the client approves the QUOTE (their price),
+    // so return ONLY the fields QuoteApproval.jsx + getProjectGrandTotal render.
+    // Everything else — internal costs/margin/vendor POs, reimbursable working notes,
+    // identity metadata, remarks, direct_expense_total, tokens — is excluded by
+    // construction, so no new project field can ever leak through this link.
+    const quoteSafe = {
+      quote_status: p.quote_status || '',
+      project_name: p.project_name || '',
+      venue: p.venue || '',
+      start_date: p.start_date || '',
+      end_date: p.end_date || '',
+      client_id: p.client_id || '',
+      package_cost: p.package_cost ?? 0,
+      package_cost_gst: p.package_cost_gst ?? 0,
+      items: p.items || [],
+      logistics_costs: p.logistics_costs || {},
+    };
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
     return {
-      project: { id: pDoc.id, ...stripSecrets(quoteSafe) },
+      project: { id: pDoc.id, ...quoteSafe },
       org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
     };
   }
