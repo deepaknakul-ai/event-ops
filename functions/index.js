@@ -970,8 +970,17 @@ exports.getLedgerData = onCall(
     return {
       client: { id: cid, ...stripClientInternal(stripSecrets(client)) },
       // Projects: strip internal vendor/PO cost + margin (client sees only their
-      // revenue-side figures — grand total, invoices, payments).
-      projects: projSnap.docs.map((d) => ({ id: d.id, ...stripProjectInternalCosts(d.data()) })),
+      // revenue-side figures — grand total, invoices, payments). Round-11 regression
+      // fix: re-attach ONLY the purchase orders addressed to THIS ledger recipient —
+      // a Vendor/Both client legitimately sees their own PO payables (the public
+      // vendor ledger renders them), while a Client-type recipient owns no POs so
+      // this stays empty (no cross-vendor cost leak). stripProjectInternalCosts had
+      // removed purchase_orders wholesale, silently erasing the vendor PO rows.
+      projects: projSnap.docs.map((d) => {
+        const data = d.data();
+        const ownPOs = (data.purchase_orders || []).filter((po) => po && po.vendor_id === cid);
+        return { id: d.id, ...stripProjectInternalCosts(data), purchase_orders: ownPOs };
+      }),
       payments: mapRows(paySnap),
       vendorPayments: mapRows(vpaySnap),
       purchaseInvoices: mapRows(piSnap),
@@ -1438,6 +1447,45 @@ exports.onPaymentWritten = onDocumentWritten(
     if ((after.client_owner_id || '') === owner) return; // already correct — stops the loop
     await event.data.after.ref.update({ client_owner_id: owner });
     logger.info(`onPaymentWritten: payment ${payId} client_owner_id -> '${owner}'`);
+  },
+);
+
+// ── Keep the /users role mirror in sync with employees.role ─────────────────
+// userRole() in firestore.rules reads the /users/{uid} mirror FIRST (it is written
+// at login), then falls back to /employees/{uid}. A role change in Employees.jsx
+// writes ONLY the employees doc, so without this trigger a demotion would not take
+// effect server-side until the user voluntarily re-logs in — a demoted admin/manager
+// would keep full elevated SDK access (finance/payroll/clients writes) indefinitely
+// while their tab stays open (custom-token sessions auto-refresh). This trigger runs
+// under the Admin SDK (bypasses rules) and rewrites the mirror's role the instant
+// employees.role changes, giving demotion (and promotion) immediate server-side teeth.
+exports.onEmployeeWritten = onDocumentWritten(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60, document: 'artifacts/{appId}/public/data/employees/{eid}' },
+  async (event) => {
+    const { appId, eid } = event.params;
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
+    const mirrorRef = db.doc(`artifacts/${appId}/public/data/users/${eid}`);
+    if (!after) {
+      // Employee deleted — remove the mirror so a lingering session can't keep acting
+      // as the old role (userRole() would otherwise still read the stale mirror).
+      const snap = await mirrorRef.get().catch(() => null);
+      if (snap && snap.exists) {
+        await mirrorRef.delete().catch(() => {});
+        logger.info(`onEmployeeWritten: employee ${eid} deleted — mirror removed`);
+      }
+      return;
+    }
+    const newRole = after.role || '';
+    if (before && (before.role || '') === newRole) return; // role unchanged — nothing to sync
+    // Only touch the mirror if it exists: a user who never logged in has none, and
+    // userRole() correctly falls back to the (authoritative) employees doc for them.
+    const snap = await mirrorRef.get().catch(() => null);
+    if (snap && snap.exists) {
+      if ((snap.data().role || '') === newRole) return; // already correct — idempotent
+      await mirrorRef.set({ role: newRole, updated_at: new Date().toISOString() }, { merge: true });
+      logger.info(`onEmployeeWritten: employee ${eid} role '${before ? before.role : 'none'}' -> '${newRole}' — mirror synced`);
+    }
   },
 );
 
