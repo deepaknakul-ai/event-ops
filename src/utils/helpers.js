@@ -999,9 +999,17 @@ export const getProjectDirectCosts = (project, expenses = []) => {
     });
   }
   const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + (Number(e?.amount) || 0), 0);
-  const projectExpenses = (expenses || [])
+  const arraySum = (expenses || [])
     .filter((e) => e.project_id === project?.id && e.status !== 'Rejected' && e.status !== 'Disapproved')
     .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  // When the caller cannot see the project's expense rows (a Coordinator's expenses
+  // are self-scoped by security rules), the live array sums to ~0 and would inflate
+  // net profit / commission. Fall back to direct_expense_total, denormalised on the
+  // project by the onExpenseWritten Cloud Function. See-all roles pass the full
+  // array, so arraySum > 0 wins and stays live-accurate.
+  const projectExpenses = (arraySum === 0 && typeof project?.direct_expense_total === 'number')
+    ? project.direct_expense_total
+    : arraySum;
   return round2(logistics + reimbursable + projectExpenses);
 };
 

@@ -927,6 +927,12 @@ function stripProjectInternalCosts(p) {
     // Also drop per-project magic-link tokens — a client holding a LEDGER link
     // must not harvest a project's quote-approval / reimbursable tokens.
     quote_approval_token, reimbursable_token, quote_approval_enabled, reimbursable_token_enabled,
+    // Round-12 fix: drop internal identity metadata — an external ledger/quote-link
+    // holder must not learn which employee owns/referred the client, the internal
+    // staff assigned to the job, or who recorded order confirmation (same class as
+    // stripClientInternal/stripRow, which scrub the client doc and money rows).
+    client_owner_id, assigned_employees, confirmation_details,
+    created_by, saved_by_uid, owner_id, owner_name,
     ...safe
   } = p || {};
   return safe;
@@ -1069,7 +1075,14 @@ exports.getQuoteApprovalData = onCall(
     if (p.quote_approval_expires_at && new Date(p.quote_approval_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This quote approval link has expired.');
     // Drop internal cost fields + reimbursable estimates — the client approves the
     // QUOTE (their price), not our costs or internal reimbursable working notes.
-    const { vendor_allocations, purchase_orders, vendor_pos, margin, expenses, reimbursable_expenses, ...quoteSafe } = p;
+    // Round-12 fix: also drop internal identity metadata (owner/referrer UID, assigned
+    // staff, order-confirmation staff/PO ref) — not rendered, must not leak externally.
+    const {
+      vendor_allocations, purchase_orders, vendor_pos, margin, expenses, reimbursable_expenses,
+      client_owner_id, assigned_employees, confirmation_details,
+      created_by, saved_by_uid, owner_id, owner_name,
+      ...quoteSafe
+    } = p;
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
     return {
       project: { id: pDoc.id, ...stripSecrets(quoteSafe) },
@@ -1486,6 +1499,75 @@ exports.onEmployeeWritten = onDocumentWritten(
       await mirrorRef.set({ role: newRole, updated_at: new Date().toISOString() }, { merge: true });
       logger.info(`onEmployeeWritten: employee ${eid} role '${before ? before.role : 'none'}' -> '${newRole}' — mirror synced`);
     }
+  },
+);
+
+// ── Denormalise each project's expenses-collection total ─────────────────────
+// The referral-commission net-profit calc needs a project's direct costs, which
+// include the separate expenses-collection rows. A Coordinator ('user') can only
+// SDK-read their OWN expenses (self-scoped by rules), so their client-side
+// commission estimate was STARVED of the project's real expenses (logged by
+// managers/techs) and thus inflated. This trigger (Admin SDK) stamps
+// direct_expense_total on the project so getProjectDirectCosts can fall back to it
+// when the caller cannot see the rows. See-all roles keep using their live array.
+exports.onExpenseWritten = onDocumentWritten(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60, document: 'artifacts/{appId}/public/data/expenses/{expId}' },
+  async (event) => {
+    const { appId } = event.params;
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
+    // Recompute the total for any project this expense touched (project_id can change).
+    const pids = new Set();
+    if (after && after.project_id) pids.add(after.project_id);
+    if (before && before.project_id) pids.add(before.project_id);
+    for (const pid of pids) {
+      if (!pid) continue;
+      const snap = await db.collection(`artifacts/${appId}/public/data/expenses`).where('project_id', '==', pid).get();
+      let total = 0;
+      for (const d of snap.docs) {
+        const e = d.data();
+        if (e.status === 'Rejected' || e.status === 'Disapproved') continue;
+        total += parseFloat(e.amount) || 0;
+      }
+      total = Math.round(total * 100) / 100;
+      const projRef = db.doc(`artifacts/${appId}/public/data/projects/${pid}`);
+      const pSnap = await projRef.get().catch(() => null);
+      if (pSnap && pSnap.exists) {
+        if ((pSnap.data().direct_expense_total || 0) === total) continue; // idempotent — no self-loop
+        await projRef.update({ direct_expense_total: total }).catch((err) => logger.warn(`onExpenseWritten: project ${pid} update failed: ${err.message}`));
+        logger.info(`onExpenseWritten: project ${pid} direct_expense_total -> ${total}`);
+      }
+    }
+  },
+);
+
+// Admin one-shot backfill: stamp direct_expense_total on EVERY project that already
+// has booked expenses (the onExpenseWritten trigger only fires on future writes).
+// Lets the Coordinator commission estimate become accurate for historical projects.
+exports.backfillProjectExpenseTotals = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const expSnap = await db.collection(`artifacts/${appId}/public/data/expenses`).get();
+    const totals = {};
+    for (const d of expSnap.docs) {
+      const e = d.data();
+      if (!e.project_id || e.status === 'Rejected' || e.status === 'Disapproved') continue;
+      totals[e.project_id] = (totals[e.project_id] || 0) + (parseFloat(e.amount) || 0);
+    }
+    const projSnap = await db.collection(`artifacts/${appId}/public/data/projects`).get();
+    let batch = db.batch(); let pending = 0; let stamped = 0;
+    for (const d of projSnap.docs) {
+      const want = Math.round((totals[d.id] || 0) * 100) / 100;
+      if ((d.data().direct_expense_total || 0) === want) continue;
+      batch.update(d.ref, { direct_expense_total: want });
+      pending += 1; stamped += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`backfillProjectExpenseTotals: stamped ${stamped} project(s)`);
+    return { stamped, projects: projSnap.size };
   },
 );
 
