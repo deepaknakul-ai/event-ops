@@ -253,6 +253,11 @@ service cloud.firestore {
             && request.resource.data.get('status', '') == 'Pending Review'
             && request.resource.data.get('approved_by', null) == null
             && request.resource.data.get('approved_at', null) == null
+            // Round-16: own-client only — the receipt stamps client_owner_id =
+            // the client's owner (Clients.jsx), which for a manager's own client is
+            // their own uid. Blocks crafting a receipt against another manager's
+            // client. onPaymentWritten re-stamps this from the client server-side.
+            && request.resource.data.get('client_owner_id', '') == userEmpId()
           )))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 

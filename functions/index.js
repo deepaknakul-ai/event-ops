@@ -1036,15 +1036,25 @@ exports.getEmployeeStatement = onCall(
       col('advances').where('employee_id', '==', eid).get(),
       db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
     ]);
-    const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
+    // Round-16: WHITELIST the payout/advance rows too (was a raw spread) — the
+    // statement page renders only date/amount/mode/reference/remarks, so no future
+    // internal field (approver note, batch id, cost breakdown) can leak through.
+    const pickStatementRow = (d) => {
+      const r = d.data();
+      const out = { id: d.id };
+      for (const k of ['amount', 'date', 'mode', 'reference', 'remarks']) {
+        if (r[k] !== undefined) out[k] = r[k];
+      }
+      return out;
+    };
     return {
       // Round-9 fix: return ONLY the display name (the statement page renders
       // `employee.name` and nothing else). The raw employee doc carries bank
       // details, PII and hourlyRateHistory / salary that a statement-link holder
       // must not receive — mirror getReimbursableData's curated projection.
       employee: { id: eid, name: emp.name || '' },
-      payouts: mapDocs(payoutsSnap),
-      advances: mapDocs(advancesSnap),
+      payouts: payoutsSnap.docs.map(pickStatementRow),
+      advances: advancesSnap.docs.map(pickStatementRow),
       org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }

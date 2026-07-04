@@ -466,32 +466,39 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         }
       } catch { /* non-fatal */ }
 
-      // Mirror opening balance into opening_balances collection so the
-      // accounting snapshot picks it up. Stable doc id: clientob_{clientId}.
-      const obRef = doc(db, 'artifacts', appId, 'public', 'data', 'opening_balances', `clientob_${clientId}`);
-      if (opening_balance) {
-        await setDoc(obRef, {
-          fy: opening_balance.fy,
-          date: opening_balance.date,
-          account_name: `Party: ${formData.name}`,
-          account_id: `party_${clientId}`,
-          side: opening_balance.side,
-          amount: opening_balance.amount,
-          remarks: opening_balance.remarks || `Opening balance for ${formData.name}`,
-          source: 'client_initial',
-          entity_id: clientId,
-          updated_at: serverTimestamp(),
-        }, { merge: true });
-        logAction('opening_balances', editingId ? 'update' : 'create', `clientob_${clientId}`, opening_balance, `OB ${formData.name}`);
-      } else {
-        // No opening balance — remove any prior mirror doc.
+      // Mirror opening balance into opening_balances collection so the accounting
+      // snapshot picks it up. Stable doc id: clientob_{clientId}. Opening balances are
+      // an accounting-ledger concern gated to admin/accountant in firestore.rules, so
+      // a manager saving THEIR OWN client must (a) never reach this write, and (b)
+      // never have the save flow broken by a rule-denied write. Guard by role AND wrap
+      // non-fatally (the OB input is hidden for non-finance roles below).
+      const canWriteOB = role === 'admin' || role === 'accountant';
+      if (canWriteOB) {
+        const obRef = doc(db, 'artifacts', appId, 'public', 'data', 'opening_balances', `clientob_${clientId}`);
         try {
-          const prior = await getDoc(obRef);
-          if (prior.exists()) {
-            await deleteDoc(obRef);
-            logAction('opening_balances', 'delete', `clientob_${clientId}`, null, `OB removed for ${formData.name}`);
+          if (opening_balance) {
+            await setDoc(obRef, {
+              fy: opening_balance.fy,
+              date: opening_balance.date,
+              account_name: `Party: ${formData.name}`,
+              account_id: `party_${clientId}`,
+              side: opening_balance.side,
+              amount: opening_balance.amount,
+              remarks: opening_balance.remarks || `Opening balance for ${formData.name}`,
+              source: 'client_initial',
+              entity_id: clientId,
+              updated_at: serverTimestamp(),
+            }, { merge: true });
+            logAction('opening_balances', editingId ? 'update' : 'create', `clientob_${clientId}`, opening_balance, `OB ${formData.name}`);
+          } else {
+            // No opening balance — remove any prior mirror doc.
+            const prior = await getDoc(obRef);
+            if (prior.exists()) {
+              await deleteDoc(obRef);
+              logAction('opening_balances', 'delete', `clientob_${clientId}`, null, `OB removed for ${formData.name}`);
+            }
           }
-        } catch { /* ignore */ }
+        } catch (e) { console.warn('Opening-balance mirror failed (non-fatal):', e?.message); }
       }
 
       setIsAddOpen(false);
@@ -1109,6 +1116,10 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                 <input type="number" min="0" max="100" step="0.5" className="w-full rounded border p-2 text-sm bg-white text-black disabled:bg-slate-50" value={formData.referral_rate ?? 10} disabled={role !== 'admin'} onChange={e => setFormData({ ...formData, referral_rate: e.target.value })} />
               </div>
             </div>
+            {/* Opening Balance posts an accounting-ledger row (opening_balances),
+                gated to admin/accountant in firestore.rules. Hide it from other roles
+                so a manager never enters a value that would be silently dropped. */}
+            {(role === 'admin' || role === 'accountant') && (
             <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-bold text-slate-800">Opening Balance <span className="text-xs font-normal text-slate-500">(for existing party with prior balance)</span></label>
@@ -1159,6 +1170,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               />
               <p className="text-[11px] text-slate-500">Posts to <span className="font-mono">Party: {formData.name || '<name>'}</span> as of the chosen date and reflects in the ledger immediately.</p>
             </div>
+            )}
           </div>
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Contact Persons</h4>

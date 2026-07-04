@@ -264,8 +264,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await assertSucceeds(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_ac')), { debit_amount: 50, credit_amount: 50 }));
     });
     test('manager CAN still record a payment (receipt path preserved)', async () => {
-      // The manager receipt flow always stamps 'Pending Review' (Clients.jsx/Finance.jsx).
-      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_recpt')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'Cash', status: 'Pending Review' }));
+      // The manager receipt flow always stamps 'Pending Review' + own client_owner_id.
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_recpt')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'Cash', status: 'Pending Review', client_owner_id: 'mgrA' }));
     });
   });
 
@@ -392,8 +392,11 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
   });
 
   describe('payments segregation of duties — manager create-only, no self-approve (round-13 fix)', () => {
-    test('manager CAN create a receipt in Pending Review', async () => {
-      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_new')), { client_id: 'cA', amount: 500, status: 'Pending Review' }));
+    test('manager CAN create a receipt in Pending Review for OWN client', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_new')), { client_id: 'cA', amount: 500, status: 'Pending Review', client_owner_id: 'mgrA' }));
+    });
+    test('manager CANNOT create a receipt for another manager\'s client (round-16 own-scope)', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_other')), { client_id: 'cB', amount: 500, status: 'Pending Review', client_owner_id: 'mgrB' }));
     });
     test('manager CANNOT create a payment already Approved (self-approval)', async () => {
       await assertFails(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_appr')), { client_id: 'cA', amount: 500, status: 'Approved' }));
