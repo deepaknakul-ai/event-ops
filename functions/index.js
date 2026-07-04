@@ -903,6 +903,19 @@ function stripSecrets(obj) {
   return safe;
 }
 
+// Remove internal commission / ownership fields before returning a client doc to
+// an EXTERNAL (logged-out) ledger-link holder. A client must never learn the
+// referral commission rate the company pays, which employee earns it, or internal
+// remarks. (Round-9 fix: getLedgerData previously returned the raw client doc, so
+// referral_rate / owner_id / owner_name / commission / remarks leaked to the client.)
+function stripClientInternal(c) {
+  const {
+    referral_rate, owner_id, owner_name, commission, commission_rate,
+    remarks, internal_remarks, internal_notes, ...safe
+  } = c || {};
+  return safe;
+}
+
 // Remove internal cost/margin fields from a project before returning it to an
 // external party (client ledger). Keeps client-facing revenue fields —
 // logistics_costs and reimbursable_expenses ARE billed to the client (they feed
@@ -941,7 +954,7 @@ exports.getLedgerData = onCall(
     ]);
     const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
     return {
-      client: { id: cid, ...stripSecrets(client) },
+      client: { id: cid, ...stripClientInternal(stripSecrets(client)) },
       // Projects: strip internal vendor/PO cost + margin (client sees only their
       // revenue-side figures — grand total, invoices, payments).
       projects: projSnap.docs.map((d) => ({ id: d.id, ...stripProjectInternalCosts(d.data()) })),
@@ -973,7 +986,11 @@ exports.getEmployeeStatement = onCall(
     ]);
     const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
     return {
-      employee: { id: eid, ...stripSecrets(emp) },
+      // Round-9 fix: return ONLY the display name (the statement page renders
+      // `employee.name` and nothing else). The raw employee doc carries bank
+      // details, PII and hourlyRateHistory / salary that a statement-link holder
+      // must not receive — mirror getReimbursableData's curated projection.
+      employee: { id: eid, name: emp.name || '' },
       payouts: mapDocs(payoutsSnap),
       advances: mapDocs(advancesSnap),
       org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,

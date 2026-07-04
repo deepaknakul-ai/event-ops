@@ -112,11 +112,15 @@ service cloud.firestore {
                   // They carry no per-project owner and no operational role needs them,
                   // so they must never be SDK-readable by manager / tech / user.
                   // (payroll docs hold every employee's gross/net/deductions/rate.)
+                  // reminder_log (round-9 fix): a Cloud-Function-written per-client
+                  // receivables aggregate ({outstanding} = billed - received). It has
+                  // no client-side reader and must not expose the debtor ledger to
+                  // manager/tech/user; Admin SDK writes bypass this rule.
                   && (seesAllParties(appId) || !(collection in [
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
-                       'party_accounts', 'payroll']))
+                       'party_accounts', 'payroll', 'reminder_log']))
                   // Payroll (payouts) + advances carry employee_id: Owner/Accountant
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
@@ -156,6 +160,22 @@ service cloud.firestore {
         // Payroll (salary docs): Owner/Accountant only — a role denied even READ
         // must never be able to forge/overwrite a salary record via the SDK.
         : (collection == 'payroll') ? hasAnyRole(appId, ['admin', 'accountant'])
+        // reminder_log (round-9 fix): written only by the reminder Cloud Function
+        // (Admin SDK bypasses rules). No client writes it; lock SDK writes to
+        // admin/accountant so tech/user cannot forge/overwrite the receivables log.
+        : (collection == 'reminder_log') ? seesAllParties(appId)
+        // Leads / CRM (round-9 fix): READ is scoped to admin/accountant (all) + a
+        // manager's OWN leads (created_by, lines above). Writes MUST match, or the
+        // read-side manager-vs-manager isolation is defeated: admin/accountant write
+        // any; a manager may create a lead only with their own created_by and may
+        // edit only leads they created; tech/user (who cannot even read leads) denied.
+        : (collection == 'leads') ? (
+            seesAllParties(appId)
+            || (hasRole(appId, 'manager') && (
+                 (resource == null && request.resource.data.get('created_by', '') == userEmpId())
+                 || (resource != null && resource.data.get('created_by', '') == userEmpId())
+               ))
+          )
         : (
         collection in ['recurring_rules', 'reconcile_matches', 'reconcile_sessions',
                        'journal_entries', 'journal_drafts', 'journal_templates',
@@ -245,7 +265,12 @@ service cloud.firestore {
       ) ? isAdmin(appId)
         : (collection in ['payroll', 'payouts', 'advances', 'party_accounts',
                           'purchase_invoices', 'reconcile_sessions',
-                          'journal_drafts', 'journal_templates']) ? seesAllParties(appId)
+                          'journal_drafts', 'journal_templates', 'reminder_log']) ? seesAllParties(appId)
+        // Leads (round-9 fix): admin/accountant delete any; a manager deletes ONLY
+        // leads they created (the old isFinanceWriter default let Manager B delete
+        // Manager A's lead, defeating manager-vs-manager pipeline isolation).
+        : (collection == 'leads') ? (seesAllParties(appId)
+            || (hasRole(appId, 'manager') && resource.data.get('created_by', '') == userEmpId()))
         : isFinanceWriter(appId);
     }
 

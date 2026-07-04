@@ -64,6 +64,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 500, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 800, status: 'Approved' });
       await setDoc(doc(db, path('penalties', 'pen1')), { employee_id: 'tech1', minutes: 30, reason: 'late' });
+      await setDoc(doc(db, path('reminder_log', 'rl_cA')), { outstanding: 5000, count: 2, last_sent: '2026-07-01' });
     });
   });
 
@@ -317,6 +318,56 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('accountant CAN delete payroll', async () => {
       await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('payroll', 'pr1'))));
+    });
+  });
+
+  describe('reminder_log — admin/accountant only (round-9 fix)', () => {
+    // Per-client outstanding receivable, written server-side; no client stake for
+    // manager/tech/user, so it must not expose the debtor ledger.
+    test('accountant CAN read reminder_log', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('reminder_log', 'rl_cA'))));
+    });
+    test('manager CANNOT read reminder_log', async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('reminder_log', 'rl_cA'))));
+    });
+    test('tech CANNOT read reminder_log', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('reminder_log', 'rl_cA'))));
+    });
+    test('tech CANNOT list reminder_log (enumerate debtors)', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('reminder_log'))));
+    });
+    test('tech CANNOT forge/overwrite reminder_log', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('reminder_log', 'rl_forge')), { outstanding: 0 }));
+    });
+  });
+
+  describe('leads writes — admin/accountant any, manager own-only (round-9 fix)', () => {
+    test('tech CANNOT create a lead (cannot even read leads)', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('leads', 'ld_tech')), { name: 'X', created_by: 'tech1', est_value: 1 }));
+    });
+    test('manager CAN create a lead stamped with own created_by', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('leads', 'ld_new')), { name: 'New', created_by: 'mgrA', est_value: 1000 }));
+    });
+    test('manager CANNOT create a lead stamped with another manager', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('leads', 'ld_forge')), { name: 'F', created_by: 'mgrB', est_value: 1 }));
+    });
+    test('Manager B CANNOT update Manager A\'s lead', async () => {
+      await assertFails(setDoc(doc(asUser('mgrB'), path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 999999 }));
+    });
+    test('manager CAN update own lead', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 123 }));
+    });
+    test('accountant CAN update any lead', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 5 }));
+    });
+    test('Manager B CANNOT delete Manager A\'s lead', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrB'), path('leads', 'ld_mgrA'))));
+    });
+    test('manager CAN delete own lead', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('mgrA'), path('leads', 'ld_mgrA'))));
+    });
+    test('tech CANNOT delete a lead', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('leads', 'ld_mgrA'))));
     });
   });
 
