@@ -933,6 +933,11 @@ function stripProjectInternalCosts(p) {
     // stripClientInternal/stripRow, which scrub the client doc and money rows).
     client_owner_id, assigned_employees, confirmation_details,
     created_by, saved_by_uid, owner_id, owner_name,
+    // Round-13 fix: `remarks` is an internal staff-comment array (staff identity +
+    // notes), and `direct_expense_total` is the denormalised internal direct-cost
+    // base (would imply our margin against the client-facing grand total). Neither
+    // is rendered by the public pages — strip both from external responses.
+    remarks, direct_expense_total,
     ...safe
   } = p || {};
   return safe;
@@ -1081,6 +1086,7 @@ exports.getQuoteApprovalData = onCall(
       vendor_allocations, purchase_orders, vendor_pos, margin, expenses, reimbursable_expenses,
       client_owner_id, assigned_employees, confirmation_details,
       created_by, saved_by_uid, owner_id, owner_name,
+      remarks, direct_expense_total,
       ...quoteSafe
     } = p;
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);

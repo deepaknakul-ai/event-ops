@@ -240,6 +240,19 @@ service cloud.firestore {
             && (request.resource.data.get('status', '') != 'Cancelled'
                 || resource.data.get('status', '') == 'Cancelled'
                 || isAdmin(appId))
+          ))
+          // ── payments segregation-of-duties guard (round-13 fix) ────────────
+          // Owner/Accountant record AND approve payments. A manager may only CREATE
+          // a receipt in the mandatory 'Pending Review' status with no approver
+          // stamps — a manager must NOT self-approve (status 'Approved') on create,
+          // nor update/approve an existing payment (that is Owner/Accountant's job).
+          // The UI already forces manager receipts to 'Pending Review'
+          // (Clients.jsx / Finance.jsx); this enforces it at the SDK layer.
+          && (collection != 'payments' || seesAllParties(appId) || (
+            resource == null
+            && request.resource.data.get('status', '') == 'Pending Review'
+            && request.resource.data.get('approved_by', null) == null
+            && request.resource.data.get('approved_at', null) == null
           )))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 

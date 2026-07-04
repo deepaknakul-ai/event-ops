@@ -264,7 +264,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await assertSucceeds(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_ac')), { debit_amount: 50, credit_amount: 50 }));
     });
     test('manager CAN still record a payment (receipt path preserved)', async () => {
-      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_recpt')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'Cash' }));
+      // The manager receipt flow always stamps 'Pending Review' (Clients.jsx/Finance.jsx).
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_recpt')), { client_id: 'cA', amount: 100, date: '2026-07-02', mode: 'Cash', status: 'Pending Review' }));
     });
   });
 
@@ -387,6 +388,27 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT create a payment', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('payments', 'newpay_tech')), { client_id: 'cA', amount: 100 }));
+    });
+  });
+
+  describe('payments segregation of duties — manager create-only, no self-approve (round-13 fix)', () => {
+    test('manager CAN create a receipt in Pending Review', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_new')), { client_id: 'cA', amount: 500, status: 'Pending Review' }));
+    });
+    test('manager CANNOT create a payment already Approved (self-approval)', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_appr')), { client_id: 'cA', amount: 500, status: 'Approved' }));
+    });
+    test('manager CANNOT create with forged approver stamps', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('payments', 'pay_mgr_stamp')), { client_id: 'cA', amount: 500, status: 'Pending Review', approved_by: 'mgrA' }));
+    });
+    test('manager CANNOT update an existing payment (approve/tamper)', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('payments', 'pay1')), { client_id: 'cA', amount: 99999, status: 'Approved' }));
+    });
+    test('accountant CAN create an Approved payment', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('payments', 'pay_acct_ok')), { client_id: 'cA', amount: 100, status: 'Approved' }));
+    });
+    test('accountant CAN update a payment to Approved', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('payments', 'pay1')), { client_id: 'cA', amount: 1000, status: 'Approved', approved_by: 'acct1' }));
     });
   });
 
