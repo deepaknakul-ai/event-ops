@@ -472,6 +472,25 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
+  describe('inventory + penalties DELETE mirror create (admin/manager only, round-14 fix)', () => {
+    // Delete must match the create gate (admin/manager) — accountant is view-only.
+    test('accountant CANNOT delete a penalty (view-only)', async () => {
+      await assertFails(deleteDoc(doc(asUser('acct1'), path('penalties', 'pen1'))));
+    });
+    test('accountant CANNOT delete an inventory item (view-only)', async () => {
+      await assertFails(deleteDoc(doc(asUser('acct1'), path('inventory', 'inv1'))));
+    });
+    test('manager CAN delete a penalty', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('mgrA'), path('penalties', 'pen1'))));
+    });
+    test('manager CAN delete an inventory item', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('mgrA'), path('inventory', 'inv1'))));
+    });
+    test('tech CANNOT delete a penalty', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('penalties', 'pen1'))));
+    });
+  });
+
   describe('users/{uid} mirror — no privilege escalation (verification fix)', () => {
     test('tech CANNOT self-create mirror as admin via a forged employee_id', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('users', 'tech1')), { role: 'admin', employee_id: 'admin1' }));

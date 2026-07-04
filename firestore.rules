@@ -279,6 +279,11 @@ service cloud.firestore {
         : (collection in ['payroll', 'payouts', 'advances', 'party_accounts',
                           'purchase_invoices', 'reconcile_sessions',
                           'journal_drafts', 'journal_templates', 'reminder_log']) ? seesAllParties(appId)
+        // inventory + penalties (round-14 fix): delete must mirror their CREATE gate
+        // (line ~159 = admin/manager), NOT the isFinanceWriter default — an accountant
+        // is view-only on these (permissions.js hr_penalties/inventory) and must not
+        // be able to delete a salary-deduction or inventory record it cannot create.
+        : (collection in ['inventory', 'penalties']) ? hasAnyRole(appId, ['admin', 'manager'])
         // Leads (round-9 fix): admin/accountant delete any; a manager deletes ONLY
         // leads they created (the old isFinanceWriter default let Manager B delete
         // Manager A's lead, defeating manager-vs-manager pipeline isolation).
