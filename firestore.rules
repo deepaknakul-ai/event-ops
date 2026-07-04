@@ -151,7 +151,7 @@ service cloud.firestore {
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses']
       ) ? false
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
@@ -256,7 +256,7 @@ service cloud.firestore {
       //   - everything else (manager-transactional payments/tax_invoices/
       //     vendor_payments + operational collections): admin/accountant/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -308,7 +308,13 @@ service cloud.firestore {
       allow update: if hasAnyRole(appId, ['admin', 'accountant', 'manager'])
                     || (isRoleUser(appId)
                         && resource.data.employee_id == userEmpId()
-                        && resource.data.status == 'Pending');
+                        && resource.data.status == 'Pending'
+                        // Owner self-corrections MUST keep the record Pending — a
+                        // submitter can fix their own amount/description but can NEVER
+                        // self-approve (approve = admin/accountant/manager per
+                        // permissions.js) nor reassign it to another employee.
+                        && request.resource.data.status == 'Pending'
+                        && request.resource.data.employee_id == userEmpId());
       allow delete: if hasAnyRole(appId, ['admin', 'accountant']);
     }
 

@@ -952,16 +952,30 @@ exports.getLedgerData = onCall(
       col('purchase_invoices').where('vendor_id', '==', cid).get(),
       col('tax_invoices').where('client_id', '==', cid).get(),
     ]);
-    const mapDocs = (s) => s.docs.map((d) => ({ id: d.id, ...d.data() }));
+    // Round-10 fix: strip internal staff/owner metadata from each money row before
+    // returning to an EXTERNAL ledger-link holder. onPaymentWritten stamps
+    // client_owner_id (the internal referrer/owner employee UID — the same fact
+    // stripClientInternal hides on the client doc), and rows also carry created_by /
+    // recorded_by / recorded_by_role and free-text remarks. The public ledger only
+    // renders amount/date/mode/reference/invoice fields, so none of these are needed.
+    const stripRow = (d) => {
+      const {
+        client_owner_id, owner_id, owner_name, created_by, created_by_name,
+        recorded_by, recorded_by_role, updated_by, referral_rate, commission,
+        commission_rate, remarks, notes, internal_remarks, internal_notes, ...safe
+      } = d.data();
+      return { id: d.id, ...safe };
+    };
+    const mapRows = (s) => s.docs.map(stripRow);
     return {
       client: { id: cid, ...stripClientInternal(stripSecrets(client)) },
       // Projects: strip internal vendor/PO cost + margin (client sees only their
       // revenue-side figures — grand total, invoices, payments).
       projects: projSnap.docs.map((d) => ({ id: d.id, ...stripProjectInternalCosts(d.data()) })),
-      payments: mapDocs(paySnap),
-      vendorPayments: mapDocs(vpaySnap),
-      purchaseInvoices: mapDocs(piSnap),
-      taxInvoices: mapDocs(tiSnap),
+      payments: mapRows(paySnap),
+      vendorPayments: mapRows(vpaySnap),
+      purchaseInvoices: mapRows(piSnap),
+      taxInvoices: mapRows(tiSnap),
       org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
     };
   }

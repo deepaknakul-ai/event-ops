@@ -63,6 +63,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('inventory', 'inv1')), { name: 'LED Panel', rate_per_day: 500, purchase_cost: 40000 });
       await setDoc(doc(db, path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 500, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 800, status: 'Approved' });
+      await setDoc(doc(db, path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 300, status: 'Pending' });
       await setDoc(doc(db, path('penalties', 'pen1')), { employee_id: 'tech1', minutes: 30, reason: 'late' });
       await setDoc(doc(db, path('reminder_log', 'rl_cA')), { outstanding: 5000, count: 2, last_sent: '2026-07-01' });
     });
@@ -404,6 +405,39 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT list ALL expenses (global denied)', async () => {
       await assertFails(getDocs(collection(asUser('tech1'), path('expenses'))));
+    });
+  });
+
+  describe('expenses writes/delete — dedicated block authoritative (round-10 fix)', () => {
+    // Previously the generic wildcard (isRoleUser create/update, isFinanceWriter
+    // delete) OR-overrode the dedicated own-Pending block. Now expenses is in both
+    // write/delete false-lists, so ONLY the dedicated block grants.
+    test('tech CANNOT tamper another employee\'s expense', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 99999, status: 'Approved' }));
+    });
+    test('tech CANNOT edit own APPROVED expense (not Pending)', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 99999, status: 'Approved' }));
+    });
+    test('tech CAN edit own PENDING expense (keeps it Pending)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('tech1'), path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 350, status: 'Pending' }));
+    });
+    test('tech CANNOT self-approve own Pending expense', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 350, status: 'Approved' }));
+    });
+    test('tech CANNOT reassign own Pending expense to another employee', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('expenses', 'exp_tech_pend')), { employee_id: 'mgrA', amount: 350, status: 'Pending' }));
+    });
+    test('manager CAN update any expense (approver)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 300, status: 'Approved' }));
+    });
+    test('manager CANNOT delete an expense (delete = admin/accountant)', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('expenses', 'exp_tech'))));
+    });
+    test('tech CANNOT delete own expense', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('expenses', 'exp_tech'))));
+    });
+    test('accountant CAN delete an expense', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('expenses', 'exp_tech'))));
     });
   });
 
