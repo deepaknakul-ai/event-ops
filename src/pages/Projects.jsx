@@ -472,7 +472,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const exportFilteredProjects = () => {
-    if (!canViewProjectFinancials) return addToast('Access denied: financial export is restricted.', 'error');
+    // Gate on the role capability (not the selectedProject-dependent detail flag, which
+    // is unreliable in the list context). tech/user are blocked entirely.
+    if (!canViewRatesRole) return addToast('Access denied: financial export is restricted.', 'error');
     if (sortedProjects.length === 0) return addToast("No projects to export", 'info');
     const data = sortedProjects.map(p => ({
         "Project Name": p.project_name,
@@ -480,7 +482,9 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         "Venue": p.venue,
         "Start Date": p.start_date, "End Date": p.end_date, "Setup Date": p.setup_date || '-',
         "Status": p.status, "Invoice Status": p.invoice_status || 'Not Invoiced', "Invoice No": p.invoice_no || '-',
-        "Total Value": getProjectGrandTotal(p)
+        // Owner-scoped per row: a manager exports Total Value ONLY for projects they own;
+        // other managers' project values are redacted (admin/accountant see all).
+        "Total Value": projectFinanceVisible(p) ? getProjectGrandTotal(p) : 'Restricted'
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -4013,6 +4017,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <div className="flex gap-2">
                 <button onClick={() => {
                   const eligible = projects.filter(p => {
+                    if (!projectFinanceVisible(p)) return false; // owner-scope: no cross-manager grand totals
                     if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
                     if (bulkFilter.status && p.status !== bulkFilter.status) return false;
                     if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
@@ -4028,6 +4033,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             </div>
             <div className="max-h-64 overflow-y-auto space-y-1 border rounded p-2 bg-slate-50">
               {projects.filter(p => {
+                  if (!projectFinanceVisible(p)) return false; // owner-scope: no cross-manager grand totals
                   if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
                   if (bulkFilter.status && p.status !== bulkFilter.status) return false;
                   if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
@@ -4039,6 +4045,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               )}
               {projects
                 .filter(p => {
+                  if (!projectFinanceVisible(p)) return false; // owner-scope: no cross-manager grand totals
                   if (!['Confirmed','Ongoing','Completed'].includes(p.status)) return false;
                   if (bulkFilter.status && p.status !== bulkFilter.status) return false;
                   if (bulkFilter.clientId && p.client_id !== bulkFilter.clientId) return false;
