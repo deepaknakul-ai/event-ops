@@ -491,6 +491,20 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
   });
 
+  describe('tax_invoices DELETE — admin/accountant only (round-15 fix)', () => {
+    // A manager may CREATE invoices but must NOT delete them (GSTR-1 continuity);
+    // permissions.js locks tax_invoices.delete to admin/accountant.
+    test('manager CANNOT delete a tax invoice', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('tax_invoices', 'ti1'))));
+    });
+    test('tech CANNOT delete a tax invoice', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('tax_invoices', 'ti1'))));
+    });
+    test('accountant CAN delete a tax invoice', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('tax_invoices', 'ti1'))));
+    });
+  });
+
   describe('users/{uid} mirror — no privilege escalation (verification fix)', () => {
     test('tech CANNOT self-create mirror as admin via a forged employee_id', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('users', 'tech1')), { role: 'admin', employee_id: 'admin1' }));

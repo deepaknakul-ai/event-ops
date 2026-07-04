@@ -903,17 +903,52 @@ function stripSecrets(obj) {
   return safe;
 }
 
-// Remove internal commission / ownership fields before returning a client doc to
-// an EXTERNAL (logged-out) ledger-link holder. A client must never learn the
-// referral commission rate the company pays, which employee earns it, or internal
-// remarks. (Round-9 fix: getLedgerData previously returned the raw client doc, so
-// referral_rate / owner_id / owner_name / commission / remarks leaked to the client.)
-function stripClientInternal(c) {
-  const {
-    referral_rate, owner_id, owner_name, commission, commission_rate,
-    remarks, internal_remarks, internal_notes, ...safe
-  } = c || {};
-  return safe;
+// WHITELIST projection of a client for the EXTERNAL ledger-link holder (round-15:
+// was a blacklist that would leak any newly-added internal client field). Returns
+// only what PublicLedger renders; referral_rate / owner_id / owner_name / commission
+// / remarks / tokens are excluded by construction. `id` is added by the caller.
+function pickLedgerClient(c) {
+  const d = c || {};
+  return {
+    name: d.name || '',
+    type: d.type || 'Client',
+    gstin: d.gstin || '',
+    address: d.address || '',
+    companies: d.companies || [],
+  };
+}
+
+// WHITELIST projection of the org/settings doc for EXTERNAL token pages (round-15:
+// the four public functions returned the RAW settings/organization doc, leaking
+// gst_api_key (a live GST-API credential) + bank_accounts to logged-out link
+// holders). Return only the display fields the public pages/PDFs render — mirrors
+// getPortalData's curated org.
+function pickOrgPublic(org) {
+  const o = org || {};
+  return {
+    name: o.name || '',
+    company_name: o.company_name || '',
+    address: o.address || '',
+    gstin: o.gstin || '',
+    phone: o.phone || '',
+    email: o.email || '',
+    logo: o.logo || '',
+  };
+}
+
+// WHITELIST projection of a money row (payment / vendor_payment / purchase_invoice /
+// tax_invoice) for the EXTERNAL ledger (round-15: was a blacklist). Union of every
+// field PublicLedger renders across the four row types; `id` set by the caller.
+function pickLedgerRow(d) {
+  const r = d.data();
+  const keep = ['amount', 'client_id', 'computed_total', 'date', 'description',
+    'final_amount', 'gst_amount', 'include_in_ledger', 'invoice_date', 'invoice_no',
+    'invoice_ref', 'linked_po_id', 'linked_po_no', 'mode', 'party_company_id',
+    'pi_no', 'project_id', 'project_ids', 'project_name', 'project_names',
+    'reference', 'sale_company_id', 'status', 'vendor_id', 'vendor_name'];
+  const out = { id: d.id };
+  for (const k of keep) { if (r[k] !== undefined) out[k] = r[k]; }
+  return out;
 }
 
 // WHITELIST projection of a project for the EXTERNAL client/vendor ledger.
@@ -967,32 +1002,19 @@ exports.getLedgerData = onCall(
       col('purchase_invoices').where('vendor_id', '==', cid).get(),
       col('tax_invoices').where('client_id', '==', cid).get(),
     ]);
-    // Round-10 fix: strip internal staff/owner metadata from each money row before
-    // returning to an EXTERNAL ledger-link holder. onPaymentWritten stamps
-    // client_owner_id (the internal referrer/owner employee UID — the same fact
-    // stripClientInternal hides on the client doc), and rows also carry created_by /
-    // recorded_by / recorded_by_role and free-text remarks. The public ledger only
-    // renders amount/date/mode/reference/invoice fields, so none of these are needed.
-    const stripRow = (d) => {
-      const {
-        client_owner_id, owner_id, owner_name, created_by, created_by_name,
-        recorded_by, recorded_by_role, updated_by, referral_rate, commission,
-        commission_rate, remarks, notes, internal_remarks, internal_notes, ...safe
-      } = d.data();
-      return { id: d.id, ...safe };
-    };
-    const mapRows = (s) => s.docs.map(stripRow);
+    // All external-facing objects use WHITELIST projections (round-15) — money rows,
+    // the client doc, projects and org each return only the fields the public ledger
+    // renders, so no internal field (owner UID, staff notes, credentials, cost basis)
+    // can ever leak through a magic-link, now or after a future migration.
+    const mapRows = (s) => s.docs.map(pickLedgerRow);
     return {
-      client: { id: cid, ...stripClientInternal(stripSecrets(client)) },
-      // Projects: whitelist projection (pickLedgerProject) — only the client/vendor-
-      // facing fields the ledger renders; purchase_orders scoped to the recipient's
-      // own PO payables. No internal field can leak through.
+      client: { id: cid, ...pickLedgerClient(client) },
       projects: projSnap.docs.map((d) => ({ id: d.id, ...pickLedgerProject(d.data(), cid) })),
       payments: mapRows(paySnap),
       vendorPayments: mapRows(vpaySnap),
       purchaseInvoices: mapRows(piSnap),
       taxInvoices: mapRows(tiSnap),
-      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+      org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }
 );
@@ -1023,7 +1045,7 @@ exports.getEmployeeStatement = onCall(
       employee: { id: eid, name: emp.name || '' },
       payouts: mapDocs(payoutsSnap),
       advances: mapDocs(advancesSnap),
-      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+      org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }
 );
@@ -1058,7 +1080,7 @@ exports.getReimbursableData = onCall(
         reimbursable_expenses: p.reimbursable_expenses || [],
       },
       client,
-      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+      org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }
 );
@@ -1094,7 +1116,7 @@ exports.getQuoteApprovalData = onCall(
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
     return {
       project: { id: pDoc.id, ...quoteSafe },
-      org: (orgSnap && orgSnap.exists) ? orgSnap.data() : null,
+      org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }
 );
