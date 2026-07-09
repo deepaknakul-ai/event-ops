@@ -3062,6 +3062,7 @@ const [payroll, setPayroll] = useState([]);
       return;
     }
 
+    const noop = () => {};
     // Non-anonymous: load employees (needed for role restore from localStorage
     // on page reload and for all app features).
     // Field-split slice 2: employee pay (hourlyRate/history/ctc/salary) lives in the
@@ -3146,7 +3147,6 @@ const [payroll, setPayroll] = useState([]);
     // roles are scoped (self-scoped for payroll, none for company ledgers) so a
     // restricted read never hits permission-denied once the rules tighten.
     const financeViewer = role === 'admin' || role === 'accountant';
-    const noop = () => {};
     const finCol = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
     // advances + payouts carry employee_id → admin/accountant all; everyone else
     // sees ONLY their own (the scoped query is required once rules restrict reads).
