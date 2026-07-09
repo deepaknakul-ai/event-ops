@@ -50,6 +50,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('projects', 'projA')), { project_name: 'Proj A', client_owner_id: 'mgrA' });
       await setDoc(doc(db, path('project_financials', 'projA')), { client_owner_id: 'mgrA', created_by: 'mgrA', package_cost: 5000 });
       await setDoc(doc(db, path('project_financials', 'pf_created')), { client_owner_id: '', created_by: 'mgrB', package_cost: 1000 });
+      await setDoc(doc(db, path('project_financials', 'pf_coord')), { client_owner_id: 'u1', created_by: 'mgrA', package_cost: 800 });
       await setDoc(doc(db, path('audit_logs', 'log1')), { action: 'test' });
       await setDoc(doc(db, path('journal_entries', 'je1')), { debit_amount: 100 });
       await setDoc(doc(db, path('chart_of_accounts', 'coa1')), { name: 'Cash' });
@@ -503,8 +504,17 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     test('tech CANNOT read project_financials', async () => {
       await assertFails(getDoc(doc(asUser('tech1'), path('project_financials', 'projA'))));
     });
-    test('coordinator CANNOT read project_financials', async () => {
+    test('coordinator CANNOT read a project_financials they do NOT own', async () => {
       await assertFails(getDoc(doc(asUser('u1'), path('project_financials', 'projA'))));
+    });
+    test('coordinator CAN read a project_financials for a client THEY referred (commission)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('project_financials', 'pf_coord'))));
+    });
+    test('coordinator CAN list OWN project_financials (scoped query)', async () => {
+      await assertSucceeds(getDocs(query(collection(asUser('u1'), path('project_financials')), where('client_owner_id', '==', 'u1'))));
+    });
+    test('tech CANNOT read even an owner-scoped project_financials (owns none)', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('project_financials', 'pf_coord'))));
     });
     test('tech CANNOT list project_financials', async () => {
       await assertFails(getDocs(collection(asUser('tech1'), path('project_financials'))));

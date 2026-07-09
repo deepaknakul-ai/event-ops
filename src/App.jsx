@@ -3127,7 +3127,10 @@ const [payroll, setPayroll] = useState([]);
     let unsubProjFinA = noop; let unsubProjFinB = noop;
     if (_pfViewer) {
       unsubProjFinA = onSnapshot(_pfCol, (snap) => { _finA = {}; snap.docs.forEach(d => { _finA[d.id] = d.data(); }); _applyProjMerge(); }, noop);
-    } else if (role === 'manager' && myEmpId) {
+    } else if (myEmpId) {
+      // Any owner (manager for own projects, coordinator for referred clients) loads
+      // their OWN project money via two owner-scoped queries; a coordinator's Commission
+      // page needs it. tech/non-owners simply match nothing.
       unsubProjFinA = onSnapshot(query(_pfCol, where('client_owner_id', '==', myEmpId)), (snap) => { _finA = {}; snap.docs.forEach(d => { _finA[d.id] = d.data(); }); _applyProjMerge(); }, noop);
       unsubProjFinB = onSnapshot(query(_pfCol, where('created_by', '==', myEmpId)), (snap) => { _finB = {}; snap.docs.forEach(d => { _finB[d.id] = d.data(); }); _applyProjMerge(); }, noop);
     }

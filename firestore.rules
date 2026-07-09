@@ -341,15 +341,18 @@ service cloud.firestore {
     // allocations/purchase_orders/reimbursable/margin/totals), written ONLY by the
     // onProjectWritten Cloud Function (Admin SDK). Read is owner-scoped: admin/
     // accountant see all; a manager sees ONLY their own projects (client_owner_id or
-    // created_by == their uid, denormalised onto the sibling by the trigger); tech/
-    // user never. Client writes/deletes are denied (the trigger maintains it).
+    // created_by == their uid, denormalised onto the sibling by the trigger). Read is
+    // OWNERSHIP-based, not role-based: admin/accountant see all; anyone who OWNS the
+    // project sees it — a Manager for their own projects, AND a Coordinator (user) for
+    // clients they referred (client_owner_id == their uid), which their commission page
+    // needs. A non-owner (incl. tech, and other managers) never reads it. Client
+    // writes/deletes denied — the trigger (Admin SDK) is the sole writer.
     match /artifacts/{appId}/public/data/project_financials/{pid} {
       allow read: if isAuthed()
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
                   && (seesAllParties(appId)
-                      || (hasRole(appId, 'manager')
-                          && (resource.data.get('client_owner_id', '') == userEmpId()
-                              || resource.data.get('created_by', '') == userEmpId())));
+                      || resource.data.get('client_owner_id', '') == userEmpId()
+                      || resource.data.get('created_by', '') == userEmpId());
       allow write: if false; // Admin SDK trigger only
     }
 
