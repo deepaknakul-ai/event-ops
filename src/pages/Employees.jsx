@@ -5,7 +5,8 @@ import { notify } from '../utils/toast';
 import {
   Plus, Edit, User, Key, Wallet, History, Camera, FileCheck, FileText, MapPin, Link2, Copy, ExternalLink, Printer, TrendingUp
 } from 'lucide-react';
-import { collection, addDoc, updateDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { useEmployeeLocations, isLocationLive, locationAge } from '../utils/useEmployeeLocations';
 import jsPDF from 'jspdf';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
@@ -17,6 +18,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
   const canTrack = can(role, 'tracking', 'view');
   const liveLocations = useEmployeeLocations(db, appId, canTrack);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [migrating, setMigrating] = useState('');
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -120,6 +122,12 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       ? Number(existingEmployee?.hourlyRate ?? 0)
       : (Number.isFinite(parsedHourlyRate) ? parsedHourlyRate : null);
 
+    // Field-split slice 2: pay (hourlyRate/hourlyRateHistory) lives in the gated
+    // employee_pay sibling, written ONLY by a view_pay role (admin/accountant). This
+    // also fixes a latent bug: a manager editing an employee used to zero the pay
+    // (the edit read hourlyRate off the pay-stripped prop). empData no longer carries
+    // pay, so a non-view_pay editor cannot touch it.
+    const canWritePay = can(role, 'employees', 'view_pay');
     const empData = {
       name: formData.name, email: formData.email, username: formData.email,
       role: resolvedRole, status: formData.status,
@@ -128,20 +136,25 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       photo_url: formData.photo_url, id_proof_url: formData.id_proof_url, address_proof_url: formData.address_proof_url,
       fatherName: formData.fatherName, emergencyContact: formData.emergencyContact,
       emergencyPhone: formData.emergencyPhone,
-      hourlyRate: resolvedHourlyRate,
-      hourlyRateHistory: editingId
-        ? (Array.isArray(existingEmployee?.hourlyRateHistory) ? existingEmployee.hourlyRateHistory : [])
-        : initialRateHistory,
       monthlyTargetHours: formData.monthlyTargetHours ? parseFloat(formData.monthlyTargetHours) : null
     };
-    if (editingId) {
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', editingId), empData);
-        logAction('employees', 'update', editingId, empData, formData.name);
-        upsertPartyAccount(db, appId, editingId, 'employee', formData.name);  // M-5
-    } else {
-        const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'employees'), { ...empData, created_at: serverTimestamp() });
-        logAction('employees', 'create', docRef.id, empData, formData.name);
-        upsertPartyAccount(db, appId, docRef.id, 'employee', formData.name);  // M-5
+    try {
+      if (editingId) {
+          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', editingId), empData);
+          logAction('employees', 'update', editingId, empData, formData.name);
+          upsertPartyAccount(db, appId, editingId, 'employee', formData.name);  // M-5
+      } else {
+          const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'employees'), { ...empData, created_at: serverTimestamp() });
+          // Initial pay → gated sibling (only a view_pay role reaches the rate field).
+          if (canWritePay && Number.isFinite(parsedHourlyRate)) {
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employee_pay', docRef.id), { hourlyRate: resolvedHourlyRate, hourlyRateHistory: initialRateHistory, updated_at: new Date().toISOString() }, { merge: true });
+          }
+          logAction('employees', 'create', docRef.id, empData, formData.name);
+          upsertPartyAccount(db, appId, docRef.id, 'employee', formData.name);  // M-5
+      }
+    } catch (e) {
+      notify(`Save failed: ${e.message || e}`, 'error');
+      return;
     }
     setIsModalOpen(false);
   };
@@ -238,11 +251,12 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
     }, new Date()) || rateValue);
 
     try {
-      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', promotionEmployee.id), {
+      // Field-split slice 2: pay change → gated employee_pay sibling (admin/accountant).
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employee_pay', promotionEmployee.id), {
         hourlyRate: latestApplicableRate,
         hourlyRateHistory,
-        updated_at: serverTimestamp(),
-      });
+        updated_at: new Date().toISOString(),
+      }, { merge: true });
 
       logAction('employees', 'promotion_update', promotionEmployee.id, {
         effectiveFrom: nextEntry.effectiveFrom,
@@ -455,11 +469,42 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
     notify(days ? `Link will expire in ${days} days.` : 'Expiry removed. Link is now permanent.', 'success');
   };
 
+  // Field-split slice 2 — admin one-time migration of pay into the gated
+  // employee_pay sibling. Backfill (copy), then Scrub (remove from base).
+  const runPayMigration = async (which) => {
+    const fnName = which === 'scrub' ? 'scrubEmployeeEmbeddedPay' : 'backfillEmployeePay';
+    const msg = which === 'scrub'
+      ? 'SCRUB pay from the base employee docs (closes the SDK leak so operational roles can no longer read salary/rates). Only affects employees already mirrored to employee_pay. Run this AFTER Backfill + confirming pay still displays for Owner/Accountant. Proceed?'
+      : 'BACKFILL: copy existing employee pay (rate/salary) into the gated employee_pay sibling. Safe and idempotent. Proceed?';
+    if (!(await confirmDialog(msg))) return;
+    setMigrating(which);
+    try {
+      const res = await httpsCallable(getFunctions(), fnName)({ appId });
+      const d = res?.data || {};
+      notify(which === 'scrub'
+        ? `Scrubbed ${d.scrubbed ?? 0} employee(s); ${d.skipped ?? 0} skipped (no sibling yet).`
+        : `Mirrored ${d.mirrored ?? 0} of ${d.employees ?? 0} employee(s) to employee_pay.`, 'success');
+    } catch (e) { notify(`Migration failed: ${e.message || e}`, 'error'); }
+    finally { setMigrating(''); }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-slate-800">Employee Management</h2>
-        <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap w-full md:w-auto"><Plus size={18} /> Add Employee</button>
+        <div className="flex gap-2 w-full md:w-auto">
+          {role === 'admin' && (
+            <>
+              <button onClick={() => runPayMigration('backfill')} disabled={!!migrating} title="One-time: copy employee pay (rate/salary) into the gated employee_pay sibling" className="flex items-center justify-center gap-1.5 rounded border border-amber-200 bg-amber-50 text-amber-700 px-3 py-2 text-sm hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap">
+                {migrating === 'backfill' ? 'Backfilling…' : 'Backfill pay'}
+              </button>
+              <button onClick={() => runPayMigration('scrub')} disabled={!!migrating} title="One-time: remove pay from base employee docs (leak closure). Run after Backfill + verifying." className="flex items-center justify-center gap-1.5 rounded border border-rose-200 bg-rose-50 text-rose-700 px-3 py-2 text-sm hover:bg-rose-100 disabled:opacity-50 whitespace-nowrap">
+                {migrating === 'scrub' ? 'Scrubbing…' : 'Scrub base'}
+              </button>
+            </>
+          )}
+          <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap w-full md:w-auto"><Plus size={18} /> Add Employee</button>
+        </div>
       </div>
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">{employees.map(emp => (
         <div key={emp.id} className={`rounded-xl border bg-white p-4 shadow-sm relative ${emp.status === 'Disabled' || emp.status === 'Deactivated' ? 'opacity-60 bg-slate-50' : ''}`}>

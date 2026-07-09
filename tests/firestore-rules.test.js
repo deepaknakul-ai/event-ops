@@ -62,6 +62,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('payroll', 'pr1')), { employee_id: 'tech1', grossPay: 50000, netPay: 45000, deductions: 5000 });
       await setDoc(doc(db, path('inventory', 'inv1')), { name: 'LED Panel', rate_per_day: 500, purchase_cost: 40000 });
       await setDoc(doc(db, path('inventory_financials', 'inv1')), { rate_per_day: 500, purchase_cost: 40000 });
+      await setDoc(doc(db, path('employee_pay', 'tech1')), { hourlyRate: 200, hourlyRateHistory: [] });
       await setDoc(doc(db, path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 500, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 800, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 300, status: 'Pending' });
@@ -479,6 +480,38 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT create a penalty', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('penalties', 'pen_t')), { employee_id: 'tech1', minutes: 0 }));
+    });
+  });
+
+  describe('employee_pay sibling — field-split slice 2 (pay gated, view_pay only)', () => {
+    // Read/write: admin/accountant (view_pay) only. manager/tech/user denied — pay
+    // must never enter a non-finance role's client state via the SDK.
+    test('accountant CAN read employee_pay', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('employee_pay', 'tech1'))));
+    });
+    test('manager CANNOT read employee_pay', async () => {
+      await assertFails(getDoc(doc(asUser('mgrA'), path('employee_pay', 'tech1'))));
+    });
+    test('tech CANNOT read own employee_pay', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('employee_pay', 'tech1'))));
+    });
+    test('tech CANNOT list employee_pay', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('employee_pay'))));
+    });
+    test('accountant CAN write employee_pay', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('employee_pay', 'ep_new')), { hourlyRate: 300 }));
+    });
+    test('manager CANNOT write employee_pay', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('employee_pay', 'ep_m')), { hourlyRate: 1 }));
+    });
+    test('tech CANNOT write employee_pay', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('employee_pay', 'ep_t')), { hourlyRate: 1 }));
+    });
+    test('accountant CAN delete employee_pay', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('acct1'), path('employee_pay', 'tech1'))));
+    });
+    test('manager CANNOT delete employee_pay', async () => {
+      await assertFails(deleteDoc(doc(asUser('mgrA'), path('employee_pay', 'tech1'))));
     });
   });
 

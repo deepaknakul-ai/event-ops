@@ -120,11 +120,16 @@ service cloud.firestore {
                   // admin/accountant (vendor/PO cost is not a manager's stake); it was
                   // wrongly grouped with the manager-readable invoices below, leaking
                   // every vendor's PO totals to any manager.
+                  // employee_pay (field-split slice 2): the sibling holding hourlyRate/
+                  // hourlyRateHistory/ctc/salary moved off the base employee doc (which
+                  // every role reads for name/role/assignment). Pay = admin/accountant
+                  // (view_pay) only — never manager/tech/user.
                   && (seesAllParties(appId) || !(collection in [
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
-                       'party_accounts', 'payroll', 'reminder_log', 'purchase_invoices']))
+                       'party_accounts', 'payroll', 'reminder_log', 'purchase_invoices',
+                       'employee_pay']))
                   // Payroll (payouts) + advances carry employee_id: Owner/Accountant
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
@@ -165,7 +170,7 @@ service cloud.firestore {
         : (collection in ['inventory', 'penalties', 'inventory_financials']) ? hasAnyRole(appId, ['admin', 'manager'])
         // Payroll (salary docs): Owner/Accountant only — a role denied even READ
         // must never be able to forge/overwrite a salary record via the SDK.
-        : (collection == 'payroll') ? hasAnyRole(appId, ['admin', 'accountant'])
+        : (collection in ['payroll', 'employee_pay']) ? hasAnyRole(appId, ['admin', 'accountant'])
         // reminder_log (round-9 fix): written only by the reminder Cloud Function
         // (Admin SDK bypasses rules). No client writes it; lock SDK writes to
         // admin/accountant so tech/user cannot forge/overwrite the receivables log.
@@ -287,7 +292,7 @@ service cloud.firestore {
                        'recurring_rules', 'fiscal_year_closings',
                        'opening_balances', 'chart_of_accounts']
       ) ? isAdmin(appId)
-        : (collection in ['payroll', 'payouts', 'advances', 'party_accounts',
+        : (collection in ['payroll', 'employee_pay', 'payouts', 'advances', 'party_accounts',
                           'purchase_invoices', 'reconcile_sessions',
                           'journal_drafts', 'journal_templates', 'reminder_log',
                           // tax_invoices (round-15 fix): a manager may CREATE invoices

@@ -3064,9 +3064,23 @@ const [payroll, setPayroll] = useState([]);
 
     // Non-anonymous: load employees (needed for role restore from localStorage
     // on page reload and for all app features).
+    // Field-split slice 2: employee pay (hourlyRate/history/ctc/salary) lives in the
+    // gated employee_pay sibling (admin/accountant = view_pay). Merge it back over the
+    // base employee docs so admin/accountant see pay unchanged; manager/tech/user load
+    // the base only (no pay). safeEmployees still strips pay defensively downstream.
+    const payViewer = role === 'admin' || role === 'accountant';
+    let _empBase = []; let _empPay = {};
+    const _applyEmpMerge = () => setEmployees(_empBase.map(e => ({ ...e, ...(_empPay[e.id] || {}) })));
     const unsubEmployees = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'employees'), (snap) => {
-      setEmployees(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      _empBase = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      _applyEmpMerge();
     });
+    const unsubEmployeePay = payViewer
+      ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'employee_pay'), (snap) => {
+          _empPay = Object.fromEntries(snap.docs.map(d => [d.id, d.data()]));
+          _applyEmpMerge();
+        }, () => {})
+      : noop;
 
     if (!role) {
       setLoading(false); // Stop loading to show login screen
@@ -3203,7 +3217,7 @@ const [payroll, setPayroll] = useState([]);
   //version 1.3.0 finance implementation enabled code
     return () => {
     unsubProjects(); unsubClients(); unsubInventory(); unsubInventoryFin(); unsubExpenses(); unsubVendorPayments();
-    unsubEmployees(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
+    unsubEmployees(); unsubEmployeePay(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
     unsubTimeLogs(); unsubHrLeaves(); unsubShiftRequests(); unsubPenalties(); unsubPayroll(); unsubHqSettings(); unsubPurchaseInvoices(); unsubTaxInvoices();
     unsubChartOfAccounts(); unsubJournalEntries(); unsubOpeningBalances(); unsubFiscalYearClosings(); unsubRecurringRules(); unsubConfigurations(); unsubPartyAccounts();
     };  

@@ -1670,3 +1670,58 @@ exports.scrubInventoryEmbeddedMoney = onCall(
   },
 );
 
+// ── Financial-field-split slice 2: employee pay ─────────────────────────────
+// Pay fields were embedded on the base employee doc (which every role reads for
+// name/role/assignment) and only UI-stripped by safeEmployees. Migrate them into
+// the gated employee_pay sibling (rules: admin/accountant read+write, view_pay).
+const EMP_PAY_FIELDS = ['hourlyRate', 'hourlyRateHistory', 'monthly_ctc', 'ctc', 'salary'];
+
+exports.backfillEmployeePay = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const empSnap = await db.collection(`artifacts/${appId}/public/data/employees`).get();
+    let batch = db.batch(); let pending = 0; let mirrored = 0;
+    for (const d of empSnap.docs) {
+      const src = d.data();
+      const pay = {};
+      for (const k of EMP_PAY_FIELDS) { if (src[k] !== undefined) pay[k] = src[k]; }
+      if (Object.keys(pay).length === 0) continue;
+      pay.updated_at = new Date().toISOString();
+      batch.set(db.doc(`artifacts/${appId}/public/data/employee_pay/${d.id}`), pay, { merge: true });
+      pending += 1; mirrored += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`backfillEmployeePay: mirrored ${mirrored} employee(s)`);
+    return { mirrored, employees: empSnap.size };
+  },
+);
+
+exports.scrubEmployeeEmbeddedPay = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const empSnap = await db.collection(`artifacts/${appId}/public/data/employees`).get();
+    const del = admin.firestore.FieldValue.delete();
+    let batch = db.batch(); let pending = 0; let scrubbed = 0; let skipped = 0;
+    for (const d of empSnap.docs) {
+      const src = d.data();
+      const present = EMP_PAY_FIELDS.filter((k) => src[k] !== undefined);
+      if (present.length === 0) continue;
+      const payDoc = await db.doc(`artifacts/${appId}/public/data/employee_pay/${d.id}`).get().catch(() => null);
+      if (!payDoc || !payDoc.exists) { skipped += 1; continue; }
+      const upd = {};
+      for (const k of present) upd[k] = del;
+      batch.update(d.ref, upd);
+      pending += 1; scrubbed += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`scrubEmployeeEmbeddedPay: scrubbed ${scrubbed}, skipped ${skipped} (no sibling)`);
+    return { scrubbed, skipped, employees: empSnap.size };
+  },
+);
+
