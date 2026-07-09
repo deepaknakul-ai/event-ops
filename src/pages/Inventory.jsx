@@ -5,7 +5,9 @@ import {
   Truck, Settings, Hammer, CalendarDays, Printer, Tag, ChevronDown, X,
   Archive, ArchiveRestore
 } from 'lucide-react';
-import { collection, addDoc, updateDoc, doc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, doc, deleteDoc, setDoc } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { confirmDialog } from '../utils/dialog';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import InventoryCalendar from '../components/InventoryCalendar';
 import { formatCurrency, validateGSTIN } from '../utils/helpers';
@@ -18,6 +20,7 @@ import autoTable from 'jspdf-autotable';
 const Inventory = ({ inventory, clients, projects = [], role, db, appId, logAction, categories: categoriesProp }) => { // version 3.3.0 vendors database addition: added clients prop
   const categories = categoriesProp || CATEGORIES;
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [migrating, setMigrating] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('All');
@@ -134,13 +137,14 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     const finalSerialNumbers = finalSerialDetails.map(d => d.serial).filter(Boolean);
     const finalSerialNumber = finalSerialNumbers[0] || '';
 
+    // Field-split slice 1: rate/cost fields (+ suppliers, which carry per-vendor
+    // rates) live in the gated inventory_financials sibling, NOT the base doc which
+    // every role reads operationally. Split them out here. gst_rate stays on base —
+    // it is a tax % read operationally by challan/quote flows.
+    const { rate_per_day: _rpd, rate_per_week: _rpw, purchase_cost: _pc, replacement_value: _rv, suppliers: _sup, ...opForm } = formData;
     const itemData = {
-      ...formData,
+      ...opForm,
       total: totalQty,
-      rate_per_day: parseFloat(formData.rate_per_day) || 0,
-      rate_per_week: parseFloat(formData.rate_per_week) || 0,
-      purchase_cost: parseFloat(formData.purchase_cost) || 0,
-      replacement_value: parseFloat(formData.replacement_value) || 0,
       weight: parseFloat(formData.weight) || 0,
       power_watts: parseFloat(formData.power_watts) || 0,
       current_amps: parseFloat(formData.current_amps) || 0,
@@ -149,20 +153,35 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
       is_composite: formData.is_composite || false,
       composition: formData.composition || [],
       vendor_id: formData.vendor_id || '', // version 3.3.0 vendors database addition
-      suppliers: formData.suppliers || [],
       serial_details: finalSerialDetails,
       serial_numbers: finalSerialNumbers,
       serial_number: finalSerialNumber,
       tile_model: formData.tile_model || null,
       updated_at: new Date().toISOString()
     };
+    const financialsData = {
+      rate_per_day: parseFloat(_rpd) || 0,
+      rate_per_week: parseFloat(_rpw) || 0,
+      purchase_cost: parseFloat(_pc) || 0,
+      replacement_value: parseFloat(_rv) || 0,
+      suppliers: _sup || [],
+      updated_at: new Date().toISOString(),
+    };
 
-    if (editingId) {
-      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory', editingId), itemData);
-      logAction('inventory', 'update', editingId, itemData, formData.name);
-    } else {
-      const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), { ...itemData, gst_history: [], created_at: new Date().toISOString() });
-      logAction('inventory', 'create', docRef.id, itemData, formData.name);
+    try {
+      if (editingId) {
+        // Sibling money first, then base operational — money is never lost on a partial failure.
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory_financials', editingId), financialsData, { merge: true });
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory', editingId), itemData);
+        logAction('inventory', 'update', editingId, itemData, formData.name);
+      } else {
+        const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), { ...itemData, gst_history: [], created_at: new Date().toISOString() });
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory_financials', docRef.id), financialsData, { merge: true });
+        logAction('inventory', 'create', docRef.id, itemData, formData.name);
+      }
+    } catch (e) {
+      notify(`Save failed: ${e.message || e}`, 'error');
+      return;
     }
     setIsModalOpen(false);
   };
@@ -327,6 +346,25 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     </div>
   );
 
+  // Field-split slice 1 — admin one-time migration of inventory rates/costs into the
+  // gated inventory_financials sibling. Backfill (copy), then Scrub (remove from base).
+  const runInvMigration = async (which) => {
+    const fnName = which === 'scrub' ? 'scrubInventoryEmbeddedMoney' : 'backfillInventoryFinancials';
+    const msg = which === 'scrub'
+      ? 'SCRUB inventory rates/costs from the base docs (closes the SDK leak so operational roles can no longer read them). Only affects items already mirrored to inventory_financials. Run this AFTER Backfill + confirming rates still display correctly. Proceed?'
+      : 'BACKFILL: copy existing inventory rates/costs into the gated inventory_financials sibling. Safe and idempotent. Proceed?';
+    if (!(await confirmDialog(msg))) return;
+    setMigrating(which);
+    try {
+      const res = await httpsCallable(getFunctions(), fnName)({ appId });
+      const d = res?.data || {};
+      notify(which === 'scrub'
+        ? `Scrubbed ${d.scrubbed ?? 0} item(s); ${d.skipped ?? 0} skipped (no sibling yet).`
+        : `Mirrored ${d.mirrored ?? 0} of ${d.items ?? 0} item(s) to inventory_financials.`, 'success');
+    } catch (e) { notify(`Migration failed: ${e.message || e}`, 'error'); }
+    finally { setMigrating(''); }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -360,9 +398,17 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
             <Printer size={16} /> QR Labels
           </button>
           {role === 'admin' && (
-            <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded bg-indigo-600 px-3 py-1 text-white text-sm hover:bg-indigo-700 whitespace-nowrap flex-1 md:flex-none">
-              <Plus size={16} /> Add Item
-            </button>
+            <>
+              <button onClick={() => runInvMigration('backfill')} disabled={!!migrating} title="One-time: copy inventory rates/costs into the gated inventory_financials sibling" className="flex items-center justify-center gap-1.5 rounded border border-amber-200 bg-amber-50 text-amber-700 px-3 py-1 text-sm hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap">
+                {migrating === 'backfill' ? 'Backfilling…' : 'Backfill rates'}
+              </button>
+              <button onClick={() => runInvMigration('scrub')} disabled={!!migrating} title="One-time: remove rates/costs from base inventory docs (leak closure). Run after Backfill + verifying." className="flex items-center justify-center gap-1.5 rounded border border-rose-200 bg-rose-50 text-rose-700 px-3 py-1 text-sm hover:bg-rose-100 disabled:opacity-50 whitespace-nowrap">
+                {migrating === 'scrub' ? 'Scrubbing…' : 'Scrub base'}
+              </button>
+              <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded bg-indigo-600 px-3 py-1 text-white text-sm hover:bg-indigo-700 whitespace-nowrap flex-1 md:flex-none">
+                <Plus size={16} /> Add Item
+              </button>
+            </>
           )}
         </div>
       </div>

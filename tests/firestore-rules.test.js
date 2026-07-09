@@ -61,6 +61,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('leads', 'ld_mgrB')), { name: 'Lead B', created_by: 'mgrB', est_value: 50000 });
       await setDoc(doc(db, path('payroll', 'pr1')), { employee_id: 'tech1', grossPay: 50000, netPay: 45000, deductions: 5000 });
       await setDoc(doc(db, path('inventory', 'inv1')), { name: 'LED Panel', rate_per_day: 500, purchase_cost: 40000 });
+      await setDoc(doc(db, path('inventory_financials', 'inv1')), { rate_per_day: 500, purchase_cost: 40000 });
       await setDoc(doc(db, path('expenses', 'exp_tech')), { employee_id: 'tech1', amount: 500, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_mgr')), { employee_id: 'mgrA', amount: 800, status: 'Approved' });
       await setDoc(doc(db, path('expenses', 'exp_tech_pend')), { employee_id: 'tech1', amount: 300, status: 'Pending' });
@@ -478,6 +479,41 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT create a penalty', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('penalties', 'pen_t')), { employee_id: 'tech1', minutes: 0 }));
+    });
+  });
+
+  describe('inventory_financials sibling — field-split slice 1 (rates/costs gated)', () => {
+    // Read: admin/accountant/manager (managers seed allocations from rates). tech/user denied.
+    test('accountant CAN read inventory_financials', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('inventory_financials', 'inv1'))));
+    });
+    test('manager CAN read inventory_financials', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('inventory_financials', 'inv1'))));
+    });
+    test('tech CANNOT read inventory_financials (no rate leak)', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('inventory_financials', 'inv1'))));
+    });
+    test('coordinator CANNOT read inventory_financials', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('inventory_financials', 'inv1'))));
+    });
+    test('tech CANNOT list inventory_financials', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('inventory_financials'))));
+    });
+    // Write/delete: admin/manager (mirror inventory create/edit); accountant view-only.
+    test('manager CAN write inventory_financials', async () => {
+      await assertSucceeds(setDoc(doc(asUser('mgrA'), path('inventory_financials', 'invf_new')), { rate_per_day: 100 }));
+    });
+    test('accountant CANNOT write inventory_financials (view-only)', async () => {
+      await assertFails(setDoc(doc(asUser('acct1'), path('inventory_financials', 'invf_a')), { rate_per_day: 1 }));
+    });
+    test('tech CANNOT write inventory_financials', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('inventory_financials', 'invf_t')), { rate_per_day: 1 }));
+    });
+    test('manager CAN delete inventory_financials', async () => {
+      await assertSucceeds(deleteDoc(doc(asUser('mgrA'), path('inventory_financials', 'inv1'))));
+    });
+    test('tech CANNOT delete inventory_financials', async () => {
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('inventory_financials', 'inv1'))));
     });
   });
 

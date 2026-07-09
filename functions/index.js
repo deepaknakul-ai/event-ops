@@ -1611,3 +1611,62 @@ exports.backfillProjectExpenseTotals = onCall(
   },
 );
 
+// ── Financial-field-split slice 1: inventory rates/costs ─────────────────────
+// Inventory money fields live embedded on the base inventory doc, which every
+// role reads operationally (stock/scan), so they were SDK-readable though UI-hidden.
+// These two admin callables migrate them into the gated inventory_financials sibling
+// (rules: admin/accountant/manager read, admin/manager write). Owner runs BACKFILL
+// (copy → sibling), verifies displays, then SCRUB (delete from base = leak closure).
+const INV_MONEY_FIELDS = ['rate_per_day', 'rate_per_week', 'purchase_cost', 'replacement_value', 'suppliers'];
+
+exports.backfillInventoryFinancials = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const invSnap = await db.collection(`artifacts/${appId}/public/data/inventory`).get();
+    let batch = db.batch(); let pending = 0; let mirrored = 0;
+    for (const d of invSnap.docs) {
+      const src = d.data();
+      const fin = {};
+      for (const k of INV_MONEY_FIELDS) { if (src[k] !== undefined) fin[k] = src[k]; }
+      if (Object.keys(fin).length === 0) continue;
+      fin.updated_at = new Date().toISOString();
+      batch.set(db.doc(`artifacts/${appId}/public/data/inventory_financials/${d.id}`), fin, { merge: true });
+      pending += 1; mirrored += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`backfillInventoryFinancials: mirrored ${mirrored} item(s)`);
+    return { mirrored, items: invSnap.size };
+  },
+);
+
+exports.scrubInventoryEmbeddedMoney = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const invSnap = await db.collection(`artifacts/${appId}/public/data/inventory`).get();
+    const del = admin.firestore.FieldValue.delete();
+    let batch = db.batch(); let pending = 0; let scrubbed = 0; let skipped = 0;
+    for (const d of invSnap.docs) {
+      const src = d.data();
+      const present = INV_MONEY_FIELDS.filter((k) => src[k] !== undefined);
+      if (present.length === 0) continue;
+      // Safety: never scrub unless the sibling already holds this item's money —
+      // guarantees the migration can't orphan/lose rates.
+      const finDoc = await db.doc(`artifacts/${appId}/public/data/inventory_financials/${d.id}`).get().catch(() => null);
+      if (!finDoc || !finDoc.exists) { skipped += 1; continue; }
+      const upd = {};
+      for (const k of present) upd[k] = del;
+      batch.update(d.ref, upd);
+      pending += 1; scrubbed += 1;
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`scrubInventoryEmbeddedMoney: scrubbed ${scrubbed}, skipped ${skipped} (no sibling)`);
+    return { scrubbed, skipped, items: invSnap.size };
+  },
+);
+

@@ -130,13 +130,14 @@ service cloud.firestore {
                   // GET (resource.data) and for the self-scoped list query the app runs.
                   && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
                       || resource.data.get('employee_id', '') == userEmpId())
-                  // Tax invoices + vendor payments + HR penalties: Owner/Accountant/
-                  // Manager only. Tech and Coordinator have no stake and are denied at
-                  // the rule level (managers keep read; cross-manager money is hidden in
-                  // the UI). purchase_invoices was removed here (round-17) — it is
-                  // admin/accountant-only, handled in the seesAllParties list above.
+                  // Tax invoices + vendor payments + HR penalties + inventory_financials:
+                  // Owner/Accountant/Manager only. Tech and Coordinator have no stake and
+                  // are denied at the rule level. inventory_financials (field-split slice 1)
+                  // is the sibling holding inventory rates/costs moved off the base
+                  // inventory doc — managers keep read (they seed project allocations from
+                  // rates); tech/user (operational stock/scan only) are denied.
                   && (seesAllParties(appId) || hasRole(appId, 'manager')
-                      || !(collection in ['tax_invoices', 'vendor_payments', 'penalties']))
+                      || !(collection in ['tax_invoices', 'vendor_payments', 'penalties', 'inventory_financials']))
                   // Leads / CRM pipeline: Owner/Accountant see all; a Manager sees ONLY
                   // leads they created (manager-vs-manager pipeline isolation); tech/user
                   // denied entirely.
@@ -161,7 +162,7 @@ service cloud.firestore {
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
         // tamper via the SDK).
-        : (collection in ['inventory', 'penalties']) ? hasAnyRole(appId, ['admin', 'manager'])
+        : (collection in ['inventory', 'penalties', 'inventory_financials']) ? hasAnyRole(appId, ['admin', 'manager'])
         // Payroll (salary docs): Owner/Accountant only — a role denied even READ
         // must never be able to forge/overwrite a salary record via the SDK.
         : (collection == 'payroll') ? hasAnyRole(appId, ['admin', 'accountant'])
@@ -299,7 +300,7 @@ service cloud.firestore {
         // (line ~159 = admin/manager), NOT the isFinanceWriter default — an accountant
         // is view-only on these (permissions.js hr_penalties/inventory) and must not
         // be able to delete a salary-deduction or inventory record it cannot create.
-        : (collection in ['inventory', 'penalties']) ? hasAnyRole(appId, ['admin', 'manager'])
+        : (collection in ['inventory', 'penalties', 'inventory_financials']) ? hasAnyRole(appId, ['admin', 'manager'])
         // Leads (round-9 fix): admin/accountant delete any; a manager deletes ONLY
         // leads they created (the old isFinanceWriter default let Manager B delete
         // Manager A's lead, defeating manager-vs-manager pipeline isolation).

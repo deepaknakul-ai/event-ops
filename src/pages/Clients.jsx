@@ -565,7 +565,6 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       name: vendorAssetForm.name,
       category: vendorAssetForm.category || 'Accessories',
       total: parseInt(vendorAssetForm.qty),
-      rate_per_day: parseFloat(vendorAssetForm.price) || 0,
       vendor_id: selectedVendorForAssets.id,
       is_external: true,
       status: 'Available',
@@ -573,9 +572,15 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       brand: '', sub_category: '', serial_number: '', location: 'Vendor Premise', gst_rate: 18
     };
 
-    const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), newItem);
-    logAction('inventory', 'create_vendor_asset', docRef.id, newItem, newItem.name);
-    setVendorAssetForm({ name: '', category: 'Sound', qty: 1, price: 0 });
+    try {
+      const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), newItem);
+      // Field-split slice 1: rate_per_day → gated inventory_financials sibling, not base.
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inventory_financials', docRef.id), { rate_per_day: parseFloat(vendorAssetForm.price) || 0, updated_at: new Date().toISOString() }, { merge: true });
+      logAction('inventory', 'create_vendor_asset', docRef.id, newItem, newItem.name);
+      setVendorAssetForm({ name: '', category: 'Sound', qty: 1, price: 0 });
+    } catch (e) {
+      notify(`Failed to add vendor asset: ${e.message || e}`, 'error');
+    }
   };
 
   const handleDeleteAsset = async (assetId) => {

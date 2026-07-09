@@ -3103,9 +3103,24 @@ const [payroll, setPayroll] = useState([]);
         .then((res) => setClients((res.data && res.data.contacts) || []))
         .catch(() => setClients([]));
     }
+    // Field-split slice 1: inventory rates/costs live in the gated inventory_financials
+    // sibling (admin/accountant/manager read). Merge them back over the base inventory
+    // docs so the ~13 downstream pages get rate_per_day/purchase_cost/etc unchanged for
+    // authorised roles; tech/user load the base only (no money — their operational
+    // stock/scan views need none, and the base is scrubbed of money by the migration).
+    const invRatesViewer = role === 'admin' || role === 'accountant' || role === 'manager';
+    let _invBase = []; let _invFin = {};
+    const _applyInvMerge = () => setInventory(_invBase.map(it => ({ ...it, ...(_invFin[it.id] || {}) })));
     const unsubInventory = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'inventory'), (snap) => {
-      setInventory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      _invBase = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      _applyInvMerge();
     });
+    const unsubInventoryFin = invRatesViewer
+      ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'inventory_financials'), (snap) => {
+          _invFin = Object.fromEntries(snap.docs.map(d => [d.id, d.data()]));
+          _applyInvMerge();
+        }, () => {})
+      : noop;
     // Expenses: admin/accountant/manager see all; tech/user see ONLY their own
     // (amounts are financial). The scoped query is required once the rule restricts.
     const expensesViewer = role === 'admin' || role === 'accountant' || role === 'manager';
@@ -3187,7 +3202,7 @@ const [payroll, setPayroll] = useState([]);
 
   //version 1.3.0 finance implementation enabled code
     return () => {
-    unsubProjects(); unsubClients(); unsubInventory(); unsubExpenses(); unsubVendorPayments();
+    unsubProjects(); unsubClients(); unsubInventory(); unsubInventoryFin(); unsubExpenses(); unsubVendorPayments();
     unsubEmployees(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
     unsubTimeLogs(); unsubHrLeaves(); unsubShiftRequests(); unsubPenalties(); unsubPayroll(); unsubHqSettings(); unsubPurchaseInvoices(); unsubTaxInvoices();
     unsubChartOfAccounts(); unsubJournalEntries(); unsubOpeningBalances(); unsubFiscalYearClosings(); unsubRecurringRules(); unsubConfigurations(); unsubPartyAccounts();
