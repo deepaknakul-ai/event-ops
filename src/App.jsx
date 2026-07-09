@@ -3101,7 +3101,36 @@ const [payroll, setPayroll] = useState([]);
     const scopeClients = role === 'manager';
     const myEmpId = user.uid;
 
-    const unsubProjects = onSnapshot(projectsCol, (snap) => setProjects(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+    // Field-split slice 3: project money is mirrored to the gated project_financials
+    // sibling. Merge it back over base projects for authorised roles (admin/accountant
+    // ALL; a manager only their OWN — two owner-scoped queries, since Firestore can't OR
+    // client_owner_id/created_by in one); tech/user load base only. Transparent to the
+    // ~25 downstream pages. Additive until slice-3b scrub — the overlay equals the base
+    // values once backfilled, so this changes nothing visible.
+    const _pfViewer = role === 'admin' || role === 'accountant';
+    const _pfCol = collection(db, 'artifacts', appId, 'public', 'data', 'project_financials');
+    let _projBase = []; let _finA = {}; let _finB = {};
+    const _applyProjMerge = () => {
+      const fin = { ..._finA, ..._finB };
+      setProjects(_projBase.map(p => {
+        const f = fin[p.id];
+        if (!f) return p;
+        const money = {};
+        for (const k in f) { if (k !== 'client_owner_id' && k !== 'created_by' && k !== 'updated_at') money[k] = f[k]; }
+        return { ...p, ...money };
+      }));
+    };
+    const unsubProjects = onSnapshot(projectsCol, (snap) => {
+      _projBase = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      _applyProjMerge();
+    });
+    let unsubProjFinA = noop; let unsubProjFinB = noop;
+    if (_pfViewer) {
+      unsubProjFinA = onSnapshot(_pfCol, (snap) => { _finA = {}; snap.docs.forEach(d => { _finA[d.id] = d.data(); }); _applyProjMerge(); }, noop);
+    } else if (role === 'manager' && myEmpId) {
+      unsubProjFinA = onSnapshot(query(_pfCol, where('client_owner_id', '==', myEmpId)), (snap) => { _finA = {}; snap.docs.forEach(d => { _finA[d.id] = d.data(); }); _applyProjMerge(); }, noop);
+      unsubProjFinB = onSnapshot(query(_pfCol, where('created_by', '==', myEmpId)), (snap) => { _finB = {}; snap.docs.forEach(d => { _finB[d.id] = d.data(); }); _applyProjMerge(); }, noop);
+    }
     let unsubClients;
     if (seesAllClients) {
       unsubClients = onSnapshot(clientsCol, (snap) => setClients(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
@@ -3216,7 +3245,7 @@ const [payroll, setPayroll] = useState([]);
 
   //version 1.3.0 finance implementation enabled code
     return () => {
-    unsubProjects(); unsubClients(); unsubInventory(); unsubInventoryFin(); unsubExpenses(); unsubVendorPayments();
+    unsubProjects(); unsubProjFinA(); unsubProjFinB(); unsubClients(); unsubInventory(); unsubInventoryFin(); unsubExpenses(); unsubVendorPayments();
     unsubEmployees(); unsubEmployeePay(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
     unsubTimeLogs(); unsubHrLeaves(); unsubShiftRequests(); unsubPenalties(); unsubPayroll(); unsubHqSettings(); unsubPurchaseInvoices(); unsubTaxInvoices();
     unsubChartOfAccounts(); unsubJournalEntries(); unsubOpeningBalances(); unsubFiscalYearClosings(); unsubRecurringRules(); unsubConfigurations(); unsubPartyAccounts();

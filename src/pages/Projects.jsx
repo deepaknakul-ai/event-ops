@@ -15,6 +15,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
 import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 
@@ -226,6 +227,18 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const [isDefaultFilter, setIsDefaultFilter] = useState(true);
   const [myProjectsOnly, setMyProjectsOnly] = useState(role === 'tech');
   const [quickFilter, setQuickFilter] = useState('');
+  // Field-split slice 3 — one-time admin backfill of project money → gated sibling.
+  const [pfMigrating, setPfMigrating] = useState(false);
+  const runProjectBackfill = async () => {
+    if (!(await confirmDialog('BACKFILL: mirror every project\'s money into the gated project_financials sibling (safe + idempotent). Run this, then confirm project money still displays, before the Scrub step is enabled. Proceed?'))) return;
+    setPfMigrating(true);
+    try {
+      const res = await httpsCallable(getFunctions(), 'backfillProjectFinancials')({ appId });
+      addToast(`Mirrored ${res?.data?.mirrored ?? 0} of ${res?.data?.projects ?? 0} project(s) to project_financials.`, 'success');
+    } catch (e) { addToast(`Backfill failed: ${e.message || e}`, 'error'); }
+    finally { setPfMigrating(false); }
+  };
+
   // Bulk / Group Invoice state
   const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
   const [bulkInvoiceSelected, setBulkInvoiceSelected] = useState(new Set());
@@ -3667,6 +3680,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                       <Receipt size={18} /> Group Invoice
                   </button>
                 </>
+              )}
+              {role === 'admin' && (
+                <button onClick={runProjectBackfill} disabled={pfMigrating} title="One-time: mirror all projects' money into the gated project_financials sibling" className="flex items-center justify-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-amber-700 hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap w-full md:w-auto">
+                  {pfMigrating ? 'Backfilling…' : 'Backfill project money'}
+                </button>
               )}
               {can(role, 'projects', 'create') && (
                 <button onClick={openCreate} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 whitespace-nowrap w-full md:w-auto">
