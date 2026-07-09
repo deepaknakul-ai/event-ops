@@ -866,14 +866,14 @@ exports.getPortalData = onCall(
     let vendor = null;
     if (isVendor) {
       const jobs = []; let vBilled = 0;
-      projSnap.docs.forEach((d) => {
-        const p = d.data();
+      for (const d of projSnap.docs) {
+        const p = await mergeProjectFin(appId, d.id, d.data()); // vendor_allocations from sibling (base scrubbed)
         (p.vendor_allocations || []).filter((a) => a.vendor_id === cid).forEach((a) => {
           const amt = Number(a.tax_amount || a.amount || 0);
           jobs.push({ project: p.project_name || '', item: a.item_name || '', amount: amt });
           vBilled += amt;
         });
-      });
+      }
       const vPaid = (vpaySnap.docs || []).reduce((s, d) => s + Number(d.data().amount || 0), 0);
       vendor = { jobs, billed: vBilled, paid: vPaid, balance: vBilled - vPaid };
     }
@@ -959,6 +959,20 @@ function pickLedgerRow(d) {
 // orders is filtered to the recipient's OWN POs (a vendor sees their payables; a
 // client owns none). Client-facing revenue fields (items / logistics_costs /
 // package_cost / reimbursable_expenses) ARE the client's payable and are retained.
+// Field-split slice 3: project money now lives in the gated project_financials/{pid}
+// sibling (base doc scrubbed). These server functions read projects via the Admin SDK,
+// which bypasses rules, so merge the sibling's money back over the base doc before
+// projecting for the external client/vendor. (Falls back to base if no sibling.)
+async function mergeProjectFin(appId, id, data) {
+  try {
+    const finDoc = await db.doc(`artifacts/${appId}/public/data/project_financials/${id}`).get();
+    if (!finDoc.exists) return data;
+    const fin = finDoc.data();
+    delete fin.client_owner_id; delete fin.created_by; delete fin.updated_at;
+    return { ...data, ...fin };
+  } catch (_) { return data; }
+}
+
 function pickLedgerProject(data, cid) {
   const d = data || {};
   return {
@@ -1007,9 +1021,12 @@ exports.getLedgerData = onCall(
     // renders, so no internal field (owner UID, staff notes, credentials, cost basis)
     // can ever leak through a magic-link, now or after a future migration.
     const mapRows = (s) => s.docs.map(pickLedgerRow);
+    // Merge each project's money from the gated sibling (base is scrubbed post-slice-3).
+    const projectsOut = await Promise.all(projSnap.docs.map(async (d) =>
+      ({ id: d.id, ...pickLedgerProject(await mergeProjectFin(appId, d.id, d.data()), cid) })));
     return {
       client: { id: cid, ...pickLedgerClient(client) },
-      projects: projSnap.docs.map((d) => ({ id: d.id, ...pickLedgerProject(d.data(), cid) })),
+      projects: projectsOut,
       payments: mapRows(paySnap),
       vendorPayments: mapRows(vpaySnap),
       purchaseInvoices: mapRows(piSnap),
@@ -1073,6 +1090,7 @@ exports.getReimbursableData = onCall(
     const pDoc = q.docs[0]; const p = pDoc.data();
     if (p.reimbursable_token_enabled === false) throw new HttpsError('permission-denied', 'This link has been disabled.');
     if (p.reimbursable_token_expires_at && new Date(p.reimbursable_token_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This link has expired. Please request a new link.');
+    const pm = await mergeProjectFin(appId, pDoc.id, p); // money from sibling (base scrubbed)
     let client = null;
     if (p.client_id) {
       const cSnap = await db.doc(`artifacts/${appId}/public/data/clients/${p.client_id}`).get().catch(() => null);
@@ -1087,7 +1105,7 @@ exports.getReimbursableData = onCall(
         end_date: p.end_date || '',
         venue: p.venue || '',
         client_id: p.client_id || '',
-        reimbursable_expenses: p.reimbursable_expenses || [],
+        reimbursable_expenses: pm.reimbursable_expenses || [],
       },
       client,
       org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
@@ -1111,6 +1129,7 @@ exports.getQuoteApprovalData = onCall(
     // Everything else — internal costs/margin/vendor POs, reimbursable working notes,
     // identity metadata, remarks, direct_expense_total, tokens — is excluded by
     // construction, so no new project field can ever leak through this link.
+    const pm = await mergeProjectFin(appId, pDoc.id, p); // money from sibling (base scrubbed)
     const quoteSafe = {
       quote_status: p.quote_status || '',
       project_name: p.project_name || '',
@@ -1118,10 +1137,10 @@ exports.getQuoteApprovalData = onCall(
       start_date: p.start_date || '',
       end_date: p.end_date || '',
       client_id: p.client_id || '',
-      package_cost: p.package_cost ?? 0,
-      package_cost_gst: p.package_cost_gst ?? 0,
-      items: p.items || [],
-      logistics_costs: p.logistics_costs || {},
+      package_cost: pm.package_cost ?? 0,
+      package_cost_gst: pm.package_cost_gst ?? 0,
+      items: pm.items || [],
+      logistics_costs: pm.logistics_costs || {},
     };
     const orgSnap = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null);
     return {
