@@ -1725,3 +1725,65 @@ exports.scrubEmployeeEmbeddedPay = onCall(
   },
 );
 
+// ── Financial-field-split slice 3: project money ─────────────────────────────
+// Projects carry money embedded (items[] rates/totals, package_cost, logistics,
+// vendor_allocations, purchase_orders, reimbursable, margin, totals) but are read
+// operationally by ALL roles, so the money is SDK-readable. There are ~18 project
+// write sites, so instead of re-routing each we MIRROR the money into the gated
+// project_financials sibling via a trigger (Admin SDK). Slice 3a (this): mirror only
+// — base still carries money (no leak closed yet, zero app change). Slice 3b: scrub
+// base + owner-scoped loader merge. The sibling carries client_owner_id/created_by so
+// its rule can owner-scope managers to their own projects.
+const PROJECT_FINANCIAL_FIELDS = ['items', 'package_cost', 'package_cost_gst', 'logistics_costs',
+  'vendor_allocations', 'purchase_orders', 'reimbursable_expenses', 'proforma_invoices',
+  'total_value', 'total', 'grand_total', 'margin', 'advance_committed', 'direct_expense_total'];
+
+function buildProjectFin(data) {
+  const fin = { client_owner_id: data.client_owner_id || '', created_by: data.created_by || '' };
+  for (const k of PROJECT_FINANCIAL_FIELDS) { if (data[k] !== undefined) fin[k] = data[k]; }
+  return fin;
+}
+
+exports.onProjectWritten = onDocumentWritten(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 120, document: 'artifacts/{appId}/public/data/projects/{pid}' },
+  async (event) => {
+    const { appId, pid } = event.params;
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
+    const finRef = db.doc(`artifacts/${appId}/public/data/project_financials/${pid}`);
+    if (!after) {
+      const snap = await finRef.get().catch(() => null);
+      if (snap && snap.exists) { await finRef.delete().catch(() => {}); logger.info(`onProjectWritten: project ${pid} deleted — financials removed`); }
+      return;
+    }
+    const finAfter = buildProjectFin(after);
+    // Skip pure-operational writes (status/remarks/assigned_employees/etc.) — only
+    // mirror when the money or owner actually changed. Writes to project_financials
+    // do not re-fire this trigger (different collection), so no loop.
+    if (before && JSON.stringify(buildProjectFin(before)) === JSON.stringify(finAfter)) return;
+    finAfter.updated_at = new Date().toISOString();
+    await finRef.set(finAfter, { merge: true });
+    logger.info(`onProjectWritten: project ${pid} financials mirrored`);
+  },
+);
+
+exports.backfillProjectFinancials = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 540 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const projSnap = await db.collection(`artifacts/${appId}/public/data/projects`).get();
+    let batch = db.batch(); let pending = 0; let mirrored = 0;
+    for (const d of projSnap.docs) {
+      const fin = buildProjectFin(d.data());
+      fin.updated_at = new Date().toISOString();
+      batch.set(db.doc(`artifacts/${appId}/public/data/project_financials/${d.id}`), fin, { merge: true });
+      pending += 1; mirrored += 1;
+      if (pending >= 300) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`backfillProjectFinancials: mirrored ${mirrored} project(s)`);
+    return { mirrored, projects: projSnap.size };
+  },
+);
+

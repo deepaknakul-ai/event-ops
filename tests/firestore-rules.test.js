@@ -48,6 +48,8 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('payments', 'pay1')), { amount: 1000, client_id: 'cA', client_owner_id: 'mgrA' });
       await setDoc(doc(db, path('payments', 'pay_u')), { amount: 250, client_id: 'cU', client_owner_id: 'u1' });
       await setDoc(doc(db, path('projects', 'projA')), { project_name: 'Proj A', client_owner_id: 'mgrA' });
+      await setDoc(doc(db, path('project_financials', 'projA')), { client_owner_id: 'mgrA', created_by: 'mgrA', package_cost: 5000 });
+      await setDoc(doc(db, path('project_financials', 'pf_created')), { client_owner_id: '', created_by: 'mgrB', package_cost: 1000 });
       await setDoc(doc(db, path('audit_logs', 'log1')), { action: 'test' });
       await setDoc(doc(db, path('journal_entries', 'je1')), { debit_amount: 100 });
       await setDoc(doc(db, path('chart_of_accounts', 'coa1')), { name: 'Cash' });
@@ -480,6 +482,45 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     });
     test('tech CANNOT create a penalty', async () => {
       await assertFails(setDoc(doc(asUser('tech1'), path('penalties', 'pen_t')), { employee_id: 'tech1', minutes: 0 }));
+    });
+  });
+
+  describe('project_financials sibling — field-split slice 3 (money owner-scoped)', () => {
+    // Read: admin/accountant all; manager ONLY own (client_owner_id/created_by == uid);
+    // tech/user never. Client writes denied (Admin SDK trigger maintains it).
+    test('accountant CAN read any project_financials', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('project_financials', 'projA'))));
+    });
+    test('owning manager CAN read own project_financials (client_owner_id)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrA'), path('project_financials', 'projA'))));
+    });
+    test('manager CAN read own project_financials via created_by', async () => {
+      await assertSucceeds(getDoc(doc(asUser('mgrB'), path('project_financials', 'pf_created'))));
+    });
+    test('non-owning manager CANNOT read another manager\'s project_financials', async () => {
+      await assertFails(getDoc(doc(asUser('mgrB'), path('project_financials', 'projA'))));
+    });
+    test('tech CANNOT read project_financials', async () => {
+      await assertFails(getDoc(doc(asUser('tech1'), path('project_financials', 'projA'))));
+    });
+    test('coordinator CANNOT read project_financials', async () => {
+      await assertFails(getDoc(doc(asUser('u1'), path('project_financials', 'projA'))));
+    });
+    test('tech CANNOT list project_financials', async () => {
+      await assertFails(getDocs(collection(asUser('tech1'), path('project_financials'))));
+    });
+    test('manager CANNOT list ALL project_financials (unscoped)', async () => {
+      await assertFails(getDocs(collection(asUser('mgrA'), path('project_financials'))));
+    });
+    test('manager CAN list OWN project_financials (scoped query)', async () => {
+      await assertSucceeds(getDocs(query(collection(asUser('mgrA'), path('project_financials')), where('client_owner_id', '==', 'mgrA'))));
+    });
+    // Client writes denied — only the onProjectWritten trigger (Admin SDK) writes it.
+    test('manager CANNOT client-write project_financials', async () => {
+      await assertFails(setDoc(doc(asUser('mgrA'), path('project_financials', 'projA')), { package_cost: 1 }));
+    });
+    test('accountant CANNOT client-write project_financials', async () => {
+      await assertFails(setDoc(doc(asUser('acct1'), path('project_financials', 'pf_x')), { package_cost: 1 }));
     });
   });
 

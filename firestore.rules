@@ -105,9 +105,13 @@ service cloud.firestore {
                   // authoritative (OR-semantics would otherwise expose private DMs).
                   // clients is excluded so the owner-scoped client rules below are
                   // authoritative (managers see only their own clients/vendors).
+                  // project_financials (field-split slice 3): the sibling holding project
+                  // money is owner-scoped by the dedicated block below (admin/accountant
+                  // all; a manager only their OWN projects). Excluded here so OR-semantics
+                  // don't let the generic read expose every project's money.
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients', 'users', 'expenses'])
+                                      'clients', 'users', 'expenses', 'project_financials'])
                   // Company-wide accounting ledgers + payroll: Owner + Accountant only.
                   // They carry no per-project owner and no operational role needs them,
                   // so they must never be SDK-readable by manager / tech / user.
@@ -162,7 +166,7 @@ service cloud.firestore {
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials']
       ) ? false
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
@@ -285,7 +289,7 @@ service cloud.firestore {
       //   - everything else (manager-transactional payments/tax_invoices/
       //     vendor_payments + operational collections): admin/accountant/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -330,6 +334,23 @@ service cloud.firestore {
       allow read: if isAuthed();
       allow create: if isRoleUser(appId);
       allow update, delete: if false;
+    }
+
+    // ── Project financials (field-split slice 3) ───────────────────────────────
+    // Sibling holding a project's money (items$/package_cost/logistics/vendor_
+    // allocations/purchase_orders/reimbursable/margin/totals), written ONLY by the
+    // onProjectWritten Cloud Function (Admin SDK). Read is owner-scoped: admin/
+    // accountant see all; a manager sees ONLY their own projects (client_owner_id or
+    // created_by == their uid, denormalised onto the sibling by the trigger); tech/
+    // user never. Client writes/deletes are denied (the trigger maintains it).
+    match /artifacts/{appId}/public/data/project_financials/{pid} {
+      allow read: if isAuthed()
+                  && request.auth.token.firebase.sign_in_provider != 'anonymous'
+                  && (seesAllParties(appId)
+                      || (hasRole(appId, 'manager')
+                          && (resource.data.get('client_owner_id', '') == userEmpId()
+                              || resource.data.get('created_by', '') == userEmpId())));
+      allow write: if false; // Admin SDK trigger only
     }
 
     // ── Expenses ──────────────────────────────────────────────────────────────
