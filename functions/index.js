@@ -1734,14 +1734,51 @@ exports.scrubEmployeeEmbeddedPay = onCall(
 // — base still carries money (no leak closed yet, zero app change). Slice 3b: scrub
 // base + owner-scoped loader merge. The sibling carries client_owner_id/created_by so
 // its rule can owner-scope managers to their own projects.
-const PROJECT_FINANCIAL_FIELDS = ['items', 'package_cost', 'package_cost_gst', 'logistics_costs',
+const PROJECT_FINANCIAL_FIELDS = ['package_cost', 'package_cost_gst', 'logistics_costs',
   'vendor_allocations', 'purchase_orders', 'reimbursable_expenses', 'proforma_invoices',
   'total_value', 'total', 'grand_total', 'margin', 'advance_committed', 'direct_expense_total'];
+// Base-strip lists. direct_expense_total is intentionally NOT stripped: coordinators
+// (who cannot read project_financials) need it on the base doc for their own referral-
+// commission calc, and it is a single derived aggregate, not pricing.
+const PROJECT_MONEY_SCALARS_STRIP = ['package_cost', 'package_cost_gst', 'logistics_costs',
+  'vendor_allocations', 'purchase_orders', 'reimbursable_expenses', 'proforma_invoices',
+  'total_value', 'total', 'grand_total', 'margin', 'advance_committed'];
+const ITEM_MONEY_FIELDS = ['rate', 'amount', 'gst_rate', 'gst_amount', 'total'];
 
+const itemsHaveMoney = (data) => Array.isArray(data.items)
+  && data.items.some((it) => it && ITEM_MONEY_FIELDS.some((f) => it[f] !== undefined));
+
+// Sibling projection. items[] are mirrored ONLY when they still carry money — on a
+// PARTIAL money write (e.g. package_cost only) the base items may already be stripped,
+// and mirroring them would overwrite the sibling's full items with a stripped copy.
+// Scalars use merge-if-present, so already-stripped (undefined) scalars are left as-is.
 function buildProjectFin(data) {
   const fin = { client_owner_id: data.client_owner_id || '', created_by: data.created_by || '' };
   for (const k of PROJECT_FINANCIAL_FIELDS) { if (data[k] !== undefined) fin[k] = data[k]; }
+  if (itemsHaveMoney(data)) fin.items = data.items;
   return fin;
+}
+
+function stripItemMoney(it) {
+  if (!it || typeof it !== 'object') return it;
+  const clean = {};
+  for (const k of Object.keys(it)) { if (!ITEM_MONEY_FIELDS.includes(k)) clean[k] = it[k]; }
+  return clean;
+}
+
+// True if the BASE doc still carries embedded money (excludes direct_expense_total).
+// The trigger's own strip write re-fires it; by then this is false → skip (no loop/wipe).
+function projectHasEmbeddedMoney(data) {
+  return PROJECT_MONEY_SCALARS_STRIP.some((k) => data[k] !== undefined) || itemsHaveMoney(data);
+}
+
+// Delete the base doc's money: scalar money fields + per-element items[] money (keeps
+// item_id/name/qty/days). items only rewritten when they still carry money. null = noop.
+function buildProjectStrip(data) {
+  const strip = {};
+  for (const k of PROJECT_MONEY_SCALARS_STRIP) { if (data[k] !== undefined) strip[k] = admin.firestore.FieldValue.delete(); }
+  if (itemsHaveMoney(data)) strip.items = data.items.map(stripItemMoney);
+  return Object.keys(strip).length ? strip : null;
 }
 
 exports.onProjectWritten = onDocumentWritten(
@@ -1749,21 +1786,23 @@ exports.onProjectWritten = onDocumentWritten(
   async (event) => {
     const { appId, pid } = event.params;
     const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
-    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
     const finRef = db.doc(`artifacts/${appId}/public/data/project_financials/${pid}`);
     if (!after) {
       const snap = await finRef.get().catch(() => null);
       if (snap && snap.exists) { await finRef.delete().catch(() => {}); logger.info(`onProjectWritten: project ${pid} deleted — financials removed`); }
       return;
     }
+    // Only act when the base doc actually carries money. The trigger's OWN strip write
+    // re-fires this; by then money is gone (guard false) → skip. No loop, no sibling wipe.
+    if (!projectHasEmbeddedMoney(after)) return;
+    // 1) Mirror the FULL money (incl items with money) → gated sibling.
     const finAfter = buildProjectFin(after);
-    // Skip pure-operational writes (status/remarks/assigned_employees/etc.) — only
-    // mirror when the money or owner actually changed. Writes to project_financials
-    // do not re-fire this trigger (different collection), so no loop.
-    if (before && JSON.stringify(buildProjectFin(before)) === JSON.stringify(finAfter)) return;
     finAfter.updated_at = new Date().toISOString();
     await finRef.set(finAfter, { merge: true });
-    logger.info(`onProjectWritten: project ${pid} financials mirrored`);
+    // 2) Strip the money from the base doc (the leak closure); new edits self-heal here.
+    const strip = buildProjectStrip(after);
+    if (strip) await event.data.after.ref.update(strip);
+    logger.info(`onProjectWritten: project ${pid} mirrored + base stripped`);
   },
 );
 
@@ -1784,6 +1823,31 @@ exports.backfillProjectFinancials = onCall(
     if (pending > 0) await batch.commit();
     logger.info(`backfillProjectFinancials: mirrored ${mirrored} project(s)`);
     return { mirrored, projects: projSnap.size };
+  },
+);
+
+exports.scrubProjectEmbeddedMoney = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 540 },
+  async (req) => {
+    const { appId } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const projSnap = await db.collection(`artifacts/${appId}/public/data/projects`).get();
+    let batch = db.batch(); let pending = 0; let scrubbed = 0; let skipped = 0;
+    for (const d of projSnap.docs) {
+      const data = d.data();
+      if (!projectHasEmbeddedMoney(data)) continue; // already clean
+      // Safety: never scrub unless the sibling already holds this project's money.
+      const finDoc = await db.doc(`artifacts/${appId}/public/data/project_financials/${d.id}`).get().catch(() => null);
+      if (!finDoc || !finDoc.exists) { skipped += 1; continue; }
+      const strip = buildProjectStrip(data);
+      if (!strip) continue;
+      batch.update(d.ref, strip);
+      pending += 1; scrubbed += 1;
+      if (pending >= 300) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`scrubProjectEmbeddedMoney: scrubbed ${scrubbed}, skipped ${skipped} (no sibling)`);
+    return { scrubbed, skipped, projects: projSnap.size };
   },
 );
 
