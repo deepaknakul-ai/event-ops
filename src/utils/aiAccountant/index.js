@@ -43,3 +43,4 @@ export {
   parseRecurringPhrase,
 } from './recurring.js';
 export { reconcile, parseStatementCSV, parseStatementCSVDetailed, makeBankMatcher, rowKey } from './reconcile.js';
+export { buildRowBookingDraft } from './bookRow.js';

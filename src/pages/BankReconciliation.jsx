@@ -1,11 +1,142 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, onSnapshot, orderBy, query } from 'firebase/firestore';
 import * as XLSX from '@e965/xlsx';
-import { FileUp, ScanLine, Check, X as XIcon, AlertTriangle, Download, Save, FolderOpen, Trash2, Scale } from 'lucide-react';
-import { parseStatementCSVDetailed, reconcile, rowKey, round2 } from '../utils/aiAccountant';
+import { FileUp, ScanLine, Check, X as XIcon, AlertTriangle, Download, Save, FolderOpen, Trash2, Scale, BookOpen } from 'lucide-react';
+import {
+  parseStatementCSVDetailed, reconcile, rowKey, round2,
+  buildRowBookingDraft, learnFromEntries, validateTransaction, canPost, inferAccountMeta,
+} from '../utils/aiAccountant';
 import { getLedgerBalance } from '../utils/accounting';
 import { formatCurrency } from '../utils/helpers';
 import { can } from '../utils/permissions';
+
+// Derive the accountCreates list from entry lines (mirrors the NLU helper) so an
+// edited contra account still auto-creates on post.
+const buildCreates = (entries) => {
+  const seen = new Set();
+  const out = [];
+  for (const l of entries) {
+    for (const a of [l.debitAccount, l.creditAccount]) {
+      if (!a || seen.has(a)) continue;
+      seen.add(a);
+      out.push(inferAccountMeta(a));
+    }
+  }
+  return out;
+};
+
+// ── Book-this-row card ───────────────────────────────────────────────────────
+// Builds a journal draft from one unmatched bank row, lets the human edit the
+// narration + contra account, live-validates, and posts on explicit confirm.
+// The Bank side is fixed to the row's direction; only the contra is editable.
+function BookRowCard({ row, bankAccount, partyNames, allAccounts, learned, closedFYs, getFY, recentJournalEntries, onConfirm, onCancel, busy }) {
+  const bankAcc = (bankAccount && bankAccount.trim()) || 'Bank';
+  const isCredit = row.direction === 'credit';
+  const amount = round2(Math.abs(Number(row.amount) || 0));
+  const initial = useMemo(
+    () => buildRowBookingDraft(row, { bankAccountName: bankAccount, partyNames, learned }),
+    [row, bankAccount, partyNames, learned],
+  );
+  const [narration, setNarration] = useState(initial.narration);
+  const [contra, setContra] = useState(isCredit ? initial.entries[0].creditAccount : initial.entries[0].debitAccount);
+
+  const tx = useMemo(() => {
+    const line = isCredit
+      ? { debitAccount: bankAcc, creditAccount: contra, amount }
+      : { debitAccount: contra, creditAccount: bankAcc, amount };
+    const entries = [line];
+    return {
+      ...initial,
+      narration,
+      entries,
+      accountCreates: buildCreates(entries),
+      party: contra.startsWith('Party: ')
+        ? { type: isCredit ? 'client' : 'vendor', name: contra.slice(7) }
+        : undefined,
+    };
+  }, [initial, narration, contra, bankAcc, isCredit, amount]);
+
+  const validated = useMemo(
+    () => validateTransaction(tx, { knownAccounts: allAccounts, closedFYs, getFY, recentJournalEntries }),
+    [tx, allAccounts, closedFYs, getFY, recentJournalEntries],
+  );
+  const postable = canPost(validated);
+  const errors = (validated.issues || []).filter((i) => i.level === 'error');
+  const warnings = (validated.issues || []).filter((i) => i.level === 'warning');
+
+  // Account suggestions: existing COA + the builder's pick + known party names.
+  const accountOptions = useMemo(() => {
+    const set = new Set(allAccounts || []);
+    set.add(contra);
+    set.add('Suspense');
+    (partyNames || []).forEach((n) => set.add(`Party: ${n}`));
+    return Array.from(set).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [allAccounts, partyNames, contra]);
+
+  const bankLine = isCredit ? `${bankAcc} (Dr)` : `${bankAcc} (Cr)`;
+  const contraSide = isCredit ? 'Cr' : 'Dr';
+
+  return (
+    <div className="rounded-lg border border-indigo-200 bg-white p-3 space-y-3">
+      <div className="text-[11px] text-slate-500">
+        Booking <strong>{formatCurrency(amount)}</strong> {isCredit ? 'received into' : 'paid from'} <strong>{bankAcc}</strong> · {row.date}{row.ref ? ` · ${row.ref}` : ''}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="text-[11px] text-slate-600">
+          Narration
+          <input
+            type="text"
+            value={narration}
+            onChange={(e) => setNarration(e.target.value)}
+            className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-xs"
+          />
+        </label>
+        <label className="text-[11px] text-slate-600">
+          Contra account ({contraSide})
+          <input
+            list="reco-book-accounts"
+            value={contra}
+            onChange={(e) => setContra(e.target.value)}
+            className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-xs"
+            placeholder="Type or pick an account"
+          />
+          <datalist id="reco-book-accounts">
+            {accountOptions.map((n) => <option key={n} value={n} />)}
+          </datalist>
+        </label>
+      </div>
+      <div className="text-[11px] font-mono text-slate-600 bg-slate-50 rounded px-2 py-1.5">
+        {bankLine} &nbsp;·&nbsp; {contra || '—'} ({contraSide}) &nbsp;·&nbsp; {formatCurrency(amount)}
+      </div>
+      {errors.length > 0 && (
+        <div className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+          {errors.map((e, i) => <div key={i}>⚠ {e.message}</div>)}
+        </div>
+      )}
+      {warnings.length > 0 && (
+        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+          {warnings.map((w, i) => <div key={i}>• {w.message}</div>)}
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onConfirm(row, validated)}
+          disabled={!postable || busy}
+          className="rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1"
+        >
+          <BookOpen size={12} /> {busy ? 'Posting…' : 'Post entry'}
+        </button>
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const TABS = [
   { id: 'matches',   label: 'Matches' },
@@ -25,6 +156,11 @@ const BankReconciliation = ({
   manualJournalEntries = [],
   chartOfAccounts = [],
   ledger = [],
+  partyNames = [],
+  allAccounts = [],
+  closedFYs = [],
+  getFY,
+  onBookRow,
   logAction,
   addToast,
 }) => {
@@ -42,6 +178,13 @@ const BankReconciliation = ({
   const [bankAccount, setBankAccount] = useState(''); // '' = all bank accounts (legacy heuristic)
   const [excludeReconciled, setExcludeReconciled] = useState(true);
   const [manualClosing, setManualClosing] = useState('');
+  const [bookingRowId, setBookingRowId] = useState(null); // unmatched row being booked
+  const [bookedRows, setBookedRows] = useState({});        // rowId → voucher_no (this session)
+  const [booking, setBooking] = useState(false);
+
+  // Learned narration→account / party tables mined from history (feeds the
+  // book-a-row contra suggestion).
+  const learned = useMemo(() => learnFromEntries(manualJournalEntries), [manualJournalEntries]);
 
   // Accepted matches from prior sessions feed the learning-boost. Read-only for
   // all roles (admin sees creation in reconcile_matches via same listener).
@@ -237,6 +380,18 @@ const BankReconciliation = ({
     return m;
   }, [rows]);
 
+  // Signatures of rows already written to reconcile_matches (matched OR booked)
+  // — used to badge and block a second booking of the same bank row.
+  const reconciledSignatures = useMemo(() => {
+    const s = new Set();
+    for (const m of learnedMatches) {
+      if (m?.row) { s.add(m.row.id || legacyKey(m.row)); }
+    }
+    return s;
+  }, [learnedMatches]);
+  const isRowReconciled = (row) =>
+    reconciledSignatures.has(rowKey(row)) || reconciledSignatures.has(legacyKey(row)) || !!bookedRows[rowKey(row)];
+
   const confidenceColor = (c) => c >= 90 ? 'bg-emerald-100 text-emerald-700' : c >= 75 ? 'bg-indigo-100 text-indigo-700' : c >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700';
 
   const acceptedJeFor = (row) => accepted[rowKey(row)] ?? accepted[legacyKey(row)];
@@ -256,6 +411,30 @@ const BankReconciliation = ({
     setAcceptedMeta((m) => { const n = { ...m }; delete n[rowId]; return n; });
   };
 
+  // Write one reconcile_matches doc and best-effort flag the JV reconciled.
+  // Shared by "accept match" (persistAccepted) and "book this row". The JV-stamp
+  // failure is swallowed here; callers decide how to surface a partial write.
+  const markReconciled = async (row, jeId, meta = {}) => {
+    const payload = {
+      row,
+      journal_entry_id: jeId,
+      confidence: meta.confidence ?? null,
+      reason: meta.reason ?? '',
+      bank_account: bankAccount || '',
+      reconciled_at: new Date().toISOString(),
+      reconciled_by: user?.uid || '',
+    };
+    const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'reconcile_matches'), payload);
+    logAction?.('reconcile_matches', 'create', ref.id, payload, `Reconciled ${row.description || row.amount}`);
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', jeId), {
+        reconciled: true,
+        reconciled_at: new Date().toISOString(),
+      });
+    } catch { /* JE may be virtual/system-generated */ }
+    return ref.id;
+  };
+
   const persistAccepted = async () => {
     if (!canEdit) return;
     const entries = Object.entries(accepted);
@@ -268,26 +447,8 @@ const BankReconciliation = ({
         if (!jeId || usedJe.has(jeId)) continue;
         const row = rowById[rowId];
         if (!row) continue;
-        const meta = acceptedMeta[rowId] || {};
-        const payload = {
-          row,
-          journal_entry_id: jeId,
-          confidence: meta.confidence ?? null,
-          reason: meta.reason ?? '',
-          bank_account: bankAccount || '',
-          reconciled_at: new Date().toISOString(),
-          reconciled_by: user?.uid || '',
-        };
-        const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'reconcile_matches'), payload);
-        logAction?.('reconcile_matches', 'create', ref.id, payload, `Reconciled ${row.description || row.amount}`);
+        await markReconciled(row, jeId, acceptedMeta[rowId] || {});
         usedJe.add(jeId);
-        // Also flag the JV as reconciled (best-effort).
-        try {
-          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', jeId), {
-            reconciled: true,
-            reconciled_at: new Date().toISOString(),
-          });
-        } catch { /* JE may be virtual/system-generated */ }
         saved++;
       }
       addToast?.(`Saved ${saved} match${saved === 1 ? '' : 'es'}`, 'success');
@@ -298,6 +459,35 @@ const BankReconciliation = ({
       addToast?.('Failed to save some matches', 'error');
     }
     setSaving(false);
+  };
+
+  // Book an unmatched row as a new JV, then stamp the reconciliation. Ordered
+  // post → stamp: if the stamp fails the JV still exists, so we warn and never
+  // re-post. The row is badged booked either way.
+  const handleBookConfirm = async (row, tx) => {
+    if (!onBookRow || booking) return;
+    if (isRowReconciled(row)) { addToast?.('This row is already reconciled', 'info'); return; }
+    setBooking(true);
+    let posted;
+    try {
+      posted = await onBookRow(tx);
+    } catch (err) {
+      console.error(err);
+      addToast?.(err?.message || 'Failed to post entry', 'error');
+      setBooking(false);
+      return;
+    }
+    const voucher = posted?.voucher_no || posted?.id || '';
+    try {
+      await markReconciled(row, posted.id, { confidence: 100, reason: `Booked from bank row → ${voucher}` });
+      addToast?.(`Booked ${voucher} from bank row`, 'success');
+    } catch (err) {
+      console.error(err);
+      addToast?.(`Posted ${voucher}, but couldn't stamp reconciliation — match it manually.`, 'warning');
+    }
+    setBookedRows((m) => ({ ...m, [rowKey(row)]: voucher }));
+    setBookingRowId(null);
+    setBooking(false);
   };
 
   const downloadUnmatchedCSV = () => {
@@ -683,30 +873,65 @@ const BankReconciliation = ({
                       <tr><td colSpan={6} className="px-3 py-6 text-center text-xs text-slate-400">All rows matched.</td></tr>
                     )}
                     {result.unmatchedRows.map((r, idx) => {
-                      const hasCands = (result.candidates?.[rowKey(r)] || []).length > 0;
+                      const rid = rowKey(r);
+                      const hasCands = (result.candidates?.[rid] || []).length > 0;
                       const isAccepted = acceptedJeFor(r) != null;
+                      const reconciled = isRowReconciled(r);
+                      const isBooking = bookingRowId === rid;
                       return (
-                        <tr key={idx} className={`border-t border-slate-100 ${isAccepted ? 'bg-emerald-50/50' : 'hover:bg-slate-50'}`}>
-                          <td className="px-3 py-2 text-xs">{r.date}</td>
-                          <td className="px-3 py-2 text-xs text-slate-700 max-w-[280px] truncate" title={r.description}>{r.description || '—'}</td>
-                          <td className="px-3 py-2 text-[11px] font-mono text-slate-500">{r.ref || '—'}</td>
-                          <td className="px-3 py-2 text-right font-mono">{formatCurrency(r.amount)}</td>
-                          <td className="px-3 py-2 text-center">
-                            <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full ${r.direction === 'credit' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                              {r.direction === 'credit' ? 'Money In' : 'Money Out'}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2">
-                            {hasCands ? (
-                              <div className="flex items-center gap-1">
-                                {renderCandidateSelect(r, null, 'Pick a voucher…')}
+                        <React.Fragment key={idx}>
+                          <tr className={`border-t border-slate-100 ${isAccepted || reconciled ? 'bg-emerald-50/50' : 'hover:bg-slate-50'}`}>
+                            <td className="px-3 py-2 text-xs">{r.date}</td>
+                            <td className="px-3 py-2 text-xs text-slate-700 max-w-[260px] truncate" title={r.description}>{r.description || '—'}</td>
+                            <td className="px-3 py-2 text-[11px] font-mono text-slate-500">{r.ref || '—'}</td>
+                            <td className="px-3 py-2 text-right font-mono">{formatCurrency(r.amount)}</td>
+                            <td className="px-3 py-2 text-center">
+                              <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full ${r.direction === 'credit' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                                {r.direction === 'credit' ? 'Money In' : 'Money Out'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {hasCands && renderCandidateSelect(r, null, 'Pick a voucher…')}
                                 {isAccepted && <Check size={12} className="text-emerald-600" />}
+                                {reconciled ? (
+                                  <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                                    {bookedRows[rid] ? `Booked ${bookedRows[rid]}` : 'Reconciled'}
+                                  </span>
+                                ) : canEdit && onBookRow ? (
+                                  <button
+                                    onClick={() => setBookingRowId(isBooking ? null : rid)}
+                                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold ${isBooking ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}
+                                  >
+                                    <BookOpen size={11} /> {isBooking ? 'Close' : 'Book entry'}
+                                  </button>
+                                ) : null}
+                                {!hasCands && !reconciled && !(canEdit && onBookRow) && (
+                                  <span className="text-[10px] text-slate-400">No candidate JV</span>
+                                )}
                               </div>
-                            ) : (
-                              <span className="text-[10px] text-slate-400">No candidate JV</span>
-                            )}
-                          </td>
-                        </tr>
+                            </td>
+                          </tr>
+                          {isBooking && !reconciled && (
+                            <tr className="bg-indigo-50/30">
+                              <td colSpan={6} className="px-3 py-3">
+                                <BookRowCard
+                                  row={r}
+                                  bankAccount={bankAccount}
+                                  partyNames={partyNames}
+                                  allAccounts={allAccounts}
+                                  learned={learned}
+                                  closedFYs={closedFYs}
+                                  getFY={getFY}
+                                  recentJournalEntries={manualJournalEntries}
+                                  onConfirm={handleBookConfirm}
+                                  onCancel={() => setBookingRowId(null)}
+                                  busy={booking}
+                                />
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </tbody>

@@ -1007,7 +1007,12 @@ const Accounting = ({
 
   const exportAiEntries = () => exportAiEntriesImpl({ aiEntries, addToast, fyFilter });
 
-  const handleChatPostEntry = async (parsed) => {
+  // Shared posting path for AI-drafted entries: FY-lock guard, COA auto-create,
+  // voucher numbering, party/project linkage, provenance. Used by the chat
+  // (source 'chat_entry') and by bank reconciliation "book this row"
+  // (source 'bank_reco'). Returns the new doc id + voucher number; the caller
+  // owns the user-facing toast. This is the ONLY journal-write path for AI drafts.
+  const postParsedEntry = async (parsed, { source = 'chat_entry', origin = 'ai_chat' } = {}) => {
     if (!canEditFinance) throw new Error('Access denied.');
     const dateStr = parsed?.date || new Date().toISOString().slice(0, 10);
     const fy = getFYFromDate(dateStr);
@@ -1029,7 +1034,7 @@ const Accounting = ({
           subType: a.subType || '',
           normalSide: a.normalSide,
           auto_created: true,
-          created_by_origin: 'ai_chat',
+          created_by_origin: origin,
           created_at: new Date().toISOString(),
         })
       ));
@@ -1074,11 +1079,11 @@ const Accounting = ({
       fy,
       date: dateStr,
       narration: parsed.narration || '',
-      source: 'chat_entry',
+      source,
       status: 'posted',
       entries: parsed.entries,
       // AI provenance / audit metadata
-      origin: 'ai_chat',
+      origin,
       ai_intent: parsed.intent || parsed.type || null,
       ai_confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null,
       ai_model: parsed.model || 'rule-v1',
@@ -1101,9 +1106,21 @@ const Accounting = ({
       created_at: new Date().toISOString(),
     };
     const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
-    logAction('journal_entries', 'create', ref.id, payload, `Chat JV ${voucherNo}`);
-    addToast(`Entry ${voucherNo} posted via chat`, 'success');
+    logAction('journal_entries', 'create', ref.id, payload, `${source === 'bank_reco' ? 'Bank reco' : 'Chat'} JV ${voucherNo}`);
+    return { id: ref.id, voucher_no: voucherNo };
   };
+
+  // Thin chat wrapper — preserves the exact prior behaviour (chat provenance +
+  // "posted via chat" toast). The VirtualAccountant posts through this.
+  const handleChatPostEntry = async (parsed) => {
+    const { voucher_no } = await postParsedEntry(parsed, { source: 'chat_entry', origin: 'ai_chat' });
+    addToast(`Entry ${voucher_no} posted via chat`, 'success');
+  };
+
+  // Book an unmatched bank statement row as a journal voucher (human-confirmed
+  // in BankReconciliation). Returns { id, voucher_no } so the caller can stamp
+  // the reconcile match. Distinct provenance from chat.
+  const handleBookBankRow = async (parsed) => postParsedEntry(parsed, { source: 'bank_reco', origin: 'bank_reco' });
 
   // ── Parked (draft) entries ────────────────────────────────────────────────
   // Save a parsed chat entry to journal_drafts WITHOUT creating any COA
@@ -3912,6 +3929,11 @@ const Accounting = ({
           manualJournalEntries={manualJournalEntries}
           chartOfAccounts={chartOfAccounts}
           ledger={snapshot.ledger}
+          partyNames={partyNames}
+          allAccounts={allAccounts}
+          closedFYs={fiscalYearClosings.filter((r) => r.status === 'closed').map((r) => r.fy)}
+          getFY={getFYFromDate}
+          onBookRow={handleBookBankRow}
           logAction={logAction}
           addToast={addToast}
         />
