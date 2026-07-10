@@ -6,7 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { extractAmountSmart, detectPaymentMode } from './amount.js';
-import { extractParty, stripHonorifics, diceSimilarity } from './party.js';
+import { extractParty, stripHonorifics, diceSimilarity, nameSegments, segmentCoverage, normalizeAliasKey } from './party.js';
 import { parseDate } from './dates.js';
 import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag, extractTDSBreakdown } from './extract.js';
 import { inferAccountMeta, KNOWN_ACCOUNT_DEFAULTS, round2 } from './schema.js';
@@ -438,31 +438,47 @@ export function findPartyCandidates(text, names) {
     .trim();
 
   const compactText = compact(text);
+  // Name-ish phrases the user typed ("sanjeev chopra"), used to judge whether
+  // a partial hit actually explains everything the user said. A match found
+  // only inside noise (action words / amounts) keeps coverage 1 → old behavior.
+  const segments = nameSegments(text);
+  const segmentForWord = (word) => segments.find((s) => s.tokens.includes(word)) || null;
+  const partialHit = (n, weight, source, matchWord) => {
+    const seg = segmentForWord(matchWord);
+    const coverage = seg ? segmentCoverage(seg.tokens, n) : 1;
+    hits.push({ name: n, weight, source, coverage, typedName: seg ? seg.text : '' });
+  };
+
   for (const n of names) {
     const ln = n.toLowerCase();
     if (ln.length < 2) continue;
     // Exact token
     if (new RegExp(`\\b${escapeRegex(ln)}\\b`).test(lower)) {
-      hits.push({ name: n, weight: 10, source: 'exact' });
+      hits.push({ name: n, weight: 10, source: 'exact', coverage: 1, typedName: '' });
       continue;
     }
     // Exact-ish on compacted string (handles punctuation/noise differences)
     if (compactText && compactText.includes(compact(n))) {
-      hits.push({ name: n, weight: 10, source: 'exact' });
+      hits.push({ name: n, weight: 10, source: 'exact', coverage: 1, typedName: '' });
       continue;
     }
     // Starts-with first-word of name
     const firstWord = ln.split(/\s+/)[0];
     if (firstWord.length >= 3 && new RegExp(`\\b${escapeRegex(firstWord)}\\b`).test(lower)) {
-      hits.push({ name: n, weight: 5, source: 'prefix' });
+      partialHit(n, 5, 'prefix', firstWord);
       continue;
     }
     // Fuzzy: honorific-insensitive bigram similarity against each input word
     // ("sharma ji" ↔ "Sharma Traders"). Only a candidate, not an exact match.
     const strippedName = stripHonorifics(n).toLowerCase();
     const words = compactText.split(' ').filter((w) => w.length >= 3);
-    const bestDice = words.reduce((mx, w) => Math.max(mx, diceSimilarity(w, strippedName)), 0);
-    if (bestDice >= 0.55) hits.push({ name: n, weight: 4, source: 'fuzzy' });
+    let bestDice = 0;
+    let bestWord = '';
+    for (const w of words) {
+      const d = diceSimilarity(w, strippedName);
+      if (d > bestDice) { bestDice = d; bestWord = w; }
+    }
+    if (bestDice >= 0.55) partialHit(n, 4, 'fuzzy', bestWord);
   }
   // Deduplicate by name, keep highest weight
   const byName = {};
@@ -476,6 +492,35 @@ export function findPartyCandidates(text, names) {
   const exact = ranked.filter((h) => h.source === 'exact');
   return exact.length > 0 ? exact : ranked;
 }
+
+// Prefix marking the "create a new party" choice in a party-clarify prompt.
+// The chat UI strips it and forces the typed name through as-is.
+export const NEW_PARTY_PREFIX = 'New party: ';
+
+/**
+ * Look up a previously-learned alias ("sanjeev chopra" → "Chopra AV") from the
+ * session's clarify answers or from mined journal history. Only returns names
+ * that still exist in ctx.partyNames.
+ */
+function lookupPartyAlias(text, ctx) {
+  const tables = [ctx?.sessionAliases, ctx?.learned?.partyAliases].filter(Boolean);
+  if (!tables.length) return null;
+  for (const seg of nameSegments(text)) {
+    const key = normalizeAliasKey(seg.text);
+    if (!key) continue;
+    for (const table of tables) {
+      const hit = table[key];
+      const name = typeof hit === 'string' ? hit : hit?.party;
+      if (name && (!Array.isArray(ctx?.partyNames) || ctx.partyNames.includes(name))) return name;
+    }
+  }
+  return null;
+}
+
+const titleCaseName = (s) => String(s || '')
+  .split(/\s+/)
+  .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+  .join(' ');
 
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -588,31 +633,77 @@ export function parseMessage(text, ctx = {}) {
 
   // ── Clarify: ambiguous party ───────────────────────────────────────────────
   const forcedParty = String(ctx.forceParty || '').trim();
+  const rawCandidates = forcedParty ? [] : findPartyCandidates(trimmed, ctx.partyNames);
+  // An alias only applies when nothing matched EXACTLY: a message that names
+  // an existing party in full must always win over a learned shorthand.
+  const hasExact = rawCandidates.some((c) => c.source === 'exact');
+  const aliasParty = !forcedParty && !hasExact ? lookupPartyAlias(trimmed, ctx) : null;
   const partyCandidates = forcedParty
-    ? [{ name: forcedParty, weight: 99, source: 'forced' }]
-    : findPartyCandidates(trimmed, ctx.partyNames);
+    ? [{ name: forcedParty, weight: 99, source: 'forced', coverage: 1 }]
+    : aliasParty
+      ? [{ name: aliasParty, weight: 9, source: 'alias', coverage: 1 }]
+      : rawCandidates;
+
+  const partyClarify = (question, options, typedParty) => ({
+    intent: 'clarify',
+    date: ctx.date || (parseDate(trimmed) || {}).date || today(),
+    narration: 'Clarification needed',
+    entries: [],
+    party: { type: 'unknown', name: '' },
+    mode: detectPaymentMode(trimmed),
+    accountCreates: [],
+    issues: [],
+    confidence: 0.5,
+    rawPrompt: trimmed,
+    model: 'rule-v1',
+    meta: {
+      clarifyKind: 'party',
+      question,
+      options,
+      typedParty: typedParty || '',
+      proposedIntent: intent,
+      amount,
+    },
+  });
 
   if (!forcedParty && partyCandidates.length > 1) {
-    return {
-      intent: 'clarify',
-      date: ctx.date || (parseDate(trimmed) || {}).date || today(),
-      narration: 'Clarification needed',
-      entries: [],
-      party: { type: 'unknown', name: '' },
-      mode: detectPaymentMode(trimmed),
-      accountCreates: [],
-      issues: [],
-      confidence: 0.5,
-      rawPrompt: trimmed,
-      model: 'rule-v1',
-      meta: {
-        clarifyKind: 'party',
-        question: 'Which party did you mean?',
-        options: partyCandidates.slice(0, 5).map((c) => c.name),
-        proposedIntent: intent,
-        amount,
-      },
-    };
+    const options = partyCandidates.slice(0, 5).map((c) => c.name);
+    // If none of the candidates fully explains the typed name, the user may
+    // mean someone we don't know yet — offer creating them.
+    const bestTyped = partyCandidates
+      .filter((c) => c.typedName)
+      .sort((a, b) => (b.coverage ?? 1) - (a.coverage ?? 1))[0];
+    const noneCover = partyCandidates.every((c) => (c.coverage ?? 1) < 1);
+    let typedParty = '';
+    if (noneCover && bestTyped && /[a-z]/i.test(bestTyped.typedName)) {
+      typedParty = titleCaseName(bestTyped.typedName);
+      options.push(`${NEW_PARTY_PREFIX}${typedParty}`);
+    }
+    return partyClarify('Which party did you mean?', options, typedParty);
+  }
+
+  // A single NON-exact candidate that doesn't explain everything the user
+  // typed ("sanjeev chopra" → only hit "Chopra AV") must ask, not silently
+  // resolve — the user may mean a party that doesn't exist yet.
+  if (!forcedParty && partyCandidates.length === 1) {
+    const only = partyCandidates[0];
+    const typed = String(only.typedName || '').trim();
+    const typedNorm = normalizeAliasKey(stripHonorifics(typed));
+    const candNorm = normalizeAliasKey(stripHonorifics(only.name));
+    if (
+      only.source !== 'exact' && only.source !== 'alias'
+      && (only.coverage ?? 1) < 1
+      && typedNorm && /[a-z]/.test(typedNorm) && typedNorm !== candNorm
+    ) {
+      const typedParty = titleCaseName(typed);
+      // Phrased as a which-question, NOT yes/no — "yes" answers to a yes/no
+      // question would merge into the text and corrupt the new-party name.
+      return partyClarify(
+        `Which party is this — "${only.name}", or new party "${typedParty}"?`,
+        [only.name, `${NEW_PARTY_PREFIX}${typedParty}`],
+        typedParty
+      );
+    }
   }
 
   const party = partyCandidates.length === 1 ? partyCandidates[0].name : extractParty(trimmed, ctx);

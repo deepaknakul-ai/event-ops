@@ -8,6 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { round2 } from './schema.js';
+import { normalizeAliasKey } from './party.js';
 
 /**
  * @typedef {Object} JournalLine
@@ -55,11 +56,32 @@ export function learnFromEntries(entries) {
   const phraseIntent = {};
   /** @type {Record<string, number>} */
   const intentFreq = {};
+  /** @type {Record<string, { party: string, count: number }>} */
+  const partyAliases = {};
+  /** @type {Record<string, Record<string, { count: number, lastAt: string }>>} */
+  const aliasVotes = {};
 
   const safe = Array.isArray(entries) ? entries : [];
   for (const je of safe) {
     if (!je || je.source === 'fy_closing') continue;
     const lines = Array.isArray(je.entries) ? je.entries : [];
+
+    // Party-alias learning: a clarify correction ("sanjeev chopra" resolved to
+    // "Chopra AV") is stamped on the posted entry as ai_party_alias. Votes are
+    // collected per target and reduced after the loop so conflicting
+    // corrections resolve deterministically (most votes, then most recent) —
+    // not by Firestore document iteration order.
+    const alias = je.ai_party_alias;
+    if (alias?.alias && alias?.party) {
+      const key = normalizeAliasKey(alias.alias);
+      if (key) {
+        const at = String(je.created_at || je.date || '');
+        const votes = aliasVotes[key] || (aliasVotes[key] = {});
+        const v = votes[alias.party] || (votes[alias.party] = { count: 0, lastAt: '' });
+        v.count += 1;
+        if (at > v.lastAt) v.lastAt = at;
+      }
+    }
 
     // Phrase → intent learning (uses raw user prompt + the AI-resolved intent
     // we stored on the journal entry). This lets the NLU recover personal
@@ -133,6 +155,16 @@ export function learnFromEntries(entries) {
     }
   }
 
+  // Reduce alias votes: most votes wins; ties broken by recency.
+  for (const [key, votes] of Object.entries(aliasVotes)) {
+    const ranked = Object.entries(votes).sort((a, b) =>
+      (b[1].count - a[1].count)
+      || (b[1].lastAt > a[1].lastAt ? 1 : b[1].lastAt < a[1].lastAt ? -1 : 0)
+    );
+    const [party, v] = ranked[0];
+    partyAliases[key] = { party, count: v.count };
+  }
+
   return {
     partyAccount,
     narrationAccount,
@@ -140,6 +172,7 @@ export function learnFromEntries(entries) {
     pairFrequency,
     phraseIntent,
     intentFreq,
+    partyAliases,
     sampleSize: safe.length,
   };
 }
