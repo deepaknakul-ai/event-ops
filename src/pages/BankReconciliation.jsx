@@ -7,8 +7,20 @@ import {
   buildRowBookingDraft, learnFromEntries, validateTransaction, canPost, inferAccountMeta,
 } from '../utils/aiAccountant';
 import { getLedgerBalance } from '../utils/accounting';
+import { aiExtractStatement, statementRowsToCsv } from '../utils/aiParse';
 import { formatCurrency } from '../utils/helpers';
 import { can } from '../utils/permissions';
+
+// Base64-encode a byte array in chunks (String.fromCharCode blows the call
+// stack on a whole multi-MB array at once).
+const uint8ToBase64 = (bytes) => {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+};
 
 // Derive the accountCreates list from entry lines (mirrors the NLU helper) so an
 // edited contra account still auto-creates on post.
@@ -161,6 +173,7 @@ const BankReconciliation = ({
   closedFYs = [],
   getFY,
   onBookRow,
+  aiEnabled = false,
   logAction,
   addToast,
 }) => {
@@ -181,6 +194,8 @@ const BankReconciliation = ({
   const [bookingRowId, setBookingRowId] = useState(null); // unmatched row being booked
   const [bookedRows, setBookedRows] = useState({});        // rowId → voucher_no (this session)
   const [booking, setBooking] = useState(false);
+  const [importing, setImporting] = useState(false);       // PDF → AI extraction in flight
+  const [aiNotice, setAiNotice] = useState([]);            // messages from the last PDF import
 
   // Learned narration→account / party tables mined from history (feeds the
   // book-a-row contra suggestion).
@@ -306,13 +321,14 @@ const BankReconciliation = ({
 
   const handleFile = (file) => {
     if (!file) return;
+    const name = (file.name || '').toLowerCase();
+    if (name.endsWith('.pdf') || file.type === 'application/pdf') { handlePdf(file); return; }
     const MAX_BYTES = 10 * 1024 * 1024; // 10 MB — big enough for any real bank statement
     if (file.size > MAX_BYTES) {
       setParseError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Limit is 10 MB — split into smaller chunks.`);
       setRows([]);
       return;
     }
-    const name = (file.name || '').toLowerCase();
     const isXlsx = name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm');
     const reader = new FileReader();
     reader.onerror = () => {
@@ -345,6 +361,49 @@ const BankReconciliation = ({
     };
     if (isXlsx) reader.readAsArrayBuffer(file);
     else reader.readAsText(file);
+  };
+
+  // PDF statements are extracted by the AI backbone (aiExtractStatement), then
+  // serialised to canonical CSV and fed the SAME parse path as a CSV upload — so
+  // sessions / row ids / reconcile / booking / balances all work unchanged.
+  const handlePdf = (file) => {
+    if (!aiEnabled) {
+      setParseError('PDF import needs the AI assistant enabled (Admin Tools → AI Assistant). Upload a CSV/XLSX export instead.');
+      setRows([]);
+      return;
+    }
+    const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — vision + base64 payload ceiling
+    if (file.size > MAX_BYTES) {
+      setParseError(`PDF too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Limit is 5 MB — split into smaller date ranges, or upload a CSV/XLSX export.`);
+      setRows([]);
+      return;
+    }
+    setImporting(true);
+    setParseError('');
+    setAiNotice([]);
+    const reader = new FileReader();
+    reader.onerror = () => { setImporting(false); setParseError('Failed to read file.'); setRows([]); };
+    reader.onload = async (e) => {
+      try {
+        const bytes = new Uint8Array(e.target?.result || new ArrayBuffer(0));
+        const base64 = uint8ToBase64(bytes);
+        const stmt = await aiExtractStatement(base64, { partyNames, allAccounts, getFY });
+        const csv = statementRowsToCsv(stmt.rows || []);
+        setCsvText(csv);
+        parseText(csv);
+        setCurrentSessionId(null); // a fresh import starts a new session
+        const notices = [...(stmt.warnings || [])];
+        notices.push(`Imported ${(stmt.rows || []).length} row(s) from PDF via AI — review every row before booking or reconciling.`);
+        setAiNotice(notices);
+      } catch (err) {
+        console.error(err);
+        setParseError(err?.message || 'Could not read the PDF. Upload a CSV/XLSX export instead.');
+        setRows([]);
+      } finally {
+        setImporting(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
   };
 
   const parseText = (text) => {
@@ -576,11 +635,11 @@ const BankReconciliation = ({
       {/* Upload */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
         <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 text-white px-4 py-2 text-sm font-semibold cursor-pointer hover:bg-indigo-700">
-            <FileUp size={14} /> Choose CSV / XLSX
-            <input type="file" accept=".csv,text/csv,.xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} />
+          <label className={`inline-flex items-center gap-2 rounded-lg bg-indigo-600 text-white px-4 py-2 text-sm font-semibold ${importing ? 'opacity-60 cursor-wait' : 'cursor-pointer hover:bg-indigo-700'}`}>
+            <FileUp size={14} /> {importing ? 'Reading PDF…' : 'Choose CSV / XLSX / PDF'}
+            <input type="file" accept=".csv,text/csv,.xlsx,.xls,.xlsm,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" className="hidden" disabled={importing} onChange={(e) => handleFile(e.target.files?.[0])} />
           </label>
-          <div className="text-xs text-slate-500">or paste CSV below</div>
+          <div className="text-xs text-slate-500">or paste CSV below{aiEnabled ? ' · PDF read by AI' : ''}</div>
           <div className="flex-1" />
           <label className="text-xs text-slate-600 flex items-center gap-2">
             Min confidence
@@ -615,6 +674,16 @@ const BankReconciliation = ({
         {parseError && (
           <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center gap-2">
             <AlertTriangle size={12} /> {parseError}
+          </div>
+        )}
+        {importing && (
+          <div className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md px-3 py-2 flex items-center gap-2">
+            <ScanLine size={12} className="animate-pulse" /> Reading the PDF with AI — this can take up to a minute for a long statement. Every row is a draft you review before it posts.
+          </div>
+        )}
+        {aiNotice.length > 0 && (
+          <div className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-md px-3 py-2 space-y-0.5">
+            {aiNotice.map((n, i) => <div key={i} className="flex items-center gap-2"><ScanLine size={11} /> {n}</div>)}
           </div>
         )}
         {rows.length > 0 && (

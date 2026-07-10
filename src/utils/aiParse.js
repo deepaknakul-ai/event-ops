@@ -126,3 +126,41 @@ export const aiExtractEntry = async (text, ctx = {}) => {
   if (!txn) throw new Error('The AI returned no result. Try rephrasing.');
   return hydrateLlmTransaction(txn, ctx);
 };
+
+/** RFC-4180 cell: quote when the value contains a comma, quote, or newline. */
+const csvCell = (v) => {
+  const s = v === null || v === undefined ? '' : String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+/**
+ * Serialise sanitized statement rows to canonical CSV so a PDF import can feed
+ * the EXACT same parseStatementCSVDetailed → reconcile → book path as a CSV
+ * upload. Columns map 1:1 onto the parser's column detector.
+ * @param {Array<{date:string, description?:string, ref?:string, amount:number, direction:'debit'|'credit', balance?:number}>} rows
+ */
+export const statementRowsToCsv = (rows) => {
+  const header = 'Date,Description,Reference,Debit,Credit,Balance';
+  const body = (Array.isArray(rows) ? rows : []).map((r) => {
+    const debit = r.direction === 'debit' ? r.amount : '';
+    const credit = r.direction === 'credit' ? r.amount : '';
+    const balance = r.balance === null || r.balance === undefined ? '' : r.balance;
+    return [csvCell(r.date), csvCell(r.description || ''), csvCell(r.ref || ''), csvCell(debit), csvCell(credit), csvCell(balance)].join(',');
+  });
+  return [header, ...body].join('\n');
+};
+
+/**
+ * Extract a bank statement PDF via the aiExtractStatement callable. The base64
+ * payload is large, so the callable is given an explicit 300s timeout (the SDK
+ * default of 70s would fire long before the server's 300s deadline).
+ * @param {string} pdfBase64  base64 of the PDF (starts "JVBERi")
+ * @returns {Promise<{rows:Array, dropped:number, warnings:string[], openingBalance:number|null, closingBalance:number|null}>}
+ */
+export const aiExtractStatement = async (pdfBase64, ctx = {}) => {
+  const fn = httpsCallable(getFunctions(), 'aiExtractStatement', { timeout: 300000 });
+  const res = await fn({ appId, pdfBase64, context: buildAiContext(ctx) });
+  const statement = res && res.data && res.data.statement;
+  if (!statement || !Array.isArray(statement.rows)) throw new Error('The AI returned no statement rows.');
+  return statement;
+};

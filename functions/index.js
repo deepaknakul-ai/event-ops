@@ -26,9 +26,12 @@ const { promisify } = require('util');
 const {
   LLM_TXN_SCHEMA,
   STATIC_SYSTEM_PROMPT,
+  LLM_STMT_SCHEMA,
+  STATIC_STMT_PROMPT,
   buildVolatileContext,
   capContext,
   sanitizeLlmTransaction,
+  sanitizeLlmStatement,
   supportsAdaptiveThinking,
 } = require('./ai-sanitize');
 
@@ -868,6 +871,115 @@ exports.aiExtractEntry = onCall(
     }
 
     return { ok: true, transaction, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
+  }
+);
+
+// ── AI bank-statement extraction (PDF → rows) ───────────────────────────────
+// Reads an uploaded PDF bank statement and returns transaction rows the client
+// serialises to canonical CSV and feeds the existing reconcile parse path.
+// Longer deadline + bigger memory than aiExtractEntry (whole-document vision +
+// up to 1000 rows). Reuses settings/ai + ai_usage; a separate rate-limit doc
+// (rl_stmt_) throttles these heavier calls independently. Draft-only: every row
+// is reviewed and each booking is human-confirmed before it posts.
+exports.aiExtractStatement = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId, pdfBase64, context } = req.data || {};
+    await assertRole(req.auth, appId, ['admin', 'accountant']);
+    const b64 = typeof pdfBase64 === 'string' ? pdfBase64.trim() : '';
+    if (!b64) throw new HttpsError('invalid-argument', 'PDF data required');
+    if (!b64.startsWith('JVBERi')) throw new HttpsError('invalid-argument', 'That file is not a PDF. Upload a PDF bank statement, or a CSV/XLSX export.');
+    if (b64.length > 7000000) throw new HttpsError('invalid-argument', 'PDF too large (max ~5MB). Split it into smaller date ranges, or upload a CSV/XLSX export.');
+
+    const cfg = await readAiConfig(appId);
+    const modelId = (typeof cfg.model === 'string' && cfg.model.trim()) || 'claude-opus-4-8';
+    const monthlyBudget = Number(cfg.monthly_token_budget) > 0 ? Number(cfg.monthly_token_budget) : 2000000;
+    const perUserRpm = Number(cfg.per_user_stmt_rpm) > 0 ? Number(cfg.per_user_stmt_rpm) : 2;
+
+    // Independent rate-limit doc for statement extraction (heavier than chat).
+    const minute = new Date().toISOString().slice(0, 16);
+    const rlRef = db.doc(`artifacts/${appId}/public/data/ai_usage/rl_stmt_${req.auth.uid}`);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(rlRef);
+      const cur = snap.exists ? snap.data() : {};
+      const count = cur.minute === minute ? Number(cur.count || 0) : 0;
+      if (count >= perUserRpm) throw new HttpsError('resource-exhausted', 'Too many statement imports — wait a minute and try again.');
+      tx.set(rlRef, { minute, count: count + 1, updated_at: new Date().toISOString() });
+    });
+
+    const month = new Date().toISOString().slice(0, 7);
+    const usageRef = db.doc(`artifacts/${appId}/public/data/ai_usage/usage_${month}`);
+    const usageSnap = await usageRef.get();
+    const used = usageSnap.exists ? Number(usageSnap.data().tokens_total || 0) : 0;
+    if (used >= monthlyBudget) throw new HttpsError('resource-exhausted', 'Monthly AI budget exhausted. Ask your admin to raise it in Admin Tools → AI Assistant.');
+
+    // maxRetries:0 — a retry of a large vision call would double-spend tokens
+    // and risk the 300s deadline; timeout sits just under it.
+    const client = new Anthropic({ apiKey: cfg.api_key, timeout: 280000, maxRetries: 0 });
+    let resp;
+    try {
+      resp = await client.messages.create({
+        model: modelId,
+        max_tokens: 32000, // up to 1000 rows of JSON needs a large output cap
+        ...(supportsAdaptiveThinking(modelId) ? { thinking: { type: 'adaptive' } } : {}),
+        system: [
+          { type: 'text', text: STATIC_STMT_PROMPT, cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: buildVolatileContext(context) },
+        ],
+        output_config: { format: { type: 'json_schema', schema: LLM_STMT_SCHEMA } },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+            { type: 'text', text: '<statement>The attached PDF is a bank account statement. Extract every transaction row per the rules.</statement>' },
+          ],
+        }],
+      });
+    } catch (err) {
+      if (err instanceof Anthropic.AuthenticationError) throw new HttpsError('failed-precondition', 'The configured AI API key is invalid. Update it in Admin Tools → AI Assistant.');
+      if (err instanceof Anthropic.RateLimitError) throw new HttpsError('resource-exhausted', 'The AI service is busy — try again in a moment.');
+      if (err instanceof Anthropic.APIConnectionError) throw new HttpsError('unavailable', 'Could not reach the AI service. Try again.');
+      if (err instanceof Anthropic.APIError) {
+        logger.error('aiExtractStatement provider error', { appId, status: err.status });
+        if (Number(err.status) === 529) throw new HttpsError('resource-exhausted', 'The AI service is overloaded — try again in a moment.');
+        throw new HttpsError('internal', 'The AI service returned an error. Try again.');
+      }
+      throw err;
+    }
+
+    const u = resp.usage || {};
+    const totalTokens = Number(u.input_tokens || 0) + Number(u.output_tokens || 0)
+      + Number(u.cache_creation_input_tokens || 0) + Number(u.cache_read_input_tokens || 0);
+    try {
+      await usageRef.set({
+        tokens_in: admin.firestore.FieldValue.increment(Number(u.input_tokens || 0)),
+        tokens_out: admin.firestore.FieldValue.increment(Number(u.output_tokens || 0)),
+        tokens_total: admin.firestore.FieldValue.increment(totalTokens),
+        calls: admin.firestore.FieldValue.increment(1),
+        last_call_at: new Date().toISOString(),
+        last_model: modelId,
+      }, { merge: true });
+    } catch (err) {
+      logger.error('aiExtractStatement usage increment failed', { appId, reason: err.message });
+    }
+
+    if (resp.stop_reason === 'refusal') throw new HttpsError('failed-precondition', 'The AI declined to process this document.');
+    if (resp.stop_reason === 'max_tokens') throw new HttpsError('resource-exhausted', 'The statement is too large for one pass — split the PDF into smaller date ranges, or upload a CSV/XLSX export instead.');
+
+    const textBlock = (resp.content || []).find((b) => b && b.type === 'text');
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(textBlock && textBlock.text); } catch { /* handled below */ }
+    if (!parsedJson) throw new HttpsError('internal', 'The AI could not read the statement — try a clearer PDF or a CSV export.');
+
+    let statement;
+    try {
+      statement = sanitizeLlmStatement(parsedJson, { todayISO: capContext(context).todayISO });
+    } catch (err) {
+      logger.warn('aiExtractStatement sanitize failed', { appId, reason: err.message });
+      throw new HttpsError('internal', err.message || 'The AI could not read the statement — try a clearer PDF or a CSV export.');
+    }
+
+    return { ok: true, statement, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
   }
 );
 

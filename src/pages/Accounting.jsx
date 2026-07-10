@@ -3934,6 +3934,7 @@ const Accounting = ({
           closedFYs={fiscalYearClosings.filter((r) => r.status === 'closed').map((r) => r.fy)}
           getFY={getFYFromDate}
           onBookRow={handleBookBankRow}
+          aiEnabled={aiEnabled}
           logAction={logAction}
           addToast={addToast}
         />
