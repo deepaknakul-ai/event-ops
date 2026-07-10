@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin } from 'lucide-react';
-import { collection, getDocs, doc, getDoc, setDoc, addDoc } from 'firebase/firestore';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin, Sparkles } from 'lucide-react';
+import { collection, getDocs, doc, getDoc, setDoc, addDoc, writeBatch, deleteField } from 'firebase/firestore';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
 import { getFinancialYear } from '../utils/helpers';
@@ -27,15 +27,10 @@ const CALENDAR_STATUS_OPTIONS = ['Quoted', 'Confirmed', 'Ongoing', 'Completed', 
 const CALENDAR_INVOICE_OPTIONS = ['Invoiced', 'Not Invoiced'];
 
 const AdminTools = ({ db, appId, logAction, role }) => {
-  if (!can(role, 'admin_tools', 'view')) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 text-center">
-        <Lock size={40} className="text-slate-300 mb-4" />
-        <h2 className="text-xl font-bold text-slate-700 mb-2">Access Restricted</h2>
-        <p className="text-slate-500 text-sm">Admin Tools are only accessible to the Owner.</p>
-      </div>
-    );
-  }
+  // NOTE: the access-restricted return lives BELOW the hooks (rules-of-hooks —
+  // an early return above useState/useEffect breaks hook ordering). The fetch
+  // effect is gated on the same permission so restricted roles trigger no reads.
+  const allowed = can(role, 'admin_tools', 'view');
   const [backupStatus, setBackupStatus] = useState('idle');
   const [restoreStatus, setRestoreStatus] = useState('idle');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
@@ -70,8 +65,15 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [isSavingChat, setIsSavingChat] = useState(false);
   const [trackForm, setTrackForm] = useState({ enabled: false, interval_seconds: 45, min_distance_m: 50, history_enabled: true, history_retention_days: 30 });
   const [isSavingTrack, setIsSavingTrack] = useState(false);
+  // AI assistant: the API key lives in settings/ai which is READ-DENIED to all
+  // clients (rules) — this form writes it blind; display state comes from the
+  // non-secret settings/ai_public mirror (api_key_set boolean, never the key).
+  const [aiForm, setAiForm] = useState({ enabled: false, api_key: '', model: 'claude-opus-4-8', monthly_token_budget: 2000000, per_user_rpm: 6, api_key_set: false });
+  const [isSavingAi, setIsSavingAi] = useState(false);
+  const [aiUsage, setAiUsage] = useState(null);
 
   useEffect(() => {
+    if (!allowed) return;
     const fetchSettings = async () => {
         try {
             const docSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'security'));
@@ -108,10 +110,15 @@ const AdminTools = ({ db, appId, logAction, role }) => {
             if (chatSnap.exists()) setChatForm(prev => ({ ...prev, ...chatSnap.data() }));
             const trackSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'tracking'));
             if (trackSnap.exists()) setTrackForm(prev => ({ ...prev, ...trackSnap.data() }));
+            const aiPubSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'));
+            if (aiPubSnap.exists()) setAiForm(prev => ({ ...prev, ...aiPubSnap.data(), api_key: '' }));
+            const aiMonth = new Date().toISOString().slice(0, 7);
+            const aiUsageSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'ai_usage', `usage_${aiMonth}`));
+            if (aiUsageSnap.exists()) setAiUsage(aiUsageSnap.data());
         } catch (e) { console.error(e); }
     };
     fetchSettings();
-  }, [db, appId]);
+  }, [db, appId, allowed]);
 
   const collections = ['projects', 'clients', 'inventory', 'expenses', 'employees', 'advances', 'payments', 'payouts', 'audit_logs'];
 
@@ -256,6 +263,61 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingTrack(false); }
   };
 
+  const handleSaveAi = async () => {
+    setIsSavingAi(true);
+    try {
+      const enabled = !!aiForm.enabled;
+      const model = (aiForm.model || '').trim() || 'claude-opus-4-8';
+      const monthly_token_budget = Math.max(20000, Number(aiForm.monthly_token_budget) || 2000000);
+      const per_user_rpm = Math.max(1, Number(aiForm.per_user_rpm) || 6);
+      const keyEntered = (aiForm.api_key || '').trim();
+      const api_key_set = keyEntered ? true : !!aiForm.api_key_set;
+      // One atomic batch — the secret doc and its non-secret mirror must never
+      // drift (a half-saved pair makes the feature look broken or misconfigured).
+      const batch = writeBatch(db);
+      // Secret doc — read-denied to every client role; written blind. The key is
+      // only included when the admin actually typed one (leave blank to keep).
+      batch.set(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai'), {
+        enabled, model, monthly_token_budget, per_user_rpm,
+        ...(keyEntered ? { api_key: keyEntered } : {}),
+      }, { merge: true });
+      // Non-secret mirror for UI display — never holds the key itself.
+      batch.set(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'), {
+        enabled, model, monthly_token_budget, api_key_set,
+      }, { merge: true });
+      await batch.commit();
+      setAiForm(prev => ({ ...prev, api_key: '', api_key_set }));
+      // Audit log payload deliberately excludes the key.
+      logAction('admin', 'update_ai', 'ai', {}, 'Updated AI Assistant Settings');
+      notify('AI assistant settings saved.', 'success');
+    } catch (e) { notify('Failed to save: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingAi(false); }
+  };
+
+  // Remove the stored key entirely (compromised key / offboarding). Blank input
+  // on save means "keep", so this is the only client-side way to purge it.
+  const handleClearAiKey = async () => {
+    const ok = await confirmDialog({
+      title: 'Remove AI API key?',
+      message: 'This deletes the stored Anthropic API key and disables AI assistance. You can add a new key any time.',
+      confirmText: 'Remove key',
+    });
+    if (!ok) return;
+    setIsSavingAi(true);
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai'), {
+        api_key: deleteField(), enabled: false,
+      }, { merge: true });
+      batch.set(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'), {
+        api_key_set: false, enabled: false,
+      }, { merge: true });
+      await batch.commit();
+      setAiForm(prev => ({ ...prev, api_key: '', api_key_set: false, enabled: false }));
+      logAction('admin', 'update_ai', 'ai', {}, 'Removed AI API key');
+      notify('AI API key removed and assistant disabled.', 'success');
+    } catch (e) { notify('Failed to remove key: ' + (e?.message || 'error'), 'error'); } finally { setIsSavingAi(false); }
+  };
+
   const handleAddOrUpdateBank = () => {
     const { bank_name, account_name, account_no, ifsc } = bankForm;
     if (!bank_name || !account_name || !account_no || !ifsc) return notify('Bank Name, Account Name, Account Number, and IFSC are required.', 'error');
@@ -398,6 +460,16 @@ const AdminTools = ({ db, appId, logAction, role }) => {
       setIsSavingCats(false);
     }
   };
+
+  if (!allowed) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 text-center">
+        <Lock size={40} className="text-slate-300 mb-4" />
+        <h2 className="text-xl font-bold text-slate-700 mb-2">Access Restricted</h2>
+        <p className="text-slate-500 text-sm">Admin Tools are only accessible to the Owner.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -719,6 +791,46 @@ const AdminTools = ({ db, appId, logAction, role }) => {
               </div>
             </div>
             <button onClick={handleSaveChat} disabled={isSavingChat} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingChat ? 'Saving…' : 'Save Chat Settings'}</button>
+       </div>
+
+       {/* ===== AI ASSISTANT SECTION ===== */}
+       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Sparkles size={20} /> AI Assistant (Virtual Accountant)</h3>
+            <p className="text-slate-500 text-sm mb-4">Lets the accounting chat understand free-form and Hinglish messages the built-in rules can't. The AI only <span className="font-medium">drafts</span> entries — a person always reviews and posts. The API key is stored server-side and can never be read back from the app.</p>
+            <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3"><input type="checkbox" checked={!!aiForm.enabled} onChange={e => setAiForm({ ...aiForm, enabled: e.target.checked })} /> Enable AI assistance in the accounting chat</label>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Anthropic API key</label>
+                <input type="password" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={aiForm.api_key} onChange={e => setAiForm({ ...aiForm, api_key: e.target.value })} placeholder={aiForm.api_key_set ? '•••• configured — type to replace' : 'sk-ant-…'} autoComplete="new-password" />
+                <p className="text-xs text-slate-400 mt-1">
+                  {aiForm.api_key_set ? '✓ A key is configured. Leave blank to keep it. ' : 'Get one from console.anthropic.com → API Keys.'}
+                  {aiForm.api_key_set && (
+                    <button onClick={handleClearAiKey} disabled={isSavingAi} className="text-red-500 hover:text-red-700 underline disabled:opacity-50">Remove key</button>
+                  )}
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Model</label>
+                <input list="ai-model-options" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={aiForm.model} onChange={e => setAiForm({ ...aiForm, model: e.target.value })} />
+                <datalist id="ai-model-options">
+                  <option value="claude-opus-4-8" />
+                  <option value="claude-sonnet-4-6" />
+                  <option value="claude-haiku-4-5" />
+                </datalist>
+                <p className="text-xs text-slate-400 mt-1">Default claude-opus-4-8 (most capable). Haiku is cheaper for simple entries.</p>
+              </div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Monthly token budget</label><input type="number" min="20000" step="10000" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={aiForm.monthly_token_budget} onChange={e => setAiForm({ ...aiForm, monthly_token_budget: e.target.value })} /><p className="text-xs text-slate-400 mt-1">AI requests stop once this month's tokens are used up (simultaneous requests may overshoot slightly).</p></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-1">Per-user requests / minute</label><input type="number" min="1" max="30" className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={aiForm.per_user_rpm} onChange={e => setAiForm({ ...aiForm, per_user_rpm: e.target.value })} /></div>
+            </div>
+            {aiUsage && (
+              <div className="mt-4 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-sm font-semibold text-slate-700 mb-1">This month: {Number(aiUsage.tokens_total || 0).toLocaleString('en-IN')} / {Number(aiForm.monthly_token_budget || 0).toLocaleString('en-IN')} tokens · {Number(aiUsage.calls || 0)} requests</p>
+                <div className="w-full h-2 bg-slate-200 rounded overflow-hidden">
+                  <div className="h-2 bg-indigo-500" style={{ width: `${Math.min(100, Math.round((Number(aiUsage.tokens_total || 0) / Math.max(1, Number(aiForm.monthly_token_budget || 1))) * 100))}%` }} />
+                </div>
+              </div>
+            )}
+            <button onClick={handleSaveAi} disabled={isSavingAi} className="mt-3 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-50">{isSavingAi ? 'Saving…' : 'Save AI Settings'}</button>
        </div>
 
        {/* ===== LOCATION TRACKING SECTION ===== */}

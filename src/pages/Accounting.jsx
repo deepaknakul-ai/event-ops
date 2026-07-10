@@ -524,13 +524,20 @@ const Accounting = ({
   // ── GST Reports Data ──
   const [orgGstin, setOrgGstin] = useState('');
   const [gstSubTab, setGstSubTab] = useState('gstr1');
+  // AI escalation flag for the chat (non-secret mirror doc; the API key itself
+  // lives in settings/ai which no client can read).
+  const [aiEnabled, setAiEnabled] = useState(false);
 
-  // Fetch org GSTIN once
+  // Fetch org GSTIN + AI-assist flag once
   React.useEffect(() => {
     const fetchOrg = async () => {
       try {
         const snap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
         if (snap.exists()) setOrgGstin(snap.data().gstin || '');
+      } catch { /* ignore */ }
+      try {
+        const aiSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'));
+        if (aiSnap.exists()) setAiEnabled(aiSnap.data().enabled === true);
       } catch { /* ignore */ }
     };
     fetchOrg();
@@ -1077,6 +1084,9 @@ const Accounting = ({
       ai_model: parsed.model || 'rule-v1',
       ai_prompt: parsed.rawPrompt || '',
       ai_issues: (parsed.issues || []).filter((i) => i.level !== 'error'),
+      // Clarify correction ("typed name" → chosen party) — mined by
+      // learnFromEntries so the same phrase resolves silently next time.
+      ai_party_alias: parsed?.meta?.partyAlias || null,
       // Party linkage (for reconciliation views; NOT a side-effect write)
       party_name: partyName || null,
       party_type: parsed?.party?.type || null,
@@ -1113,6 +1123,7 @@ const Accounting = ({
       project_tag: parsed?.meta?.projectTag || null,
       raw_prompt: parsed.rawPrompt || '',
       ai_issues: parsed.issues || [],
+      ai_party_alias: parsed?.meta?.partyAlias || null,
       source: 'chat_park',
       status: 'draft',
       requires_approval: requiresApproval,
@@ -1183,7 +1194,7 @@ const Accounting = ({
       party: { name: draft.party_name, type: draft.party_type },
       intent: draft.intent,
       accountCreates: draft.account_creates || [],
-      meta: { projectTag: draft.project_tag },
+      meta: { projectTag: draft.project_tag, partyAlias: draft.ai_party_alias || null },
       rawPrompt: draft.raw_prompt || '',
       issues: draft.ai_issues || [],
       attachments: draft.attachments || [],
@@ -2306,7 +2317,7 @@ const Accounting = ({
       const code = err?.code || '';
       if (code === 'permission-denied' || /insufficient|permission/i.test(err?.message || '')) {
         addToast(
-          'Undo FY close blocked by Firestore security rules. Cause: your Firebase Auth account is not recognised as admin on /users/{uid}. Fix: log out, log back in as admin, then retry. If this persists, an Admin must set role=\"admin\" on artifacts/<appId>/public/data/users/<your-uid>.',
+          'Undo FY close blocked by Firestore security rules. Cause: your Firebase Auth account is not recognised as admin on /users/{uid}. Fix: log out, log back in as admin, then retry. If this persists, an Admin must set role="admin" on artifacts/<appId>/public/data/users/<your-uid>.',
           'error'
         );
       } else {
@@ -4406,6 +4417,7 @@ const Accounting = ({
         orgGstin={orgGstin}
         partyGstins={partyGstins}
         projectNames={projectNames}
+        aiEnabled={aiEnabled}
       />
 
       <ConfirmDeleteModal

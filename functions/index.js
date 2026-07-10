@@ -20,8 +20,17 @@ const { onDocumentCreated, onDocumentWritten } = require('firebase-functions/v2/
 const { logger } = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
+const Anthropic = require('@anthropic-ai/sdk');
 const { pbkdf2, timingSafeEqual, createHash, createHmac, randomBytes } = require('crypto');
 const { promisify } = require('util');
+const {
+  LLM_TXN_SCHEMA,
+  STATIC_SYSTEM_PROMPT,
+  buildVolatileContext,
+  capContext,
+  sanitizeLlmTransaction,
+  supportsAdaptiveThinking,
+} = require('./ai-sanitize');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -736,6 +745,129 @@ exports.sendDocumentEmail = onCall(
     const cfg = await readCommunicationConfig(appId);
     await deliverEmail(cfg, { to, cc, subject, html, text, attachment });
     return { ok: true };
+  }
+);
+
+// ── AI entry extraction (Virtual Accountant LLM escalation) ─────────────────
+// The rule engine parses chat client-side first; this callable handles the
+// messages rules can't (Hinglish, GST back-calculation, compound entries).
+// The Anthropic API key lives in settings/ai — firestore.rules denies READ to
+// every client role; only this function reads it via the Admin SDK. The output
+// is a DRAFT in the canonical Transaction shape: the client re-validates it
+// and a human confirms in the entry preview before anything is posted.
+async function readAiConfig(appId) {
+  const snap = await db.doc(`artifacts/${appId}/public/data/settings/ai`).get();
+  const cfg = snap.exists ? (snap.data() || {}) : {};
+  if (cfg.enabled !== true) throw new HttpsError('failed-precondition', 'AI assistant is not enabled. Turn it on in Admin Tools → AI Assistant.');
+  if (!cfg.api_key) throw new HttpsError('failed-precondition', 'AI assistant has no API key. Add one in Admin Tools → AI Assistant.');
+  return cfg;
+}
+
+exports.aiExtractEntry = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60 },
+  async (req) => {
+    const { appId, text, context } = req.data || {};
+    await assertRole(req.auth, appId, ['admin', 'accountant']); // = canEditFinance; matches chat posting rights
+    const message = typeof text === 'string' ? text.trim() : '';
+    if (!message) throw new HttpsError('invalid-argument', 'Message text required');
+    if (message.length > 500) throw new HttpsError('invalid-argument', 'Message too long (max 500 characters)');
+
+    const cfg = await readAiConfig(appId);
+    const modelId = (typeof cfg.model === 'string' && cfg.model.trim()) || 'claude-opus-4-8';
+    const monthlyBudget = Number(cfg.monthly_token_budget) > 0 ? Number(cfg.monthly_token_budget) : 2000000;
+    const perUserRpm = Number(cfg.per_user_rpm) > 0 ? Number(cfg.per_user_rpm) : 6;
+
+    // Per-user fixed-window rate limit (transactional; doc unreadable/unwritable
+    // by clients — see the ai_usage rules stanza).
+    const minute = new Date().toISOString().slice(0, 16);
+    const rlRef = db.doc(`artifacts/${appId}/public/data/ai_usage/rl_${req.auth.uid}`);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(rlRef);
+      const cur = snap.exists ? snap.data() : {};
+      const count = cur.minute === minute ? Number(cur.count || 0) : 0;
+      if (count >= perUserRpm) throw new HttpsError('resource-exhausted', 'Too many AI requests — wait a minute and try again.');
+      tx.set(rlRef, { minute, count: count + 1, updated_at: new Date().toISOString() });
+    });
+
+    // Monthly token budget. Best-effort stop: the check is read-then-act, so
+    // simultaneous requests near the cap can overshoot by a few calls' tokens
+    // (bounded by per_user_rpm × concurrent users × ~10k) — accepted slack.
+    const month = new Date().toISOString().slice(0, 7);
+    const usageRef = db.doc(`artifacts/${appId}/public/data/ai_usage/usage_${month}`);
+    const usageSnap = await usageRef.get();
+    const used = usageSnap.exists ? Number(usageSnap.data().tokens_total || 0) : 0;
+    if (used >= monthlyBudget) throw new HttpsError('resource-exhausted', 'Monthly AI budget exhausted. Ask your admin to raise it in Admin Tools → AI Assistant.');
+
+    // Timeout/retries must fit inside the callable's 60s deadline — the SDK
+    // defaults (600s timeout, 2 retries) would blow it and surface an opaque
+    // DEADLINE_EXCEEDED instead of the mapped errors below.
+    const client = new Anthropic({ apiKey: cfg.api_key, timeout: 45000, maxRetries: 1 });
+    let resp;
+    try {
+      resp = await client.messages.create({
+        model: modelId,
+        max_tokens: 8000, // adaptive thinking spends from this cap too — GST/compound entries need headroom
+        // Haiku (and pre-4.6 models) reject adaptive thinking with a 400 — omit there.
+        ...(supportsAdaptiveThinking(modelId) ? { thinking: { type: 'adaptive' } } : {}),
+        system: [
+          // cache_control is inert while the static prompt is under the model's
+          // minimum cacheable prefix (~4096 tokens on Opus 4.8) — harmless, and
+          // engages automatically if the prompt grows.
+          { type: 'text', text: STATIC_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: buildVolatileContext(context) },
+        ],
+        output_config: { format: { type: 'json_schema', schema: LLM_TXN_SCHEMA } },
+        messages: [{ role: 'user', content: `<user_message>\n${message}\n</user_message>` }],
+      });
+    } catch (err) {
+      // Typed SDK errors, most-specific first. Never log the key or context lists.
+      if (err instanceof Anthropic.AuthenticationError) throw new HttpsError('failed-precondition', 'The configured AI API key is invalid. Update it in Admin Tools → AI Assistant.');
+      if (err instanceof Anthropic.RateLimitError) throw new HttpsError('resource-exhausted', 'The AI service is busy — try again in a moment.');
+      if (err instanceof Anthropic.APIConnectionError) throw new HttpsError('unavailable', 'Could not reach the AI service. Try again.');
+      if (err instanceof Anthropic.APIError) {
+        logger.error('aiExtractEntry provider error', { appId, status: err.status });
+        if (Number(err.status) === 529) throw new HttpsError('resource-exhausted', 'The AI service is overloaded — try again in a moment.');
+        throw new HttpsError('internal', 'The AI service returned an error. Try again.');
+      }
+      throw err;
+    }
+
+    // Record spend before interpreting the result — the tokens are used either
+    // way. Best-effort: a transient Firestore failure here must not fail the
+    // user's successful extraction (and a retry would double-spend tokens).
+    const u = resp.usage || {};
+    const totalTokens = Number(u.input_tokens || 0) + Number(u.output_tokens || 0)
+      + Number(u.cache_creation_input_tokens || 0) + Number(u.cache_read_input_tokens || 0);
+    try {
+      await usageRef.set({
+        tokens_in: admin.firestore.FieldValue.increment(Number(u.input_tokens || 0)),
+        tokens_out: admin.firestore.FieldValue.increment(Number(u.output_tokens || 0)),
+        tokens_total: admin.firestore.FieldValue.increment(totalTokens),
+        calls: admin.firestore.FieldValue.increment(1),
+        last_call_at: new Date().toISOString(),
+        last_model: modelId,
+      }, { merge: true });
+    } catch (err) {
+      logger.error('aiExtractEntry usage increment failed', { appId, reason: err.message });
+    }
+
+    if (resp.stop_reason === 'refusal') throw new HttpsError('failed-precondition', 'The AI declined to process this message. Rephrase and try again.');
+    if (resp.stop_reason === 'max_tokens') throw new HttpsError('internal', 'The AI response was cut off — try a shorter message.');
+
+    const textBlock = (resp.content || []).find((b) => b && b.type === 'text');
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(textBlock && textBlock.text); } catch { /* handled below */ }
+    if (!parsedJson) throw new HttpsError('internal', 'The AI could not produce a valid entry — try rephrasing.');
+
+    let transaction;
+    try {
+      transaction = sanitizeLlmTransaction(parsedJson, { text: message, todayISO: capContext(context).todayISO, modelId });
+    } catch (err) {
+      logger.warn('aiExtractEntry sanitize failed', { appId, reason: err.message });
+      throw new HttpsError('internal', 'The AI could not produce a valid entry — try rephrasing.');
+    }
+
+    return { ok: true, transaction, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
   }
 );
 

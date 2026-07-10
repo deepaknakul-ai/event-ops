@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { X, Sparkles, Send, Check, Edit3, RotateCcw, AlertTriangle, Info, Mic, MicOff, HelpCircle, BookmarkPlus } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { formatCurrency } from '../utils/helpers';
-import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, learnFromEntries } from '../utils/aiAccountant';
+import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
+import { aiAvailable, aiExtractEntry } from '../utils/aiParse';
 
 // Web Speech API (prefix-agnostic). Returns null when unsupported.
 const SpeechRecognitionImpl =
@@ -65,7 +66,7 @@ const TYPE_LABELS = {
 };
 
 // Entry Preview Card
-const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, editingEntry, setEditingEntry, allAccounts }) => {
+const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, onAskAi, editingEntry, setEditingEntry, allAccounts }) => {
   const { parsed, status } = msg;
   const totalAmount = parsed.entries.reduce((s, e) => s + e.amount, 0);
   const issues = parsed.issues || [];
@@ -98,6 +99,11 @@ const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, editingEntry, set
       <div className="flex items-center justify-between">
         <p className="text-xs font-bold uppercase tracking-wide text-indigo-600">
           {TYPE_LABELS[typeKey] || 'Journal Entry'}
+          {String(parsed.model || '').startsWith('llm:') && (
+            <span className="ml-2 inline-flex items-center gap-0.5 rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-bold text-violet-700 normal-case tracking-normal">
+              <Sparkles size={9} /> AI
+            </span>
+          )}
           {typeof parsed.confidence === 'number' && (
             <span className="ml-2 text-[9px] font-semibold text-slate-400">
               conf {Math.round(parsed.confidence * 100)}%
@@ -211,6 +217,15 @@ const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, editingEntry, set
               <BookmarkPlus size={12} /> Park
             </button>
           )}
+          {onAskAi && (
+            <button
+              onClick={onAskAi}
+              title="Not what you meant? Let the AI accountant interpret this message instead"
+              className="inline-flex items-center gap-1 rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-semibold text-violet-700 hover:bg-violet-50 transition"
+            >
+              <Sparkles size={12} /> Ask AI
+            </button>
+          )}
           <button onClick={onCancel} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition">
             <X size={12} /> Cancel
           </button>
@@ -248,6 +263,8 @@ const VirtualAccountant = ({
   orgGstin = '',
   partyGstins = {},      // { 'party name (lower)': 'GSTIN' }
   projectNames = [],
+  // LLM escalation (settings/ai_public.enabled — the key itself never reaches the client):
+  aiEnabled = false,
 }) => {
   const [messages, setMessages] = useState([
     {
@@ -301,6 +318,50 @@ const VirtualAccountant = ({
   // Multi-turn session memory: remember the last party / mode / project so
   // follow-ups like "…and 5k cab for the same job" or "paid them 10k more" inherit context.
   const sessionRef = useRef({ party: '', partyType: '', mode: null, project: '' });
+  // Clarify corrections this session: normalized typed phrase → chosen party.
+  // Consulted by parseMessage so the same phrase doesn't re-ask.
+  const aliasRef = useRef({});
+  // LLM escalation state: transient typing-style indicator while the Cloud
+  // Function runs, plus a session cache so a "not configured" answer doesn't
+  // trigger a failed round-trip on every message.
+  const [isThinking, setIsThinking] = useState(false);
+  const aiNotConfiguredRef = useRef(false);
+  const aiUsable = () => aiAvailable({ aiEnabled }) && !aiNotConfiguredRef.current;
+
+  // Escalate a message the rule engine couldn't parse to the aiExtractEntry
+  // Cloud Function. The result is a DRAFT: it goes through the exact same
+  // validateTransaction → EntryPreview → human-confirm path as rule output.
+  const escalateToAi = async (text) => {
+    setIsThinking(true);
+    try {
+      // ctx (parse memo) lacks getFY — it's a separate prop; the AI context
+      // uses it to tell the model the current financial year.
+      const hydrated = await aiExtractEntry(text, { ...ctx, getFY, sessionAliases: aliasRef.current });
+      const parsed = validateTransaction({ ...hydrated, type: hydrated.intent }, buildValidatorCtx(hydrated));
+      updateSession(parsed);
+      addMessage({ role: 'assistant', type: 'entry_preview', content: parsed.narration, parsed, status: 'pending' });
+    } catch (err) {
+      const msg = err?.message || 'AI assist failed.';
+      // Session-disable on anything an admin must fix in settings (disabled,
+      // missing key, invalid key) — retrying per message would only burn a
+      // failed provider round-trip each time.
+      if (/not enabled|no API key|not configured|API key is invalid/i.test(msg)) aiNotConfiguredRef.current = true;
+      addMessage({ role: 'assistant', type: 'text', content: `AI assist: ${msg}\n\nYou can still type structured entries like "got 50000 from Acme" or "paid 20k to vendor XYZ".` });
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  // "Ask AI" chip on a low-confidence rule preview: cancel the rule draft and
+  // re-run the same prompt through the LLM.
+  const handleAskAi = async (messageId) => {
+    const msg = messages.find((m) => m.id === messageId);
+    if (!msg || msg.status !== 'pending' || isThinking) return;
+    const prompt = msg.parsed?.rawPrompt || '';
+    if (!prompt) return;
+    setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, status: 'cancelled' } : m));
+    await escalateToAi(prompt);
+  };
   const ANAPHORA_PARTY_RE = /\b(same|them|they|him|her|it|that\s+(party|client|vendor|guy|firm|company))\b/i;
   const ANAPHORA_PROJECT_RE = /\b(same\s+(job|project|site|event)|for\s+the\s+same)\b/i;
 
@@ -340,42 +401,9 @@ const VirtualAccountant = ({
     setMessages(prev => [...prev, { ...msg, id: `msg-${Date.now()}-${Math.random()}`, timestamp: new Date() }]);
   };
 
-  const normalizeText = (value) => String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const pickClarifiedParty = (answer, options = []) => {
-    if (!answer || !Array.isArray(options) || options.length === 0) return '';
-    const answerNorm = normalizeText(answer);
-    if (!answerNorm) return '';
-
-    const exact = options.find((opt) => normalizeText(opt) === answerNorm);
-    if (exact) return exact;
-
-    const contains = options.find((opt) => {
-      const optNorm = normalizeText(opt);
-      return optNorm.includes(answerNorm) || answerNorm.includes(optNorm);
-    });
-    if (contains) return contains;
-
-    let best = '';
-    let bestScore = 0;
-    const answerTokens = answerNorm.split(/\s+/).filter(Boolean);
-    for (const opt of options) {
-      const optTokens = normalizeText(opt).split(/\s+/).filter(Boolean);
-      let score = 0;
-      for (const t of answerTokens) {
-        if (optTokens.includes(t)) score += 2;
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = opt;
-      }
-    }
-    return bestScore > 0 ? best : '';
-  };
+  // Non-committal answers to a party clarify — re-ask instead of merging them
+  // into the message text (which would corrupt the proposed new-party name).
+  const NONCOMMITTAL_RE = /^(yes|yeah|yep|ya|y|haan|han|ji|no|nope|nah|na|nahi|n|ok|okay|hmm+|sure|correct|right)$/i;
 
   // Remember the resolved party / mode / project from a parsed transaction so
   // subsequent anaphoric messages ("the same job", "pay them more") can inherit.
@@ -390,15 +418,15 @@ const VirtualAccountant = ({
     if (parsed.meta?.projectTag) sessionRef.current.project = parsed.meta.projectTag;
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || isThinking) return;
 
     const last = messages[messages.length - 1];
     if (last?.role === 'assistant' && last?.type === 'clarify') {
       addMessage({ role: 'user', type: 'text', content: text });
       setInput('');
-      handleClarifyAnswer(last.baseText || '', text, last.parsed?.meta || null, { appendUserEcho: false });
+      await handleClarifyAnswer(last.baseText || '', text, last.parsed?.meta || null, { appendUserEcho: false });
       return;
     }
 
@@ -412,13 +440,20 @@ const VirtualAccountant = ({
 
     // Session memory: inherit the last party when the user uses an anaphor.
     const sess = sessionRef.current;
+    const baseCtx = { ...ctx, sessionAliases: aliasRef.current };
     const augCtx = (sess.party && ANAPHORA_PARTY_RE.test(text))
-      ? { ...ctx, forceParty: sess.party }
-      : ctx;
+      ? { ...baseCtx, forceParty: sess.party }
+      : baseCtx;
 
     const raw = parseMessage(text, augCtx);
     if (!raw) {
-      addMessage({ role: 'assistant', type: 'text', content: 'Hmm, I need at least an amount and a transaction type to create an entry. Try something like:\n- "got 50000 from Acme"\n- "paid 20k to vendor XYZ"\n- "spent 5000 on travel"\n- "salary 30000 Rahul"\n\nI understand amounts like 50k, 1.5 lakh, 2 crore. Type help for more.' });
+      // Rule engine dead-end → LLM escalation (when enabled + online).
+      if (aiUsable()) {
+        await escalateToAi(text);
+        return;
+      }
+      const offlineNote = aiEnabled && !aiAvailable({ aiEnabled }) ? '\n\n(AI assist is offline right now.)' : '';
+      addMessage({ role: 'assistant', type: 'text', content: `Hmm, I need at least an amount and a transaction type to create an entry. Try something like:\n- "got 50000 from Acme"\n- "paid 20k to vendor XYZ"\n- "spent 5000 on travel"\n- "salary 30000 Rahul"\n\nI understand amounts like 50k, 1.5 lakh, 2 crore. Type help for more.${offlineNote}` });
       return;
     }
 
@@ -457,21 +492,92 @@ const VirtualAccountant = ({
 
   // Resume after user answered a clarify prompt. Combines original text with the
   // supplied answer and re-runs parseMessage → validateTransaction.
-  const handleClarifyAnswer = (baseText, answer, clarifyMeta = null, options = {}) => {
+  const handleClarifyAnswer = async (baseText, answer, clarifyMeta = null, options = {}) => {
+    // Clarify option buttons call this directly (not via handleSend), so they
+    // need their own in-flight guard — a click while the AI is thinking would
+    // run a concurrent parse/AI call and can produce duplicate previews.
+    if (isThinking) return;
     if (options.appendUserEcho !== false) {
       addMessage({ role: 'user', type: 'text', content: answer });
     }
 
-    const resolvedParty = clarifyMeta?.clarifyKind === 'party'
-      ? pickClarifiedParty(answer, clarifyMeta.options || [])
-      : '';
+    // Party clarifies can offer a "New party: X" option (unknown name typed).
+    // Picking it forces the typed name through as-is instead of an existing party.
+    let resolvedParty = '';
+    let isNewParty = false;
+    let pickedExactly = false;
+    if (clarifyMeta?.clarifyKind === 'party') {
+      // "yes"/"no"/"ok" don't identify an option — re-ask, and crucially do
+      // NOT merge the word into the message text (it would corrupt the
+      // proposed new-party name into e.g. "Sanjeev Chopra Yes"). An answer
+      // that exactly names an option is never intercepted (party called "Ok").
+      const ansIsOption = (clarifyMeta.options || []).some(
+        (o) => normalizeAliasKey(o) === normalizeAliasKey(answer)
+      );
+      if (!ansIsOption && NONCOMMITTAL_RE.test(String(answer).trim())) {
+        addMessage({
+          role: 'assistant',
+          type: 'clarify',
+          content: 'Please pick one of the options below (or type the party name).',
+          parsed: { intent: 'clarify', meta: clarifyMeta },
+          baseText,
+        });
+        return;
+      }
+      const typedParty = clarifyMeta.typedParty || '';
+      if (typedParty && /^new(\s+party)?$/i.test(String(answer).trim())) {
+        resolvedParty = typedParty;
+        isNewParty = true;
+        pickedExactly = true;
+      } else {
+        const picked = pickPartyOption(answer, clarifyMeta.options || [], NEW_PARTY_PREFIX);
+        if (picked.startsWith(NEW_PARTY_PREFIX)) {
+          resolvedParty = picked.slice(NEW_PARTY_PREFIX.length).trim();
+          isNewParty = true;
+        } else {
+          resolvedParty = picked;
+        }
+        // Verbatim selection (button click, or typing the option/name exactly)
+        // — the only case trustworthy enough to LEARN from.
+        const ansKey = normalizeAliasKey(answer);
+        pickedExactly = !!picked && (
+          ansKey === normalizeAliasKey(picked) || ansKey === normalizeAliasKey(resolvedParty)
+        );
+      }
+    }
 
-    const merged = `${baseText} ${resolvedParty || answer}`.trim();
-    const parseCtx = resolvedParty ? { ...ctx, forceParty: resolvedParty } : ctx;
+    const merged = resolvedParty && baseText.toLowerCase().includes(resolvedParty.toLowerCase())
+      ? baseText
+      : `${baseText} ${resolvedParty || answer}`.trim();
+    const parseCtx = resolvedParty
+      ? { ...ctx, sessionAliases: aliasRef.current, forceParty: resolvedParty }
+      : { ...ctx, sessionAliases: aliasRef.current };
     const raw = parseMessage(merged, parseCtx);
     if (!raw) {
+      // The user already answered one clarify and the merged text STILL doesn't
+      // parse — this is the strongest escalation signal we have.
+      if (aiUsable()) {
+        await escalateToAi(merged);
+        return;
+      }
       addMessage({ role: 'assistant', type: 'text', content: 'Still not clear — please rephrase the whole sentence.' });
       return;
+    }
+
+    // Remember the correction: typed phrase → deliberately chosen existing
+    // party. Guarded hard, because a wrong alias silently rewrites this phrase
+    // forever: only from the two-option (single existing candidate) prompt,
+    // and only when the user selected the option exactly — never from fuzzy
+    // interpretations of a typed answer. Stamped on meta here; recorded into
+    // the session map (and persisted via ai_party_alias) only when the entry
+    // is actually posted or parked.
+    const typedPhrase = clarifyMeta?.typedParty || '';
+    const existingOptions = (clarifyMeta?.options || []).filter((o) => !String(o).startsWith(NEW_PARTY_PREFIX));
+    if (resolvedParty && !isNewParty && pickedExactly && typedPhrase && existingOptions.length === 1) {
+      const key = normalizeAliasKey(typedPhrase);
+      if (key && normalizeAliasKey(resolvedParty) !== key) {
+        raw.meta = { ...(raw.meta || {}), partyAlias: { alias: typedPhrase, party: resolvedParty } };
+      }
     }
     const parsed = validateTransaction({ ...raw, type: raw.intent }, buildValidatorCtx(raw));
     updateSession(parsed);
@@ -520,6 +626,17 @@ const VirtualAccountant = ({
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
+  // A clarify correction becomes a session alias only once the user commits
+  // the entry (post/park) — a cancelled preview must not rewrite the phrase
+  // for the rest of the session.
+  const recordSessionAlias = (parsed) => {
+    const pa = parsed?.meta?.partyAlias;
+    if (pa?.alias && pa?.party) {
+      const key = normalizeAliasKey(pa.alias);
+      if (key) aliasRef.current[key] = pa.party;
+    }
+  };
+
   const handlePostEntry = async (messageId) => {
     if (!onPostEntry) return;
     const msg = messages.find(m => m.id === messageId);
@@ -535,6 +652,7 @@ const VirtualAccountant = ({
     setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'posting', parsed: rechecked } : m));
     try {
       await onPostEntry(rechecked);
+      recordSessionAlias(rechecked);
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'posted' } : m));
       addMessage({ role: 'assistant', type: 'text', content: 'Done! Entry posted successfully. What is next?' });
     } catch (err) {
@@ -556,6 +674,7 @@ const VirtualAccountant = ({
     setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, status: 'posting', parsed: rechecked } : m));
     try {
       await onParkEntry(rechecked);
+      recordSessionAlias(rechecked);
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, status: 'parked' } : m));
       addMessage({ role: 'assistant', type: 'text', content: 'Parked as draft. Open Accounts → All Entries (Drafts) when you are ready to post.' });
     } catch (err) {
@@ -609,6 +728,13 @@ const VirtualAccountant = ({
                   onPost={() => handlePostEntry(msg.id)}
                   onPark={onParkEntry ? () => handleParkEntry(msg.id) : undefined}
                   onCancel={() => handleCancelEntry(msg.id)}
+                  onAskAi={
+                    aiUsable()
+                    && String(msg.parsed?.model || '').startsWith('rule')
+                    && (msg.parsed?.confidence ?? 1) < 0.55
+                      ? () => handleAskAi(msg.id)
+                      : undefined
+                  }
                   onEdit={(ei, field, val) => handleEditEntry(msg.id, ei, field, val)}
                   editingEntry={editingEntry}
                   setEditingEntry={setEditingEntry}
@@ -637,8 +763,9 @@ const VirtualAccountant = ({
                       {msg.parsed.meta.options.map((opt) => (
                         <button
                           key={opt}
+                          disabled={isThinking}
                           onClick={() => handleClarifyAnswer(msg.baseText, opt, msg.parsed?.meta)}
-                          className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 transition"
+                          className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 transition disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {opt}
                         </button>
@@ -715,6 +842,13 @@ const VirtualAccountant = ({
               )}
             </div>
           ))}
+          {isThinking && (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-indigo-50 border border-indigo-200 px-4 py-2.5 text-sm text-indigo-700 shadow-sm animate-pulse flex items-center gap-2">
+                <Sparkles size={14} className="shrink-0" /> Thinking… asking the AI accountant
+              </div>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
 
@@ -738,7 +872,7 @@ const VirtualAccountant = ({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={isListening ? 'Listening…' : 'e.g. "Acme paid us 50000" or "spent 5k on travel"'}
+              placeholder={isThinking ? 'Thinking…' : isListening ? 'Listening…' : 'e.g. "Acme paid us 50000" or "spent 5k on travel"'}
               className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-base sm:text-sm text-slate-800 placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
             />
             {SpeechRecognitionImpl && (
@@ -750,7 +884,7 @@ const VirtualAccountant = ({
                 {isListening ? <MicOff size={16} /> : <Mic size={16} />}
               </button>
             )}
-            <button onClick={handleSend} disabled={!input.trim()} className="flex h-11 w-11 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+            <button onClick={handleSend} disabled={!input.trim() || isThinking} className="flex h-11 w-11 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
               <Send size={16} />
             </button>
           </div>

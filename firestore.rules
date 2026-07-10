@@ -109,9 +109,11 @@ service cloud.firestore {
                   // money is owner-scoped by the dedicated block below (admin/accountant
                   // all; a manager only their OWN projects). Excluded here so OR-semantics
                   // don't let the generic read expose every project's money.
+                  // ai_usage (Phase-2 AI): Cloud-Function-written token/budget counters —
+                  // excluded so the dedicated admin/accountant-read stanza is authoritative.
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients', 'users', 'expenses', 'project_financials'])
+                                      'clients', 'users', 'expenses', 'project_financials', 'ai_usage'])
                   // Company-wide accounting ledgers + payroll: Owner + Accountant only.
                   // They carry no per-project owner and no operational role needs them,
                   // so they must never be SDK-readable by manager / tech / user.
@@ -166,7 +168,17 @@ service cloud.firestore {
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials']
+        // ai_usage: budget/rate-limit counters written ONLY by the aiExtractEntry
+        // Cloud Function (Admin SDK) — client writes would let users forge/reset
+        // the monthly AI budget meter.
+        // settings (Phase-2 AI round fix): settings was excluded from the wildcard
+        // READ but not WRITE/DELETE, so this rule's isRoleUser default let ANY
+        // role overwrite settings/security (admin password), settings/rbac,
+        // settings/ai (LLM API key), etc. via OR-semantics — defeating the
+        // dedicated admin-only settings stanza. Every settings writer in the app
+        // expects admin-only enforcement (Chat.jsx catch: "Only an admin can
+        // change this."). Excluded here so the settings stanza is authoritative.
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings']
       ) ? false
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
@@ -289,7 +301,10 @@ service cloud.firestore {
       //   - everything else (manager-transactional payments/tax_invoices/
       //     vendor_payments + operational collections): admin/accountant/manager.
       allow delete: if (
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials']
+        // ai_usage: deletes would reset the AI budget meter — Cloud Function only.
+        // settings: same wildcard-vs-stanza fix as create/update above — deletes
+        // of settings docs must go through the admin-only settings stanza.
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings']
       ) ? false
         : (
         collection in ['journal_entries', 'reconcile_matches',
@@ -388,10 +403,27 @@ service cloud.firestore {
     //   rules). All other settings docs: any real (non-anonymous) session.
     // Write: admin only.
     match /artifacts/{appId}/public/data/settings/{docId} {
-      allow read: if (docId in ['security', 'communication', 'payments', 'einvoice'])
-                    ? isAdmin(appId)
-                    : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
+      // settings/ai holds the LLM API key — NEVER client-readable, not even by
+      // admin (the aiExtractEntry Cloud Function reads it via Admin SDK, which
+      // bypasses rules). AdminTools writes it blind and displays state from the
+      // non-secret sibling settings/ai_public instead.
+      allow read: if docId == 'ai'
+                    ? false
+                    : (docId in ['security', 'communication', 'payments', 'einvoice'])
+                      ? isAdmin(appId)
+                      : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
       allow write: if isAdmin(appId);
+    }
+
+    // ── AI usage metering (Phase-2 AI assistant) ──────────────────────────────
+    // Monthly token counters (usage_{YYYY-MM}) and per-user rate-limit windows
+    // (rl_{uid}), written ONLY by the aiExtractEntry Cloud Function via the
+    // Admin SDK. Excluded from the broad wildcard (read AND write) above so
+    // clients can never forge or reset the AI budget. Admin/Accountant read the
+    // usage meter in Admin Tools.
+    match /artifacts/{appId}/public/data/ai_usage/{docId} {
+      allow read: if seesAllParties(appId);
+      allow write: if false;
     }
 
     // ── Employees ─────────────────────────────────────────────────────────────

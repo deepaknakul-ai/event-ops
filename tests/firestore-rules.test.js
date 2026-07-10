@@ -671,4 +671,60 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await assertSucceeds(getDoc(doc(asUser('tech1'), path('inventory', 'inv1'))));
     });
   });
+
+  // ── Phase-2 AI assistant: key secrecy + budget-counter integrity ───────────
+  describe('AI settings & usage metering', () => {
+    beforeEach(async () => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const db = ctx.firestore();
+        await setDoc(doc(db, path('settings', 'ai')), { enabled: true, api_key: 'sk-ant-secret', model: 'claude-opus-4-8' });
+        await setDoc(doc(db, path('settings', 'ai_public')), { enabled: true, model: 'claude-opus-4-8', api_key_set: true });
+        await setDoc(doc(db, path('ai_usage', 'usage_2026-07')), { tokens_total: 1234, calls: 5 });
+        await setDoc(doc(db, path('ai_usage', 'rl_admin1')), { minute: '2026-07-10T09:41', count: 2 });
+      });
+    });
+
+    test('NOBODY can read settings/ai — not even admin (the API key doc)', async () => {
+      await assertFails(getDoc(doc(asUser('admin1'), path('settings', 'ai'))));
+      await assertFails(getDoc(doc(asUser('acct1'), path('settings', 'ai'))));
+      await assertFails(getDoc(doc(asUser('tech1'), path('settings', 'ai'))));
+      await assertFails(getDoc(doc(asAnon(), path('settings', 'ai'))));
+    });
+    test('admin CAN write settings/ai (blind write) — others cannot', async () => {
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'ai')), { enabled: true, api_key: 'sk-ant-new' }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('acct1'), path('settings', 'ai')), { api_key: 'stolen' }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('mgrA'), path('settings', 'ai')), { api_key: 'stolen' }, { merge: true }));
+    });
+    test('settings/ai_public readable by real sessions (non-secret mirror)', async () => {
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('settings', 'ai_public'))));
+      await assertSucceeds(getDoc(doc(asUser('tech1'), path('settings', 'ai_public'))));
+    });
+    test('ai_usage readable by admin/accountant, NOT by manager/tech', async () => {
+      await assertSucceeds(getDoc(doc(asUser('admin1'), path('ai_usage', 'usage_2026-07'))));
+      await assertSucceeds(getDoc(doc(asUser('acct1'), path('ai_usage', 'usage_2026-07'))));
+      await assertFails(getDoc(doc(asUser('mgrA'), path('ai_usage', 'usage_2026-07'))));
+      await assertFails(getDoc(doc(asUser('tech1'), path('ai_usage', 'usage_2026-07'))));
+    });
+    test('ai_usage is client-unwritable for EVERY role (budget forgery closed)', async () => {
+      await assertFails(setDoc(doc(asUser('admin1'), path('ai_usage', 'usage_2026-07')), { tokens_total: 0 }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('acct1'), path('ai_usage', 'usage_2026-07')), { tokens_total: 0 }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('tech1'), path('ai_usage', 'rl_tech1')), { minute: 'x', count: 0 }));
+      await assertFails(deleteDoc(doc(asUser('admin1'), path('ai_usage', 'usage_2026-07'))));
+    });
+
+    // Pre-existing wildcard hole closed in this round: settings was excluded
+    // from the wildcard READ but not WRITE/DELETE, letting any role overwrite
+    // settings/security (admin password), settings/rbac, settings/ai, etc.
+    test('non-admin roles CANNOT write ANY settings doc (wildcard bypass closed)', async () => {
+      await assertFails(setDoc(doc(asUser('tech1'), path('settings', 'security')), { admin_password: 'pwned' }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('u1'), path('settings', 'ai')), { api_key: 'attacker-key', enabled: true }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('mgrA'), path('settings', 'ai_public')), { enabled: false }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('acct1'), path('settings', 'chat')), { presence_enabled: false }, { merge: true }));
+      await assertFails(deleteDoc(doc(asUser('tech1'), path('settings', 'ai'))));
+    });
+    test('admin CAN still write settings docs (stanza remains authoritative)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'chat')), { presence_enabled: false }, { merge: true }));
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'organization')), { name: 'TERMS' }, { merge: true }));
+    });
+  });
 });
