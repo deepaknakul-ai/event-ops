@@ -3910,6 +3910,8 @@ const Accounting = ({
           role={role}
           user={user}
           manualJournalEntries={manualJournalEntries}
+          chartOfAccounts={chartOfAccounts}
+          ledger={snapshot.ledger}
           logAction={logAction}
           addToast={addToast}
         />

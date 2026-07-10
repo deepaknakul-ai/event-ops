@@ -6,6 +6,8 @@
 //   - unmatchedRows: statement rows with no JV counterpart
 //   - unmatchedJVs:  journal entries with no statement row
 //   - suggestions:   best-candidate matches below the confidence cutoff
+//   - candidates:    top-5 scored JVs PER ROW (keyed by row id), including rows
+//                    that lost the greedy race — feeds the "Change match" picker
 //
 // Match rules (in order, highest confidence first):
 //   1. Exact amount + same date + same sign (in/out)
@@ -13,7 +15,7 @@
 //   3. Amount within 0.5% tolerance + date within ±3 days
 //   4. Aggregated-amount match: one statement row ≈ sum of N JVs
 //
-// Also supports a lightweight CSV parser (header-row aware).
+// Also supports an RFC-4180 CSV parser (header-row aware, preamble-tolerant).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { round2, totalOf } from './schema.js';
@@ -25,6 +27,8 @@ import { round2, totalOf } from './schema.js';
  * @property {'debit'|'credit'} direction   // 'debit' = money out of our bank
  * @property {string} [description]
  * @property {string} [ref]       // UTR / cheque no
+ * @property {number|null} [balance]  // running balance when the statement carries one
+ * @property {string} [id]        // stable per-statement row id (see rowKey)
  */
 
 /**
@@ -33,6 +37,7 @@ import { round2, totalOf } from './schema.js';
  * @property {string} date
  * @property {string} [voucher_no]
  * @property {string} [narration]
+ * @property {boolean} [reconciled]
  * @property {Array<{debitAccount:string, creditAccount:string, amount:number}>} entries
  */
 
@@ -44,15 +49,44 @@ const parseISO = (s) => {
 const daysBetween = (a, b) => Math.round(Math.abs((parseISO(a) - parseISO(b)) / MS_PER_DAY));
 
 /**
+ * Stable identity for a statement row. Prefers the parser-assigned `id`
+ * (date|direction|amount|desc40#occurrence — unique even for duplicate rows);
+ * falls back to the legacy `date-amount-description` key so sessions saved
+ * before stable ids still resolve their accepted/rejected maps.
+ * @param {StatementRow} row
+ */
+export function rowKey(row) {
+  if (row && row.id) return row.id;
+  return `${row?.date}-${row?.amount}-${row?.description}`;
+}
+
+/**
+ * Build a predicate that decides whether a JV account name is "the bank".
+ * When a specific bank account is chosen we match it exactly (case-insensitive,
+ * trimmed) so a multi-bank org reconciles one account at a time; when absent we
+ * fall back to the legacy `/^bank\b/i` heuristic (any account starting "Bank").
+ * @param {string} [bankAccountName]
+ * @returns {(account: string) => boolean}
+ */
+export function makeBankMatcher(bankAccountName) {
+  const target = (bankAccountName || '').trim().toLowerCase();
+  if (!target) return (account) => /^bank\b/i.test(account || '');
+  return (account) => (account || '').trim().toLowerCase() === target;
+}
+
+/**
  * Is this JV line involving the bank on the same `direction` as the statement?
  * direction='debit' (money out) ⇒ Bank is credited in the JV.
  * direction='credit' (money in) ⇒ Bank is debited in the JV.
+ * @param {JEEntry} je
+ * @param {'debit'|'credit'} direction
+ * @param {(account: string) => boolean} isBank
  */
-function jeMatchesDirection(je, direction) {
+function jeMatchesDirection(je, direction, isBank) {
   const lines = je?.entries || [];
   return lines.some((l) => {
-    const drIsBank = /^bank\b/i.test(l.debitAccount || '');
-    const crIsBank = /^bank\b/i.test(l.creditAccount || '');
+    const drIsBank = isBank(l.debitAccount || '');
+    const crIsBank = isBank(l.creditAccount || '');
     if (direction === 'credit') return drIsBank; // money in
     if (direction === 'debit')  return crIsBank; // money out
     return drIsBank || crIsBank;
@@ -65,9 +99,12 @@ function jeAmount(je) {
 
 /**
  * Score a (row, je) pair. Higher is better; 0 = impossible.
+ * @param {StatementRow} row
+ * @param {JEEntry} je
+ * @param {(account: string) => boolean} isBank
  */
-function scorePair(row, je) {
-  if (!jeMatchesDirection(je, row.direction)) return 0;
+function scorePair(row, je, isBank) {
+  if (!jeMatchesDirection(je, row.direction, isBank)) return 0;
   const amtA = round2(row.amount);
   const amtB = round2(jeAmount(je));
   if (amtA <= 0 || amtB <= 0) return 0;
@@ -91,10 +128,11 @@ function scorePair(row, je) {
  * Main reconciliation entry point.
  * @param {StatementRow[]} rows
  * @param {JEEntry[]} journalEntries
- * @param {{minConfidence?: number, learnedMatches?: Array<{row:StatementRow, journal_entry_id?:string}>}} [opts]
+ * @param {{minConfidence?: number, bankAccountName?: string, learnedMatches?: Array<{row:StatementRow, journal_entry_id?:string}>}} [opts]
  */
 export function reconcile(rows, journalEntries, opts = {}) {
   const minConfidence = opts.minConfidence ?? 60;
+  const isBank = makeBankMatcher(opts.bankAccountName);
   const learnedIndex = buildLearnedIndex(opts.learnedMatches);
   const usedJE = new Set();
   const usedRow = new Set();
@@ -105,7 +143,7 @@ export function reconcile(rows, journalEntries, opts = {}) {
   const cands = [];
   rows.forEach((row, ri) => {
     journalEntries.forEach((je) => {
-      const base = scorePair(row, je);
+      const base = scorePair(row, je, isBank);
       if (base <= 0) return;
       const boost = learnedBoost(row, je, learnedIndex);
       const score = Math.min(100, round2(base + boost));
@@ -113,6 +151,21 @@ export function reconcile(rows, journalEntries, opts = {}) {
     });
   });
   cands.sort((a, b) => b.score - a.score);
+
+  // Per-row candidate lists (top 5, already in desc-score order because `cands`
+  // is globally sorted). Includes candidates whose JV is claimed by another row
+  // so the UI can offer a "Change match" picker; the unique-jeId guard lives in
+  // the UI/persist layer.
+  /** @type {Record<string, Array<{jeId:string, score:number, confidence:number, reason:string, je:JEEntry, journalEntry:JEEntry}>>} */
+  const candidates = {};
+  for (const c of cands) {
+    const key = rowKey(c.row);
+    const list = candidates[key] || (candidates[key] = []);
+    if (list.length < 5) {
+      const reason = describeMatch(c.row, c.je, c.base, c.boost);
+      list.push({ jeId: c.jeId, score: c.score, confidence: c.score, reason, je: c.je, journalEntry: c.je });
+    }
+  }
 
   for (const c of cands) {
     if (usedJE.has(c.jeId) || usedRow.has(c.ri)) continue;
@@ -137,7 +190,7 @@ export function reconcile(rows, journalEntries, opts = {}) {
     const rowIdx = rows.indexOf(row);
     if (usedRow.has(rowIdx)) continue;
     const bucket = unmatchedJVs.filter((je) =>
-      jeMatchesDirection(je, row.direction) &&
+      jeMatchesDirection(je, row.direction, isBank) &&
       daysBetween(row.date, je.date) <= 3 &&
       !usedJE.has(je.id),
     );
@@ -160,6 +213,7 @@ export function reconcile(rows, journalEntries, opts = {}) {
 
   return {
     matches,
+    candidates,
     unmatchedRows: rows.filter((_, i) => !usedRow.has(i)),
     unmatchedJVs: journalEntries.filter((je) => !usedJE.has(je.id)),
     suggestions: suggestions.filter((s) => !usedJE.has(s.je.id) && !usedRow.has(rows.indexOf(s.row))),
@@ -266,85 +320,170 @@ function findSubsetMatchingAmount(items, target, maxSize = 4) {
   return best;
 }
 
-// ── CSV parsing (minimal; no quoted-embedded-newline support) ───────────────
-/**
- * Parse a bank CSV where headers exist. Auto-detects common column names for
- * date / credit / debit / amount / description / reference.
- * @param {string} csv
- * @returns {StatementRow[]}
- */
-export function parseStatementCSV(csv) {
-  if (!csv || typeof csv !== 'string') return [];
-  const lines = csv.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return [];
-  const header = splitCSV(lines[0]).map((h) => h.toLowerCase().trim());
-  const idxDate  = findCol(header, ['date', 'txn date', 'transaction date', 'value date']);
-  const idxDesc  = findCol(header, ['description', 'narration', 'particulars', 'details']);
-  const idxRef   = findCol(header, ['ref', 'reference', 'utr', 'cheque', 'chq no', 'chq. no']);
-  const idxDebit = findCol(header, ['debit', 'withdrawal', 'withdrawal amt', 'dr']);
-  const idxCred  = findCol(header, ['credit', 'deposit', 'deposit amt', 'cr']);
-  const idxAmt   = findCol(header, ['amount', 'amt', 'transaction amount']);
-  const idxType  = findCol(header, ['type', 'dr/cr', 'cr/dr']);
+// ── CSV parsing (RFC-4180, preamble-tolerant) ───────────────────────────────
 
-  const out = [];
-  for (let i = 1; i < lines.length; i += 1) {
-    const cols = splitCSV(lines[i]);
-    const date = normaliseDate(cols[idxDate]);
-    if (!date) continue;
-    const desc = cols[idxDesc] || '';
-    const ref  = cols[idxRef] || '';
-    let amount = 0;
-    let direction = null;
-    if (idxDebit >= 0 && idxCred >= 0) {
-      const dr = Number((cols[idxDebit] || '0').replace(/[,\s]/g, '')) || 0;
-      const cr = Number((cols[idxCred] || '0').replace(/[,\s]/g, '')) || 0;
-      if (dr > 0) { amount = dr; direction = 'debit'; }
-      else if (cr > 0) { amount = cr; direction = 'credit'; }
-    } else if (idxAmt >= 0) {
-      amount = Number((cols[idxAmt] || '0').replace(/[,\s]/g, '')) || 0;
-      if (idxType >= 0) {
-        const t = (cols[idxType] || '').toLowerCase();
-        direction = /cr/.test(t) ? 'credit' : 'debit';
-      } else {
-        direction = amount < 0 ? 'debit' : 'credit';
-        amount = Math.abs(amount);
+const MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/**
+ * RFC-4180 tokenizer over the WHOLE document: handles quoted fields, escaped
+ * `""`, and newlines embedded inside quotes. Returns a matrix of string cells
+ * with fully-blank rows dropped.
+ * @param {string} text
+ * @returns {string[][]}
+ */
+function parseCSVMatrix(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i += 1; continue;
+      }
+      field += ch; i += 1; continue;
+    }
+    if (ch === '"') { inQuotes = true; i += 1; continue; }
+    if (ch === ',') { row.push(field); field = ''; i += 1; continue; }
+    if (ch === '\r') {
+      if (text[i + 1] === '\n') i += 1;
+      row.push(field); rows.push(row); row = []; field = ''; i += 1; continue;
+    }
+    if (ch === '\n') {
+      row.push(field); rows.push(row); row = []; field = ''; i += 1; continue;
+    }
+    field += ch; i += 1;
+  }
+  row.push(field);
+  rows.push(row);
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+
+/**
+ * Map a header row's cells to column roles. Roles are picked in a precedence
+ * order and each column is claimed at most once, so "Dr/Cr" beats "Debit" and
+ * "Debit"/"Credit" beat a bare "Amount".
+ * @param {string[]} cells
+ */
+function mapColumns(cells) {
+  const norm = cells.map((c) => String(c).toLowerCase().trim());
+  const used = new Set();
+  const pick = (patterns) => {
+    for (const p of patterns) {
+      for (let i = 0; i < norm.length; i += 1) {
+        if (used.has(i) || !norm[i]) continue;
+        if (p.test(norm[i])) { used.add(i); return i; }
       }
     }
-    if (amount <= 0 || !direction) continue;
-    out.push({ date, amount: round2(amount), direction, description: desc, ref });
-  }
-  return out;
+    return -1;
+  };
+  const idxDate    = pick([/^(?:txn|transaction|value|posting|tran|book(?:ing)?)?\.?\s*date\b/, /date/]);
+  const idxType    = pick([/^(?:dr\s*\/\s*cr|cr\s*\/\s*dr)$/, /\btype\b/, /\bindicator\b/]);
+  const idxDebit   = pick([/withdraw/, /\bdebit\b/, /paid\s*out/, /^dr\.?$/]);
+  const idxCredit  = pick([/deposit/, /\bcredit\b/, /paid\s*in/, /^cr\.?$/]);
+  const idxBalance = pick([/balance/, /^bal\.?$/]);
+  const idxAmount  = pick([/\bamount\b/, /\bamt\b/]);
+  const idxRef     = pick([/\butr\b/, /cheque/, /chq/, /reference/, /\bref\b/, /instrument/, /tran(?:saction)?\s*id/]);
+  const idxDesc    = pick([/description/, /narration/, /particular/, /details?/, /remark/]);
+  return { idxDate, idxType, idxDebit, idxCredit, idxBalance, idxAmount, idxRef, idxDesc };
 }
 
-function splitCSV(line) {
-  // Handles simple quoted fields
-  const out = [];
-  let buf = '';
-  let q = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (ch === '"') { q = !q; continue; }
-    if (ch === ',' && !q) { out.push(buf); buf = ''; continue; }
-    buf += ch;
+/**
+ * Score how "header-like" a row is. Requires a date-ish column AND a money-ish
+ * column (debit/credit or amount); penalises rows carrying actual data values.
+ * @param {string[]} cells
+ * @returns {number} higher = more header-like; -1 = not a header
+ */
+function scoreHeader(cells) {
+  const map = mapColumns(cells);
+  const hasDate = map.idxDate >= 0;
+  const hasMoney = map.idxDebit >= 0 || map.idxCredit >= 0 || map.idxAmount >= 0;
+  if (!hasDate || !hasMoney) return -1;
+  let score = 0;
+  for (const k of Object.keys(map)) if (map[k] >= 0) score += 1;
+  for (const cell of cells) {
+    if (looksLikeAmount(cell) || looksLikeDate(cell)) score -= 2;
   }
-  out.push(buf);
-  return out;
+  return score;
 }
 
-function findCol(header, names) {
-  for (const n of names) {
-    const i = header.indexOf(n);
-    if (i >= 0) return i;
-  }
-  return -1;
+function looksLikeAmount(cell) {
+  const t = String(cell || '').trim();
+  if (!t) return false;
+  return /^[-+(]?\s*(?:₹|rs\.?|inr)?\s*[\d,]+(?:\.\d+)?\s*\)?\s*(?:cr|dr)?\.?$/i.test(t);
 }
 
+function looksLikeDate(cell) {
+  const t = String(cell || '').trim();
+  if (!t) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(t)
+    || /^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$/.test(t)
+    || /^\d{1,2}[\s/-][a-z]{3,}[\s/-]\d{2,4}$/i.test(t);
+}
+
+/**
+ * Parse a money cell: strips ₹/Rs/INR, commas, NBSP; honours parentheses and
+ * trailing Cr/Dr as sign hints. Returns a signed number (magnitude is taken by
+ * the caller); non-numeric → 0.
+ * @param {string} raw
+ */
+function parseAmountCell(raw) {
+  if (raw == null) return 0;
+  let s = String(raw).trim();
+  if (!s) return 0;
+  let sign = 1;
+  if (/^\(.*\)$/.test(s)) sign = -1;
+  s = s.replace(/[()]/g, '');
+  s = s.replace(/(?:₹|rs\.?|inr)/gi, '');
+  s = s.replace(/\s*(cr|dr)\.?\s*$/i, '');              // trailing Cr/Dr (glued or spaced)
+  s = s.replace(/[,\s]/g, '');                          // grouping separators
+  if (s === '' || s === '.' || !/^[-+]?\d*(?:\.\d+)?$/.test(s)) return 0;
+  const num = Number(s);
+  return isFinite(num) ? sign * num : 0;
+}
+
+/**
+ * Detect a trailing Cr/Dr marker on an amount cell (for single-amount-column
+ * statements without a separate type column). Handles glued ("500Dr"),
+ * spaced ("500 Cr") and parenthesised ("(Cr)") forms.
+ * @param {string} cell
+ * @returns {'cr'|'dr'|null}
+ */
+function detectDrCrMarker(cell) {
+  const t = String(cell || '').trim().toLowerCase();
+  if (/\d\s*cr\.?$/.test(t) || /\(cr\)$/.test(t) || /\bcr\b\.?$/.test(t)) return 'cr';
+  if (/\d\s*dr\.?$/.test(t) || /\(dr\)$/.test(t) || /\bdr\b\.?$/.test(t)) return 'dr';
+  return null;
+}
+
+/**
+ * Normalise a date cell to YYYY-MM-DD. Handles ISO, DD/MM/YYYY, DD-MM-YY,
+ * and DD-MMM-YY(YY) (month names), else falls back to Date parsing.
+ * @param {string} s
+ */
 function normaliseDate(s) {
   if (!s) return '';
-  const str = s.trim();
+  const str = String(s).trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  // DD-MMM-YYYY / DD MMM YY / DD/MMM/YYYY
+  let m = str.match(/^(\d{1,2})[\s/-]([a-z]{3,})[\s/-](\d{2,4})$/i);
+  if (m) {
+    const mo = MONTHS[m[2].slice(0, 3).toLowerCase()];
+    if (mo) {
+      let y = m[3];
+      if (y.length === 2) y = Number(y) > 50 ? `19${y}` : `20${y}`;
+      return `${y}-${String(mo).padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    }
+  }
   // DD/MM/YYYY or DD-MM-YYYY
-  const m = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  m = str.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
   if (m) {
     let [, d, mo, y] = m;
     if (y.length === 2) y = Number(y) > 50 ? `19${y}` : `20${y}`;
@@ -358,4 +497,143 @@ function normaliseDate(s) {
     return `${y}-${mo}-${d}`;
   }
   return '';
+}
+
+/**
+ * Extract a StatementRow from a data row given the column map. Returns null
+ * when the row has no usable date/amount (caller counts it as skipped).
+ * @param {string[]} cols
+ * @param {ReturnType<typeof mapColumns>} map
+ */
+function extractDataRow(cols, map) {
+  const date = normaliseDate(cols[map.idxDate]);
+  if (!date) return null;
+  const desc = String(cols[map.idxDesc] || '').trim();
+  const ref  = String(cols[map.idxRef] || '').trim();
+  let amount = 0;
+  let direction = null;
+
+  if (map.idxDebit >= 0 || map.idxCredit >= 0) {
+    const dr = Math.abs(parseAmountCell(cols[map.idxDebit]));
+    const cr = Math.abs(parseAmountCell(cols[map.idxCredit]));
+    if (dr > 0) { amount = dr; direction = 'debit'; }
+    else if (cr > 0) { amount = cr; direction = 'credit'; }
+  } else if (map.idxAmount >= 0) {
+    const cell = cols[map.idxAmount] || '';
+    const raw = parseAmountCell(cell);
+    amount = Math.abs(raw);
+    if (map.idxType >= 0) {
+      const t = String(cols[map.idxType] || '').toLowerCase();
+      if (/cr/.test(t)) direction = 'credit';
+      else if (/dr|db|wd|with/.test(t)) direction = 'debit';
+      else direction = raw < 0 ? 'debit' : 'credit';
+    } else {
+      const marker = detectDrCrMarker(cell);
+      if (marker) direction = marker === 'cr' ? 'credit' : 'debit';
+      else direction = raw < 0 ? 'debit' : 'credit';
+    }
+  }
+
+  if (!(amount > 0) || !direction) return null;
+  const balance = map.idxBalance >= 0 ? parseAmountCell(cols[map.idxBalance]) : null;
+  return { date, amount: round2(amount), direction, description: desc, ref, balance };
+}
+
+const NON_TXN_RE = /opening balance|closing balance|balance b\/f|balance c\/f|brought forward|carried forward|^total|sub[\s-]?total|statement of|page \d/i;
+
+/**
+ * Parse a bank statement CSV with full diagnostics.
+ * @param {string} csv
+ * @returns {{rows: StatementRow[], headerRowIndex: number, skippedRows: number, openingBalance: number|null, closingBalance: number|null, warnings: string[]}}
+ */
+export function parseStatementCSVDetailed(csv) {
+  const empty = { rows: [], headerRowIndex: -1, skippedRows: 0, openingBalance: null, closingBalance: null, warnings: [] };
+  if (!csv || typeof csv !== 'string') return empty;
+  const matrix = parseCSVMatrix(csv);
+  if (matrix.length < 2) return empty;
+
+  // Scored header detection over the first 30 rows (skips bank preambles).
+  let headerRowIndex = -1;
+  let bestScore = 0;
+  const scanTo = Math.min(30, matrix.length);
+  for (let i = 0; i < scanTo; i += 1) {
+    const s = scoreHeader(matrix[i]);
+    if (s > bestScore) { bestScore = s; headerRowIndex = i; }
+  }
+  if (headerRowIndex < 0) {
+    return { ...empty, warnings: ['No recognizable header row found — expected Date plus Debit/Credit or Amount columns.'] };
+  }
+
+  const map = mapColumns(matrix[headerRowIndex]);
+  const dataRegion = matrix.slice(headerRowIndex + 1);
+  const rows = [];
+  const seen = new Map();
+  let skippedRows = 0;
+  let explicitOpening = null;
+  let explicitClosing = null;
+
+  for (const cols of dataRegion) {
+    const joined = cols.join(' ');
+    // Capture explicit opening/closing balance summary lines.
+    if (/opening balance/i.test(joined)) {
+      const v = firstAmount(cols);
+      if (v != null) explicitOpening = v;
+    }
+    if (/closing balance/i.test(joined)) {
+      const v = firstAmount(cols);
+      if (v != null) explicitClosing = v;
+    }
+    const row = extractDataRow(cols, map);
+    if (!row) {
+      if (!NON_TXN_RE.test(joined)) skippedRows += 1;
+      continue;
+    }
+    // Stable id: distinct suffix per duplicate (date|dir|amount|desc40#occ).
+    const base = `${row.date}|${row.direction}|${row.amount}|${(row.description || '').slice(0, 40)}`;
+    const occ = seen.get(base) || 0;
+    seen.set(base, occ + 1);
+    row.id = `${base}#${occ}`;
+    rows.push(row);
+  }
+
+  // Opening/closing balance: explicit labels win, else derive from the balance
+  // column (last row = closing; first row ± its own amount = opening).
+  let openingBalance = explicitOpening;
+  let closingBalance = explicitClosing;
+  if (map.idxBalance >= 0 && rows.length) {
+    const last = rows[rows.length - 1];
+    const first = rows[0];
+    if (closingBalance == null && last.balance != null) closingBalance = round2(last.balance);
+    if (openingBalance == null && first.balance != null) {
+      const signed = first.direction === 'credit' ? first.amount : -first.amount;
+      openingBalance = round2(first.balance - signed);
+    }
+  }
+
+  const warnings = [];
+  if (headerRowIndex > 0) warnings.push(`Ignored ${headerRowIndex} preamble line(s) before the header.`);
+  if (skippedRows > 0) warnings.push(`Skipped ${skippedRows} row(s) with no valid date/amount.`);
+
+  return { rows, headerRowIndex, skippedRows, openingBalance, closingBalance, warnings };
+}
+
+/** First parseable non-zero amount in a row (used for balance summary lines). */
+function firstAmount(cols) {
+  for (const c of cols) {
+    if (looksLikeAmount(c)) {
+      const v = parseAmountCell(c);
+      if (v !== 0) return round2(v);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse a bank CSV where headers exist. Thin wrapper over the detailed parser
+ * for callers that only need the rows.
+ * @param {string} csv
+ * @returns {StatementRow[]}
+ */
+export function parseStatementCSV(csv) {
+  return parseStatementCSVDetailed(csv).rows;
 }

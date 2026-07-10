@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { reconcile, parseStatementCSV } from '../src/utils/aiAccountant/reconcile.js';
+import { reconcile, parseStatementCSV, parseStatementCSVDetailed } from '../src/utils/aiAccountant/reconcile.js';
 
 const JES = [
   {
@@ -101,5 +101,82 @@ describe('parseStatementCSV', () => {
   it('returns empty array for invalid input', () => {
     expect(parseStatementCSV('')).toEqual([]);
     expect(parseStatementCSV('onlyheader')).toEqual([]);
+  });
+});
+
+describe('parseStatementCSVDetailed — real-world bank exports', () => {
+  it('skips a multi-line bank preamble, reads a balance column, and derives opening/closing', () => {
+    const csv = [
+      'HDFC BANK LTD',
+      'Statement of account for 50100XXXX',
+      'Account Branch : KORAMANGALA',
+      '',
+      'Date,Narration,Chq/Ref No,Withdrawal Amt.,Deposit Amt.,Closing Balance',
+      '01/04/2026,OPENING BALANCE,,,,100000.00',
+      '05/04/2026,NEFT ACME CORP,UTR12345,50000.00,,50000.00',
+      '10/04/2026,IMPS SALARY,,,25000.00,75000.00',
+    ].join('\n');
+    const d = parseStatementCSVDetailed(csv);
+    expect(d.headerRowIndex).toBe(3);
+    expect(d.rows).toHaveLength(2);
+    expect(d.rows[0]).toMatchObject({ date: '2026-04-05', amount: 50000, direction: 'debit', ref: 'UTR12345' });
+    expect(d.rows[1]).toMatchObject({ date: '2026-04-10', amount: 25000, direction: 'credit' });
+    expect(d.openingBalance).toBe(100000);
+    expect(d.closingBalance).toBe(75000);
+    expect(d.skippedRows).toBe(0);
+    expect(d.warnings.some((w) => /preamble/.test(w))).toBe(true);
+    expect(d.rows[0].id).toMatch(/^2026-04-05\|debit\|50000\|/);
+  });
+
+  it('handles RFC-4180 quoted fields with embedded commas and newlines', () => {
+    const csv = 'Date,Description,Amount,Type\n"2026-04-10","ACME, INC\nInvoice 5",1000,DR\n2026-04-11,Interest,500,CR';
+    const rows = parseStatementCSV(csv);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].description).toContain('ACME, INC');
+    expect(rows[0].description).toContain('\n');
+    expect(rows[0].direction).toBe('debit');
+    expect(rows[1].direction).toBe('credit');
+  });
+
+  it('parses dd-MMM-yy dates, ₹/comma amounts, and trailing Cr/Dr markers', () => {
+    const csv = [
+      'Txn Date,Particulars,Amount',
+      '05-Apr-2026,UPI to Kirana,"₹1,250.00 Dr"',
+      '06-Apr-26,Refund,"₹2,00,000.00 Cr"',
+    ].join('\n');
+    const rows = parseStatementCSV(csv);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ date: '2026-04-05', amount: 1250, direction: 'debit' });
+    expect(rows[1]).toMatchObject({ date: '2026-04-06', amount: 200000, direction: 'credit' });
+  });
+
+  it('treats parenthesised amounts as money-out in a single amount column', () => {
+    const csv = ['Date,Details,Amount', '2026-04-10,ATM withdrawal,(1500.00)', '2026-04-11,Salary,45000.00'].join('\n');
+    const rows = parseStatementCSV(csv);
+    expect(rows[0]).toMatchObject({ direction: 'debit', amount: 1500 });
+    expect(rows[1]).toMatchObject({ direction: 'credit', amount: 45000 });
+  });
+
+  it('gives duplicate rows distinct stable ids', () => {
+    const csv = ['Date,Description,Debit,Credit', '2026-04-10,Cash,500,', '2026-04-10,Cash,500,'].join('\n');
+    const rows = parseStatementCSV(csv);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].id).not.toBe(rows[1].id);
+    expect(rows[0].id).toMatch(/#0$/);
+    expect(rows[1].id).toMatch(/#1$/);
+  });
+
+  it('counts genuinely-unparseable rows as skipped but ignores summary lines', () => {
+    const csv = [
+      'Date,Description,Debit,Credit',
+      '2026-04-10,Valid,500,',
+      'Total,,500,700',
+      'random note,,,',
+      '2026-04-12,Another,,700',
+    ].join('\n');
+    const d = parseStatementCSVDetailed(csv);
+    expect(d.rows).toHaveLength(2);
+    expect(d.skippedRows).toBe(1);
+    expect(d.warnings.some((w) => /Skipped 1 row/.test(w))).toBe(true);
   });
 });

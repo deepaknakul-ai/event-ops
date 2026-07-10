@@ -42,4 +42,4 @@ export {
   partitionRules,
   parseRecurringPhrase,
 } from './recurring.js';
-export { reconcile, parseStatementCSV } from './reconcile.js';
+export { reconcile, parseStatementCSV, parseStatementCSVDetailed, makeBankMatcher, rowKey } from './reconcile.js';

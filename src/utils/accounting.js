@@ -396,8 +396,8 @@ const toLedger = (journalRows, partyAccountsById = {}) => {
     .sort((a, b) => a.account.localeCompare(b.account));
 };
 
-const getLedgerBalance = (ledgerRows, accountName) => {
-  const row = ledgerRows.find((item) => item.account === accountName);
+export const getLedgerBalance = (ledgerRows, accountName) => {
+  const row = (ledgerRows || []).find((item) => item.account === accountName);
   return row ? row.balance : 0;
 };
 
