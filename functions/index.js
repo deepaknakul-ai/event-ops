@@ -28,10 +28,13 @@ const {
   STATIC_SYSTEM_PROMPT,
   LLM_STMT_SCHEMA,
   STATIC_STMT_PROMPT,
+  LLM_INVOICE_SCHEMA,
+  STATIC_INVOICE_PROMPT,
   buildVolatileContext,
   capContext,
   sanitizeLlmTransaction,
   sanitizeLlmStatement,
+  sanitizeLlmInvoice,
   supportsAdaptiveThinking,
 } = require('./ai-sanitize');
 
@@ -980,6 +983,119 @@ exports.aiExtractStatement = onCall(
     }
 
     return { ok: true, statement, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
+  }
+);
+
+// ── AI purchase-invoice extraction (PDF/image → form prefill) ───────────────
+// Reads ONE supplier invoice and returns header fields the PurchaseInvoices
+// form prefills for human review. Never posts; the user confirms and saves.
+// Reuses settings/ai + ai_usage; own rate-limit doc rl_inv_.
+const INVOICE_MIME = {
+  'application/pdf': 'JVBERi',
+  'image/jpeg': '/9j/',
+  'image/png': 'iVBORw',
+  'image/webp': 'UklGR',
+  'image/gif': 'R0lGOD',
+};
+exports.aiExtractInvoice = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 120 },
+  async (req) => {
+    const { appId, fileBase64, mimeType, context } = req.data || {};
+    await assertRole(req.auth, appId, ['admin', 'accountant']);
+    const mt = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+    const b64 = typeof fileBase64 === 'string' ? fileBase64.trim() : '';
+    if (!b64) throw new HttpsError('invalid-argument', 'Invoice file required');
+    if (!INVOICE_MIME[mt]) throw new HttpsError('invalid-argument', 'Unsupported file type. Upload a PDF or an image (JPG/PNG/WebP).');
+    if (!b64.startsWith(INVOICE_MIME[mt])) throw new HttpsError('invalid-argument', 'File content does not match its type. Re-upload the invoice.');
+    if (b64.length > 7000000) throw new HttpsError('invalid-argument', 'File too large (max ~5MB). Upload a smaller scan or a single-page PDF.');
+
+    const cfg = await readAiConfig(appId);
+    const modelId = (typeof cfg.model === 'string' && cfg.model.trim()) || 'claude-opus-4-8';
+    const monthlyBudget = Number(cfg.monthly_token_budget) > 0 ? Number(cfg.monthly_token_budget) : 2000000;
+    const perUserRpm = Number(cfg.per_user_invoice_rpm) > 0 ? Number(cfg.per_user_invoice_rpm) : 4;
+
+    const minute = new Date().toISOString().slice(0, 16);
+    const rlRef = db.doc(`artifacts/${appId}/public/data/ai_usage/rl_inv_${req.auth.uid}`);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(rlRef);
+      const cur = snap.exists ? snap.data() : {};
+      const count = cur.minute === minute ? Number(cur.count || 0) : 0;
+      if (count >= perUserRpm) throw new HttpsError('resource-exhausted', 'Too many invoice extractions — wait a minute and try again.');
+      tx.set(rlRef, { minute, count: count + 1, updated_at: new Date().toISOString() });
+    });
+
+    const month = new Date().toISOString().slice(0, 7);
+    const usageRef = db.doc(`artifacts/${appId}/public/data/ai_usage/usage_${month}`);
+    const usageSnap = await usageRef.get();
+    const used = usageSnap.exists ? Number(usageSnap.data().tokens_total || 0) : 0;
+    if (used >= monthlyBudget) throw new HttpsError('resource-exhausted', 'Monthly AI budget exhausted. Ask your admin to raise it in Admin Tools → AI Assistant.');
+
+    const fileBlock = mt === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+      : { type: 'image', source: { type: 'base64', media_type: mt, data: b64 } };
+
+    const client = new Anthropic({ apiKey: cfg.api_key, timeout: 110000, maxRetries: 0 });
+    let resp;
+    try {
+      resp = await client.messages.create({
+        model: modelId,
+        max_tokens: 4000,
+        ...(supportsAdaptiveThinking(modelId) ? { thinking: { type: 'adaptive' } } : {}),
+        system: [
+          { type: 'text', text: STATIC_INVOICE_PROMPT, cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: buildVolatileContext(context) },
+        ],
+        output_config: { format: { type: 'json_schema', schema: LLM_INVOICE_SCHEMA } },
+        messages: [{
+          role: 'user',
+          content: [fileBlock, { type: 'text', text: '<invoice>The attached file is a supplier invoice. Extract its fields per the rules.</invoice>' }],
+        }],
+      });
+    } catch (err) {
+      if (err instanceof Anthropic.AuthenticationError) throw new HttpsError('failed-precondition', 'The configured AI API key is invalid. Update it in Admin Tools → AI Assistant.');
+      if (err instanceof Anthropic.RateLimitError) throw new HttpsError('resource-exhausted', 'The AI service is busy — try again in a moment.');
+      if (err instanceof Anthropic.APIConnectionError) throw new HttpsError('unavailable', 'Could not reach the AI service. Try again.');
+      if (err instanceof Anthropic.APIError) {
+        logger.error('aiExtractInvoice provider error', { appId, status: err.status });
+        if (Number(err.status) === 529) throw new HttpsError('resource-exhausted', 'The AI service is overloaded — try again in a moment.');
+        throw new HttpsError('internal', 'The AI service returned an error. Try again.');
+      }
+      throw err;
+    }
+
+    const u = resp.usage || {};
+    const totalTokens = Number(u.input_tokens || 0) + Number(u.output_tokens || 0)
+      + Number(u.cache_creation_input_tokens || 0) + Number(u.cache_read_input_tokens || 0);
+    try {
+      await usageRef.set({
+        tokens_in: admin.firestore.FieldValue.increment(Number(u.input_tokens || 0)),
+        tokens_out: admin.firestore.FieldValue.increment(Number(u.output_tokens || 0)),
+        tokens_total: admin.firestore.FieldValue.increment(totalTokens),
+        calls: admin.firestore.FieldValue.increment(1),
+        last_call_at: new Date().toISOString(),
+        last_model: modelId,
+      }, { merge: true });
+    } catch (err) {
+      logger.error('aiExtractInvoice usage increment failed', { appId, reason: err.message });
+    }
+
+    if (resp.stop_reason === 'refusal') throw new HttpsError('failed-precondition', 'The AI declined to process this document.');
+    if (resp.stop_reason === 'max_tokens') throw new HttpsError('internal', 'The AI response was cut off — try a clearer single-page invoice.');
+
+    const textBlock = (resp.content || []).find((b) => b && b.type === 'text');
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(textBlock && textBlock.text); } catch { /* handled below */ }
+    if (!parsedJson) throw new HttpsError('internal', 'The AI could not read the invoice — try a clearer scan or enter it manually.');
+
+    let invoice;
+    try {
+      invoice = sanitizeLlmInvoice(parsedJson, { todayISO: capContext(context).todayISO });
+    } catch (err) {
+      logger.warn('aiExtractInvoice sanitize failed', { appId, reason: err.message });
+      throw new HttpsError('internal', 'The AI could not read the invoice — try a clearer scan or enter it manually.');
+    }
+
+    return { ok: true, invoice, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
   }
 );
 

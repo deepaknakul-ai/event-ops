@@ -164,3 +164,18 @@ export const aiExtractStatement = async (pdfBase64, ctx = {}) => {
   if (!statement || !Array.isArray(statement.rows)) throw new Error('The AI returned no statement rows.');
   return statement;
 };
+
+/**
+ * Extract one supplier invoice (PDF or image) into header fields the
+ * PurchaseInvoices form prefills. Human confirms — nothing is posted.
+ * @param {string} fileBase64  base64 of the file (no data: prefix)
+ * @param {string} mimeType    application/pdf | image/jpeg | image/png | image/webp | image/gif
+ * @returns {Promise<{vendor_name,vendor_gstin,invoice_no,invoice_date,description,taxable,gst_amount,cgst,sgst,igst,supply_type,gst_rate,total,warnings:string[]}>}
+ */
+export const aiExtractInvoice = async (fileBase64, mimeType, ctx = {}) => {
+  const fn = httpsCallable(getFunctions(), 'aiExtractInvoice', { timeout: 120000 });
+  const res = await fn({ appId, fileBase64, mimeType, context: buildAiContext(ctx) });
+  const invoice = res && res.data && res.data.invoice;
+  if (!invoice) throw new Error('The AI returned no invoice data.');
+  return invoice;
+};

@@ -3,7 +3,7 @@ import { notify } from '../utils/toast';
 import {
   Plus, Search, Edit, Trash2, Upload, Eye, X, FileText,
   CheckCircle, Clock, XCircle, Download, Filter, ChevronDown,
-  Image as ImageIcon, ZoomIn, Package, Wrench
+  Image as ImageIcon, ZoomIn, Package, Wrench, Sparkles
 } from 'lucide-react';
 import {
   collection, addDoc, updateDoc, doc, deleteDoc,
@@ -16,6 +16,7 @@ import { formatCurrency, getFinancialYear } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { generateBookInvoiceNumber } from '../utils/accounting';
 import { determineSupplyType, purchaseGstSplit, round2 } from '../utils/aiAccountant';
+import { aiExtractInvoice } from '../utils/aiParse';
 import { can } from '../utils/permissions';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -84,11 +85,16 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
   };
   const [form, setForm] = useState(initialForm);
   const [orgGstin, setOrgGstin] = useState('');
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   useEffect(() => {
     if (!db || !appId) return;
     getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
       .then((snap) => { if (snap.exists()) setOrgGstin(snap.data()?.gstin || ''); })
       .catch(() => { /* org GSTIN just falls back to 'unknown' supply */ });
+    getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'))
+      .then((snap) => { if (snap.exists()) setAiEnabled(snap.data()?.enabled === true); })
+      .catch(() => { /* AI stays off if the public flag can't be read */ });
   }, [db, appId]);
 
   // Resolve place-of-supply + CGST/SGST/IGST split for a form draft. 'auto'
@@ -97,6 +103,71 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
   const resolveGst = (f) => {
     const supply = f.gst_supply === 'auto' ? determineSupplyType(orgGstin, f.vendor_company_gstin) : f.gst_supply;
     return { supply, ...purchaseGstSplit(f.gst_amount, supply) };
+  };
+
+  // Fetch an uploaded attachment and base64-encode it for the AI extractor.
+  const urlToBase64 = async (url) => {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('Could not read the attachment.');
+    const blob = await resp.blob();
+    const dataUrl = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result || ''));
+      r.onerror = () => rej(new Error('Could not read the attachment.'));
+      r.readAsDataURL(blob);
+    });
+    const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
+    if (!m) throw new Error('Attachment is not a supported file.');
+    return { base64: m[2], mimeType: (m[1] || blob.type || '').toLowerCase() };
+  };
+
+  // AI-extract the first invoice attachment and prefill the form for review.
+  // The user still confirms every field and saves — nothing is posted here.
+  const handleExtract = async () => {
+    const att = (form.images || []).find((im) => /\.(pdf|jpe?g|png|webp|gif)$/i.test(im.name || im.url || ''));
+    if (!att) { notify('Upload the invoice PDF/image first, then Extract.', 'info'); return; }
+    setExtracting(true);
+    try {
+      const { base64, mimeType } = await urlToBase64(att.url);
+      const inv = await aiExtractInvoice(base64, mimeType);
+      setForm((f) => {
+        const next = { ...f };
+        if (inv.invoice_no) next.invoice_ref = inv.invoice_no;
+        if (inv.invoice_date) next.invoice_date = inv.invoice_date;
+        if (inv.taxable) next.amount = String(inv.taxable);
+        if (inv.gst_amount) next.gst_amount = String(inv.gst_amount);
+        if (inv.gst_rate != null) next.gst_rate = String(inv.gst_rate);
+        if (inv.supply_type && inv.supply_type !== 'unknown') next.gst_supply = inv.supply_type;
+        if (inv.description && !next.description) next.description = inv.description;
+        if (inv.vendor_gstin) {
+          const match = vendorEntityOptions.find((o) => (o.company_gstin || '').toUpperCase() === inv.vendor_gstin.toUpperCase());
+          if (match) {
+            next.vendor_id = match.vendor_id;
+            next.vendor_company_id = match.company_id;
+            next.vendor_company_name = match.company_name;
+            next.vendor_company_gstin = match.company_gstin;
+            next.vendor_company_address = match.company_address;
+            next.vendor_name = match.company_name || next.vendor_name;
+          } else {
+            next.vendor_company_gstin = inv.vendor_gstin;
+            if (inv.vendor_name && !next.vendor_name) next.vendor_name = inv.vendor_name;
+          }
+        } else if (inv.vendor_name && !next.vendor_name && !next.vendor_id) {
+          next.vendor_name = inv.vendor_name;
+        }
+        return next;
+      });
+      const warns = inv.warnings || [];
+      notify(
+        warns.length ? `Extracted with notes: ${warns.join(' ')} Review every field.` : 'Invoice extracted — review every field before saving.',
+        warns.length ? 'warning' : 'success',
+      );
+    } catch (err) {
+      console.error(err);
+      notify(err?.message || 'Could not extract the invoice.', 'error');
+    } finally {
+      setExtracting(false);
+    }
   };
 
   const getPartyCompanies = (party) => {
@@ -837,14 +908,27 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-bold text-slate-700">Invoice Images</label>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploadingIdx !== null}
-                className="flex items-center gap-1 text-xs bg-indigo-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-              >
-                <Upload size={12} /> {uploadingIdx !== null ? `Uploading ${uploadingIdx + 1}…` : 'Upload Images'}
-              </button>
+              <div className="flex items-center gap-2">
+                {aiEnabled && (form.images || []).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleExtract}
+                    disabled={extracting || uploadingIdx !== null}
+                    className="flex items-center gap-1 text-xs bg-violet-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-violet-700 disabled:opacity-50"
+                    title="Read the uploaded invoice with AI and prefill the form — you still review and save"
+                  >
+                    <Sparkles size={12} /> {extracting ? 'Reading…' : 'Extract with AI'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingIdx !== null}
+                  className="flex items-center gap-1 text-xs bg-indigo-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  <Upload size={12} /> {uploadingIdx !== null ? `Uploading ${uploadingIdx + 1}…` : 'Upload Images'}
+                </button>
+              </div>
               <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple className="hidden" onChange={handleFileChange} />
             </div>
 
