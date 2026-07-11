@@ -41,6 +41,7 @@ const {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
+  selectVendorProjectPOs,
 } = require('./ledger-project');
 
 admin.initializeApp();
@@ -1373,8 +1374,10 @@ exports.getLedgerData = onCall(
     if (client.ledger_link_enabled === false) throw new HttpsError('permission-denied', 'This ledger link has been disabled.');
     if (client.ledger_link_expires_at && new Date(client.ledger_link_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This ledger link has expired.');
     const col = (name) => db.collection(`artifacts/${appId}/public/data/${name}`);
-    const [projSnap, paySnap, vpaySnap, orgSnap, piSnap, tiSnap, jeSnap, obSnap, paSnap] = await Promise.all([
-      col('projects').where('client_id', '==', cid).get(),
+    const [allProjSnap, paySnap, vpaySnap, orgSnap, piSnap, tiSnap, jeSnap, obSnap, paSnap, finSnap] = await Promise.all([
+      // All projects: the client's OWN (client_id) are filtered below, and a
+      // vendor's POs live embedded in OTHER parties' projects (see finSnap).
+      col('projects').get(),
       col('payments').where('client_id', '==', cid).get(),
       col('vendor_payments').where('vendor_id', '==', cid).get(),
       db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
@@ -1384,15 +1387,50 @@ exports.getLedgerData = onCall(
       col('journal_entries').get(),
       db.doc(`artifacts/${appId}/public/data/opening_balances/clientob_${cid}`).get().catch(() => null),
       db.doc(`artifacts/${appId}/public/data/party_accounts/${cid}`).get().catch(() => null),
+      // A vendor's POs live embedded in OTHER parties' projects, inside the gated
+      // project_financials sibling (base doc scrubbed, no queryable vendor index),
+      // so the client_id query above can never reach them. Read the siblings and
+      // project out ONLY this vendor's PO legs below.
+      col('project_financials').get(),
     ]);
     // All external-facing objects use WHITELIST projections (round-15) — money rows,
     // the client doc, projects and org each return only the fields the public ledger
     // renders, so no internal field (owner UID, staff notes, credentials, cost basis)
     // can ever leak through a magic-link, now or after a future migration.
     const mapRows = (s) => s.docs.map(pickLedgerRow);
-    // Merge each project's money from the gated sibling (base is scrubbed post-slice-3).
-    const projectsOut = await Promise.all(projSnap.docs.map(async (d) =>
+    // The party's OWN projects (they are the client) → full whitelist projection,
+    // money merged from the gated sibling (base is scrubbed post-slice-3).
+    const clientDocs = allProjSnap.docs.filter((d) => (d.data().client_id || '') === cid);
+    const clientPids = new Set(clientDocs.map((d) => d.id));
+    const clientProjectsOut = await Promise.all(clientDocs.map(async (d) =>
       ({ id: d.id, ...pickLedgerProject(await mergeProjectFin(appId, d.id, d.data()), cid) })));
+
+    // Vendor POs are embedded in OTHER parties' projects. Post field-split they sit
+    // in the gated project_financials sibling, but a not-yet-scrubbed project may
+    // still carry them on the base doc — so merge both (sibling wins, base fallback)
+    // to be migration-proof. selectVendorProjectPOs returns ONLY this vendor's POs;
+    // the owning client's package_cost / items / logistics / margin never come with.
+    const finById = new Map(finSnap.docs.map((d) => [d.id, d.data()]));
+    const vendorFinInput = allProjSnap.docs
+      .filter((d) => !clientPids.has(d.id))
+      .map((d) => {
+        const base = d.data() || {};
+        const sib = finById.get(d.id) || {};
+        return {
+          id: d.id,
+          project_name: base.project_name || '',
+          data: { purchase_orders: sib.purchase_orders || base.purchase_orders || [] },
+        };
+      });
+    const nameByPid = new Map(vendorFinInput.map((v) => [v.id, v.project_name]));
+    const vendorProjectsOut = selectVendorProjectPOs(vendorFinInput, cid, clientPids)
+      .map((x) => ({
+        id: x.pid,
+        project_name: nameByPid.get(x.pid) || '',
+        party_company_id: '', // the owning client's company id is meaningless here
+        purchase_orders: x.purchase_orders,
+      }));
+    const projectsOut = [...clientProjectsOut, ...vendorProjectsOut];
 
     // Party-leg projections of journal_entries + the opening-balance mirror, so
     // the external ledger reflects manual JVs / CN / DN / TDS / opening balance

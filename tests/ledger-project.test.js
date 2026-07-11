@@ -3,6 +3,7 @@ import {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
+  selectVendorProjectPOs,
 } from '../functions/ledger-project.js';
 
 describe('partyLegNameSet', () => {
@@ -130,5 +131,46 @@ describe('projectOpeningBalance', () => {
     expect(projectOpeningBalance(null)).toBeNull();
     expect(projectOpeningBalance({ amount: 0, side: 'Dr' })).toBeNull();
     expect(projectOpeningBalance({ amount: -10, side: 'Dr' })).toBeNull();
+  });
+});
+
+describe('selectVendorProjectPOs', () => {
+  // A vendor's POs live inside OTHER clients' project_financials siblings.
+  const VID = 'vendor-9';
+  const finDocs = [
+    { id: 'projA', data: { // another client's project — vendor-9 has a PO here
+      package_cost: 500000, items: [{ rate: 1000 }], logistics_costs: { truck: 2000 }, margin: 99999,
+      purchase_orders: [
+        { id: 'po1', po_no: 'PO-1', vendor_id: 'vendor-9', package_cost: 10000 },
+        { id: 'po2', po_no: 'PO-2', vendor_id: 'vendor-7', package_cost: 8000 },
+      ] } },
+    { id: 'projB', data: { purchase_orders: [{ id: 'po3', vendor_id: 'vendor-7', package_cost: 3000 }] } },
+    { id: 'projOwn', data: { purchase_orders: [{ id: 'po4', vendor_id: 'vendor-9', package_cost: 4000 }] } },
+  ];
+
+  it('returns only the projects+POs where this party is the vendor', () => {
+    const res = selectVendorProjectPOs(finDocs, VID, new Set());
+    expect(res.map((r) => r.pid)).toEqual(['projA', 'projOwn']);
+    expect(res[0].purchase_orders.map((p) => p.id)).toEqual(['po1']); // po2 (other vendor) dropped
+  });
+
+  it('excludes projects the party already owns as a client (no double-count)', () => {
+    const res = selectVendorProjectPOs(finDocs, VID, new Set(['projOwn']));
+    expect(res.map((r) => r.pid)).toEqual(['projA']);
+  });
+
+  it('NEVER leaks the owning client financials — only {pid, purchase_orders} come out', () => {
+    const res = selectVendorProjectPOs(finDocs, VID, new Set());
+    expect(Object.keys(res[0]).sort()).toEqual(['pid', 'purchase_orders']);
+    const blob = JSON.stringify(res);
+    expect(blob).not.toContain('500000'); // package_cost
+    expect(blob).not.toContain('99999');  // margin
+    expect(blob).not.toContain('logistics');
+  });
+
+  it('accepts a plain array of client pids and tolerates empty / missing input', () => {
+    expect(selectVendorProjectPOs(finDocs, VID, ['projA', 'projOwn']).map((r) => r.pid)).toEqual([]);
+    expect(selectVendorProjectPOs([], VID, new Set())).toEqual([]);
+    expect(selectVendorProjectPOs(null, VID, null)).toEqual([]);
   });
 });

@@ -100,4 +100,35 @@ function projectOpeningBalance(ob) {
   };
 }
 
-module.exports = { partyLegNameSet, projectPartyJournalRows, projectOpeningBalance };
+/**
+ * Select a vendor's purchase orders out of the project_financials siblings. A
+ * vendor's POs are embedded in OTHER parties' projects, so the ledger endpoint
+ * can only reach them by scanning siblings. This returns ONLY {pid, purchase_orders}
+ * carrying just the POs where this party is the vendor — nothing else from the
+ * sibling (the owning client's package_cost / items / logistics / margin) is ever
+ * carried through, so it cannot leak to the vendor's magic-link. Projects the
+ * party already owns as a client are excluded (their POs come via the client path).
+ * @param {Array<{id:string, data:{purchase_orders?:Array<{vendor_id?:string}>}}>} finDocs
+ * @param {string} cid  this party's id
+ * @param {Set<string>|string[]} clientPids  project ids the party owns as client
+ * @returns {Array<{pid:string, purchase_orders:Array<object>}>}
+ */
+function selectVendorProjectPOs(finDocs, cid, clientPids) {
+  const out = [];
+  const owned = clientPids instanceof Set ? clientPids : new Set(clientPids || []);
+  (Array.isArray(finDocs) ? finDocs : []).forEach((d) => {
+    if (!d || !d.id || owned.has(d.id)) return;
+    const data = d.data || {};
+    const pos = (Array.isArray(data.purchase_orders) ? data.purchase_orders : [])
+      .filter((po) => po && po.vendor_id === cid);
+    if (pos.length) out.push({ pid: d.id, purchase_orders: pos });
+  });
+  return out;
+}
+
+module.exports = {
+  partyLegNameSet,
+  projectPartyJournalRows,
+  projectOpeningBalance,
+  selectVendorProjectPOs,
+};
