@@ -15,6 +15,7 @@ import { Modal, ConfirmDeleteModal } from '../components/Shared';
 import { formatCurrency, getFinancialYear } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { generateBookInvoiceNumber } from '../utils/accounting';
+import { determineSupplyType, purchaseGstSplit, round2 } from '../utils/aiAccountant';
 import { can } from '../utils/permissions';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -70,6 +71,8 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
     description: '',
     amount: '',
     gst_amount: '',
+    gst_rate: '',       // % slab (0/5/12/18/28) or '' for manual/mixed
+    gst_supply: 'auto', // 'auto' derives intra/inter from GSTINs; or 'intra'/'inter'
     linked_inventory_id: '',
     linked_po_id: '',    // PO id (format: projectId::po_no) that this PI supersedes
     linked_po_no: '',    // human-readable PO number
@@ -80,6 +83,21 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
     remarks: '',
   };
   const [form, setForm] = useState(initialForm);
+  const [orgGstin, setOrgGstin] = useState('');
+  useEffect(() => {
+    if (!db || !appId) return;
+    getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'))
+      .then((snap) => { if (snap.exists()) setOrgGstin(snap.data()?.gstin || ''); })
+      .catch(() => { /* org GSTIN just falls back to 'unknown' supply */ });
+  }, [db, appId]);
+
+  // Resolve place-of-supply + CGST/SGST/IGST split for a form draft. 'auto'
+  // derives intra/inter from org vs vendor GSTIN; the total gst_amount stays
+  // authoritative so a user can override off a real bill.
+  const resolveGst = (f) => {
+    const supply = f.gst_supply === 'auto' ? determineSupplyType(orgGstin, f.vendor_company_gstin) : f.gst_supply;
+    return { supply, ...purchaseGstSplit(f.gst_amount, supply) };
+  };
 
   const getPartyCompanies = (party) => {
     if (!party) return [];
@@ -193,6 +211,8 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       description: rec.description || '',
       amount: rec.amount || '',
       gst_amount: rec.gst_amount || '',
+      gst_rate: rec.gst_rate ?? '',
+      gst_supply: 'auto',
       linked_inventory_id: rec.linked_inventory_id || '',
       linked_po_id: rec.linked_po_id || '',
       linked_po_no: rec.linked_po_no || '',
@@ -225,6 +245,8 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       const selectedVendor = clients.find(c => c.id === form.vendor_id);
       const companies = getPartyCompanies(selectedVendor);
       const selectedCompany = companies.find(c => c.id === (form.vendor_company_id || 'primary')) || companies[0] || null;
+      // Resolve the GST split against the FINAL vendor GSTIN being saved.
+      const gstResolved = resolveGst({ ...form, vendor_company_gstin: selectedCompany?.gstin || (selectedVendor?.gstin || form.vendor_company_gstin) });
 
       const data = {
         pi_no: piNo,
@@ -242,6 +264,11 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
         description: form.description,
         amount: parseFloat(form.amount) || 0,
         gst_amount: parseFloat(form.gst_amount) || 0,
+        gst_rate: form.gst_rate === '' || form.gst_rate == null ? null : Number(form.gst_rate),
+        supply_type: gstResolved.supply,     // 'intra' | 'inter' | 'unknown'
+        gst_cgst: gstResolved.cgst,
+        gst_sgst: gstResolved.sgst,
+        gst_igst: gstResolved.igst,
         linked_inventory_id: form.linked_inventory_id || '',
         linked_po_id: form.linked_po_id || '',
         linked_po_no: form.linked_po_no || '',
@@ -696,13 +723,41 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
               value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
           </div>
 
-          {/* Amount row */}
-          <div className="grid grid-cols-3 gap-3">
+          {/* Amount + GST row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Amount (excl. GST)</label>
               <input type="number" min="0" className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
                 placeholder="0.00"
-                value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+                value={form.amount}
+                onChange={e => setForm(f => {
+                  const amount = e.target.value;
+                  const rate = Number(f.gst_rate);
+                  const gst_amount = f.gst_rate !== '' && rate > 0
+                    ? String(round2((parseFloat(amount) || 0) * rate / 100))
+                    : f.gst_amount;
+                  return { ...f, amount, gst_amount };
+                })} />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">GST Rate</label>
+              <select className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
+                value={form.gst_rate}
+                onChange={e => setForm(f => {
+                  const gst_rate = e.target.value;
+                  const rate = Number(gst_rate);
+                  const gst_amount = gst_rate !== ''
+                    ? String(round2((parseFloat(f.amount) || 0) * rate / 100))
+                    : f.gst_amount;
+                  return { ...f, gst_rate, gst_amount };
+                })}>
+                <option value="">— %</option>
+                <option value="0">0%</option>
+                <option value="5">5%</option>
+                <option value="12">12%</option>
+                <option value="18">18%</option>
+                <option value="28">28%</option>
+              </select>
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">GST Amount</label>
@@ -714,6 +769,30 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
               <label className="block text-xs font-bold text-slate-700 mb-1">Grand Total</label>
               <div className="w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700 font-bold">
                 {formatCurrency((parseFloat(form.amount) || 0) + (parseFloat(form.gst_amount) || 0))}
+              </div>
+            </div>
+          </div>
+
+          {/* Place of supply + CGST/SGST/IGST split */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Place of supply</label>
+              <select className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
+                value={form.gst_supply} onChange={e => setForm(f => ({ ...f, gst_supply: e.target.value }))}>
+                <option value="auto">Auto{orgGstin ? '' : ' — set org GSTIN'}</option>
+                <option value="intra">Intra-state (CGST + SGST)</option>
+                <option value="inter">Inter-state (IGST)</option>
+              </select>
+            </div>
+            <div className="flex items-end">
+              <div className="w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs text-slate-600">
+                {(() => {
+                  const g = resolveGst(form);
+                  if ((parseFloat(form.gst_amount) || 0) <= 0) return 'No GST on this invoice.';
+                  if (g.supply === 'inter') return <span>Inter-state · IGST <strong>{formatCurrency(g.igst)}</strong></span>;
+                  if (g.supply === 'intra') return <span>Intra-state · CGST <strong>{formatCurrency(g.cgst)}</strong> + SGST <strong>{formatCurrency(g.sgst)}</strong></span>;
+                  return 'Supply type unknown — set org + vendor GSTIN, or pick Intra/Inter above.';
+                })()}
               </div>
             </div>
           </div>

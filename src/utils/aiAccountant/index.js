@@ -44,3 +44,4 @@ export {
 } from './recurring.js';
 export { reconcile, parseStatementCSV, parseStatementCSVDetailed, makeBankMatcher, rowKey } from './reconcile.js';
 export { buildRowBookingDraft } from './bookRow.js';
+export { determineSupplyType, stateCodeFromGSTIN, purchaseGstSplit, inputGSTLines, outputGSTLines } from './knowledge.js';

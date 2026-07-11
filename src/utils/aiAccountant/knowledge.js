@@ -68,6 +68,26 @@ export function inputGSTLines(gst, supplyType) {
   return [{ account: 'Input GST Credit', amount: round2(gst) }];
 }
 
+/**
+ * Split a purchase GST total into CGST / SGST / IGST by place of supply.
+ * Named-field companion to inputGSTLines, for storing on a document and for the
+ * derived-ledger split. intra → CGST + SGST (halves that sum exactly);
+ * inter → IGST; 'unknown' → all zero (caller keeps the lump in Input GST Credit).
+ * @param {number} gstAmount
+ * @param {'intra'|'inter'|'unknown'} supplyType
+ * @returns {{ cgst: number, sgst: number, igst: number }}
+ */
+export function purchaseGstSplit(gstAmount, supplyType) {
+  const gst = Math.max(0, round2(Number(gstAmount) || 0));
+  if (gst <= 0) return { cgst: 0, sgst: 0, igst: 0 };
+  if (supplyType === 'inter') return { cgst: 0, sgst: 0, igst: gst };
+  if (supplyType === 'intra') {
+    const [cgst, sgst] = halve(gst);
+    return { cgst, sgst, igst: 0 };
+  }
+  return { cgst: 0, sgst: 0, igst: 0 };
+}
+
 // ── Expense classification (Direct vs Indirect) ──────────────────────────────
 // Each rule maps a keyword pattern to a real CoA account. `direct: true` marks
 // costs that are part of delivering a job/site (Cost of Goods Sold side).
