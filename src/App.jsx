@@ -25,6 +25,7 @@ import { auth, db } from './firebase';
 import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
 import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword, generateSecureToken } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
+import { VERSION_LABEL } from './version';
 import { registerToast, notify } from './utils/toast';
 import DialogHost from './components/DialogHost';
 import InstallPrompt from './components/InstallPrompt';
@@ -3637,6 +3638,7 @@ const [payroll, setPayroll] = useState([]);
                 <button type="button" onClick={handleOpenRecovery} className="text-slate-500 hover:underline">Admin Recovery</button>
              </div>
           </form>
+          <div className="mt-6 text-center text-[11px] text-slate-400" title={VERSION_LABEL}>{VERSION_LABEL}</div>
         </div>
         <Modal isOpen={showForgotPass} onClose={() => { setShowForgotPass(false); setIsBootstrap(false); }} title={isBootstrap ? 'First-Time Admin Setup' : 'Admin Password Recovery'}>
             <div className="space-y-4">
@@ -3802,6 +3804,7 @@ const [payroll, setPayroll] = useState([]);
           {impersonating && (
             <button onClick={() => setImpersonating(null)} className="flex w-full items-center gap-2 rounded p-2 mt-1 text-sm text-amber-700 bg-amber-50 hover:bg-amber-100 font-semibold border border-amber-200"><Eye size={16} className="text-amber-600" /> Exit: {impersonating.name}</button>
           )}
+          <div className="mt-2 px-2 text-[10px] text-slate-300 truncate" title={`Online: ${VERSION_LABEL}`}>{VERSION_LABEL}</div>
         </div>
       </aside>
       <div className="flex flex-1 flex-col overflow-hidden">

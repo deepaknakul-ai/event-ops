@@ -1,7 +1,7 @@
 {
   "name": "rental-ops",
   "private": true,
-  "version": "0.0.0",
+  "version": "3.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,11 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "deploy": "npm run build && firebase deploy --only hosting",
+    "release:patch": "npm version patch -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags",
+    "release:minor": "npm version minor -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags",
+    "release:major": "npm version major -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags"
   },
   "dependencies": {
     "@e965/xlsx": "^0.20.3",
