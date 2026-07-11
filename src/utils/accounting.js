@@ -1,5 +1,6 @@
 import { doc, runTransaction } from 'firebase/firestore';
 import { getFYFromDate, sumLogisticsRecord } from './helpers';
+import { inputGSTLines } from './aiAccountant/knowledge.js';
 
 const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 
@@ -508,6 +509,9 @@ export const buildAccountingSnapshot = ({
         taxable,
         gst,
         total,
+        // Place-of-supply for the input-GST split (stored on the PI since 4a).
+        // Absent/unknown → the single Input GST Credit control account (legacy).
+        supplyType: String(row.supply_type || 'unknown'),
         status: row.status || 'Pending',
         mode: normalizeMode(row.purchase_mode),
         remarks: row.remarks || '',
@@ -794,12 +798,22 @@ export const buildAccountingSnapshot = ({
           creditAccountId: settlementAccountId,
           amount: row.taxable,
         },
-        {
-          debitAccount: 'Input GST Credit',
-          creditAccount: settlementAccount,
-          creditAccountId: settlementAccountId,
-          amount: row.gst,
-        },
+        // Input GST: split into Input CGST/SGST/IGST when the PI carries an
+        // intra/inter supply type (4a); otherwise the single Input GST Credit
+        // control account, byte-identical to the legacy posting.
+        ...((row.gst > 0 && (row.supplyType === 'intra' || row.supplyType === 'inter'))
+          ? inputGSTLines(row.gst, row.supplyType).map((g) => ({
+              debitAccount: g.account,
+              creditAccount: settlementAccount,
+              creditAccountId: settlementAccountId,
+              amount: g.amount,
+            }))
+          : [{
+              debitAccount: 'Input GST Credit',
+              creditAccount: settlementAccount,
+              creditAccountId: settlementAccountId,
+              amount: row.gst,
+            }]),
       ]
     );
   });
