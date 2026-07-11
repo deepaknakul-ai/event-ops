@@ -19,6 +19,8 @@ const PublicLedger = () => {
   const [vendorPayments, setVendorPayments] = useState([]);
   const [purchaseInvoices, setPurchaseInvoices] = useState([]);
   const [taxInvoices, setTaxInvoices] = useState([]);
+  const [journalEntries, setJournalEntries] = useState([]); // party-leg JVs/CN/DN/TDS
+  const [openingBalance, setOpeningBalance] = useState(null); // party opening-balance mirror
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [fyFilter, setFyFilter] = useState('ALL');
@@ -45,6 +47,8 @@ const PublicLedger = () => {
         setOrgSettings(data.org || null);
         setPurchaseInvoices(data.purchaseInvoices || []);
         setTaxInvoices(data.taxInvoices || []);
+        setJournalEntries(data.journalEntries || []);
+        setOpeningBalance(data.openingBalance || null);
       } catch (err) {
         console.error('Public ledger load failed:', err);
         if (isMounted) { setClient(null); setError(err?.message || 'Failed to load ledger. Please try again later.'); }
@@ -249,6 +253,37 @@ const PublicLedger = () => {
         });
     }
 
+    // ── Journal-voucher & opening-balance rows (server-scoped to this party) ──
+    // These come pre-netted to the party's own leg, so they fold in exactly like
+    // an invoice or payment and make the running balance tie out with the in-app
+    // derived ledger. Not company-split → attach to the primary company.
+    if (openingBalance && (openingBalance.debit || openingBalance.credit)) {
+      raw.push({
+        date: openingBalance.date,
+        desc: openingBalance.remarks || 'Opening Balance',
+        debit: parseFloat(openingBalance.debit || 0),
+        credit: parseFloat(openingBalance.credit || 0),
+        entry_tag: 'OB',
+        invoice_status: null, invoice_no: null, invoice_date: null,
+        company_key: defaultCompany.id, company_name: defaultCompany.name, company_gstin: defaultCompany.gstin,
+      });
+    }
+    const jvLabel = (src) => src === 'credit_note' ? 'Credit Note'
+      : src === 'debit_note' ? 'Debit Note'
+      : src === 'tds_entry' ? 'TDS'
+      : 'Journal Voucher';
+    (journalEntries || []).forEach(j => {
+      raw.push({
+        date: j.date,
+        desc: `${jvLabel(j.source)}${j.voucher_no ? ` ${j.voucher_no}` : ''}${j.narration ? `: ${j.narration}` : ''}`,
+        debit: parseFloat(j.debit || 0),
+        credit: parseFloat(j.credit || 0),
+        entry_tag: 'JV',
+        invoice_status: null, invoice_no: null, invoice_date: null,
+        company_key: defaultCompany.id, company_name: defaultCompany.name, company_gstin: defaultCompany.gstin,
+      });
+    });
+
     const scopedRaw = companyFilterId
       ? raw.filter(r => (r.company_key || 'primary') === companyFilterId)
       : raw;
@@ -298,6 +333,7 @@ const PublicLedger = () => {
           invoice_status: row.invoice_status,
           invoice_no: row.invoice_no,
           invoice_date: row.invoice_date,
+          entry_tag: row.entry_tag || null,
           project_id: row.project_id || null,
           Debit: row.debit,
           Credit: row.credit,
@@ -307,7 +343,7 @@ const PublicLedger = () => {
     });
 
     return { allRows: result, fyList: ['ALL', ...sortedFYs] };
-  }, [client, projects, payments, vendorPayments, purchaseInvoices, taxInvoices, companyFilterId]);
+  }, [client, projects, payments, vendorPayments, purchaseInvoices, taxInvoices, journalEntries, openingBalance, companyFilterId]);
 
   // Group client's invoiced projects by invoice_no for the Invoice View panel
   const invoiceGroups = useMemo(() => {

@@ -37,6 +37,11 @@ const {
   sanitizeLlmInvoice,
   supportsAdaptiveThinking,
 } = require('./ai-sanitize');
+const {
+  partyLegNameSet,
+  projectPartyJournalRows,
+  projectOpeningBalance,
+} = require('./ledger-project');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -1368,13 +1373,17 @@ exports.getLedgerData = onCall(
     if (client.ledger_link_enabled === false) throw new HttpsError('permission-denied', 'This ledger link has been disabled.');
     if (client.ledger_link_expires_at && new Date(client.ledger_link_expires_at) < new Date()) throw new HttpsError('permission-denied', 'This ledger link has expired.');
     const col = (name) => db.collection(`artifacts/${appId}/public/data/${name}`);
-    const [projSnap, paySnap, vpaySnap, orgSnap, piSnap, tiSnap] = await Promise.all([
+    const [projSnap, paySnap, vpaySnap, orgSnap, piSnap, tiSnap, jeSnap, obSnap, paSnap] = await Promise.all([
       col('projects').where('client_id', '==', cid).get(),
       col('payments').where('client_id', '==', cid).get(),
       col('vendor_payments').where('vendor_id', '==', cid).get(),
       db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
       col('purchase_invoices').where('vendor_id', '==', cid).get(),
       col('tax_invoices').where('client_id', '==', cid).get(),
+      // No party field to query on — read all and filter by name leg-side below.
+      col('journal_entries').get(),
+      db.doc(`artifacts/${appId}/public/data/opening_balances/clientob_${cid}`).get().catch(() => null),
+      db.doc(`artifacts/${appId}/public/data/party_accounts/${cid}`).get().catch(() => null),
     ]);
     // All external-facing objects use WHITELIST projections (round-15) — money rows,
     // the client doc, projects and org each return only the fields the public ledger
@@ -1384,6 +1393,15 @@ exports.getLedgerData = onCall(
     // Merge each project's money from the gated sibling (base is scrubbed post-slice-3).
     const projectsOut = await Promise.all(projSnap.docs.map(async (d) =>
       ({ id: d.id, ...pickLedgerProject(await mergeProjectFin(appId, d.id, d.data()), cid) })));
+
+    // Party-leg projections of journal_entries + the opening-balance mirror, so
+    // the external ledger reflects manual JVs / CN / DN / TDS / opening balance
+    // and ties out with the in-app derived ledger. Only the party's own leg is
+    // exposed (see projectPartyJournalRows) — the contra account never leaves here.
+    const nameSet = partyLegNameSet(client, (paSnap && paSnap.exists) ? paSnap.data() : null);
+    const journalEntries = projectPartyJournalRows(
+      jeSnap.docs.map((d) => ({ id: d.id, ...d.data() })), nameSet);
+    const openingBalance = projectOpeningBalance((obSnap && obSnap.exists) ? obSnap.data() : null);
     return {
       client: { id: cid, ...pickLedgerClient(client) },
       projects: projectsOut,
@@ -1391,6 +1409,8 @@ exports.getLedgerData = onCall(
       vendorPayments: mapRows(vpaySnap),
       purchaseInvoices: mapRows(piSnap),
       taxInvoices: mapRows(tiSnap),
+      journalEntries,
+      openingBalance,
       org: (orgSnap && orgSnap.exists) ? pickOrgPublic(orgSnap.data()) : null,
     };
   }
