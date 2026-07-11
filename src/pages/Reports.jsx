@@ -95,6 +95,7 @@ const Reports = ({
   const [reportType, setReportType] = useState('ledger');
   const [filterId, setFilterId] = useState(''); // Client ID
   const [selectedProjId, setSelectedProjId] = useState(''); // Project ID
+  const [partyInvoiceFilter, setPartyInvoiceFilter] = useState('');
   const [isConsolidated, setIsConsolidated] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -302,6 +303,122 @@ const Reports = ({
             Outstanding: total - received
           };
         });
+    }
+
+    // --- 11b. Client/Vendor Project Invoice Details ---
+    if (reportType === 'party_project_invoice_details') {
+      if (!filterId) return [];
+
+      const selectedParty = clients.find(c => c.id === filterId);
+      if (!selectedParty) return [];
+
+      const s = startDate ? new Date(startDate) : null;
+      const e = endDate ? new Date(endDate) : null;
+      if (e) e.setHours(23, 59, 59, 999);
+
+      const includesClientProjects = selectedParty.type !== 'Vendor';
+      const includesVendorProjects = selectedParty.type === 'Vendor' || selectedParty.type === 'Both';
+
+      const matched = projects
+        .filter((p) => {
+          let match = false;
+          if (includesClientProjects && p.client_id === filterId) match = true;
+
+          if (!match && includesVendorProjects) {
+            const hasPO = (p.purchase_orders || []).some(po => po.vendor_id === filterId && po.status !== 'Cancelled');
+            const hasAlloc = (p.vendor_allocations || []).some(v => v.vendor_id === filterId);
+            match = hasPO || hasAlloc;
+          }
+
+          if (!match) return false;
+          if (!s && !e) return true;
+
+          const pStart = new Date(p.start_date || p.setup_date || p.end_date);
+          const pEnd = new Date(p.end_date || p.start_date || p.setup_date);
+          if (s && pEnd < s) return false;
+          if (e && pStart > e) return false;
+          return true;
+        })
+        .map((p) => {
+          const clientName = clients.find(c => c.id === p.client_id)?.name || '—';
+          const asClient = p.client_id === filterId;
+          const hasVendorPO = (p.purchase_orders || []).some(po => po.vendor_id === filterId && po.status !== 'Cancelled');
+          const hasVendorAlloc = (p.vendor_allocations || []).some(v => v.vendor_id === filterId);
+
+          let relation = 'Client';
+          if (!asClient && (hasVendorPO || hasVendorAlloc)) relation = 'Vendor';
+          if (asClient && (hasVendorPO || hasVendorAlloc)) relation = 'Client + Vendor';
+
+          const invoiceStatus = p.invoice_status || 'Not Invoiced';
+          const bucket = invoiceStatus === 'Invoiced' ? 'Invoiced' : 'Not Invoiced';
+
+          return {
+            Bucket: bucket,
+            Project: p.project_name,
+            Party: selectedParty.name,
+            Relation: relation,
+            Client: clientName,
+            'Start Date': p.start_date || '—',
+            'End Date': p.end_date || '—',
+            'Project Status': p.status || '—',
+            'Invoice Status': invoiceStatus,
+            'Invoice No': p.invoice_no || '—',
+            'Invoice Date': p.invoice_date || '—',
+            'Project Value': getProjectGrandTotal(p),
+            _bucketOrder: bucket === 'Invoiced' ? 0 : 1,
+          };
+        })
+        .sort((a, b) => {
+          if (a._bucketOrder !== b._bucketOrder) return a._bucketOrder - b._bucketOrder;
+          return new Date(b['End Date']) - new Date(a['End Date']);
+        });
+
+      const visibleRows = !partyInvoiceFilter
+        ? matched
+        : matched.filter(r => r.Bucket === partyInvoiceFilter);
+
+      const invoicedTotal = visibleRows
+        .filter(r => r.Bucket === 'Invoiced')
+        .reduce((sum, r) => sum + (Number(r['Project Value']) || 0), 0);
+      const notInvoicedTotal = visibleRows
+        .filter(r => r.Bucket === 'Not Invoiced')
+        .reduce((sum, r) => sum + (Number(r['Project Value']) || 0), 0);
+
+      return [
+        ...visibleRows,
+        {
+          Bucket: 'TOTAL',
+          Project: `${visibleRows.filter(r => r.Bucket === 'Invoiced').length} Invoiced Projects`,
+          Party: selectedParty.name,
+          Relation: '—',
+          Client: '—',
+          'Start Date': '—',
+          'End Date': '—',
+          'Project Status': '—',
+          'Invoice Status': 'Invoiced',
+          'Invoice No': '—',
+          'Invoice Date': '—',
+          'Project Value': invoicedTotal,
+          _isTotal: true,
+          _bucketOrder: 0,
+        },
+        {
+          Bucket: 'TOTAL',
+          Project: `${visibleRows.filter(r => r.Bucket === 'Not Invoiced').length} Not Invoiced Projects`,
+          Party: selectedParty.name,
+          Relation: '—',
+          Client: '—',
+          'Start Date': '—',
+          'End Date': '—',
+          'Project Status': '—',
+          'Invoice Status': 'Not Invoiced',
+          'Invoice No': '—',
+          'Invoice Date': '—',
+          'Project Value': notInvoicedTotal,
+          _isTotal: true,
+          _bucketOrder: 1,
+        }
+      ];
     }
 
     // --- 7b. Unbilled Shows + Reimbursables (by client) ---
@@ -1188,7 +1305,7 @@ const Reports = ({
     }
 
     return [];
-  }, [reportType, filterId, selectedProjId, startDate, endDate, projects, clients, payments, expenses, employees, vendorPayments, purchaseInvoices, accountingSnapshot]);
+  }, [reportType, filterId, selectedProjId, partyInvoiceFilter, startDate, endDate, projects, clients, payments, expenses, employees, vendorPayments, purchaseInvoices, accountingSnapshot]);
 
   // --- Export Functions ---
   const exportPDF = () => {
@@ -1219,6 +1336,9 @@ const Reports = ({
     } else if(reportType === 'invoice_status') {
        const label = filterId ? `Filter: ${filterId}` : 'All Projects (Completed/Closed)';
        doc.text(label, 14, 34);
+     } else if (reportType === 'party_project_invoice_details') {
+       const partyName = clients.find(c => c.id === filterId)?.name || '—';
+       doc.text(`Party: ${partyName}`, 14, 34);
     } else if(reportType === 'employee_ledger') {
        const empName = employees.find(e => e.id === filterId)?.name;
        doc.text(`Employee: ${empName}`, 14, 34);
@@ -1273,6 +1393,12 @@ const Reports = ({
            const contact = client.contacts.find(c => c.email);
            if (contact) recipientEmail = contact.email;
        }
+    } else if (reportType === 'party_project_invoice_details') {
+       const party = clients.find(c => c.id === filterId);
+       if (party && party.contacts?.length > 0) {
+         const contact = party.contacts.find(c => c.email);
+         if (contact) recipientEmail = contact.email;
+       }
     } else if (reportType === 'vendor_ledger') {
        const vendor = clients.find(c => c.id === filterId);
        if (vendor && vendor.contacts?.length > 0) {
@@ -1299,12 +1425,13 @@ const Reports = ({
         <div className="flex flex-wrap gap-4 items-end">
           <div className="w-full md:w-auto">
             <label className="block text-sm font-medium text-slate-700 mb-1">Report Type</label>
-            <select className="w-full rounded border p-2 min-w-[250px] text-black" value={reportType} onChange={(e) => { setReportType(e.target.value); setFilterId(''); setSelectedProjId(''); }}>
+            <select className="w-full rounded border p-2 min-w-[250px] text-black" value={reportType} onChange={(e) => { setReportType(e.target.value); setFilterId(''); setSelectedProjId(''); setPartyInvoiceFilter(''); }}>
                <option value="ledger">Client Ledger (Statement)</option>
                <option value="client_balance">Client/Vendor Balance Summary</option>
                <option value="vendor_ledger">Vendor Ledger</option>
                <option value="employee_ledger">Employee Ledger</option>
                <option value="invoice_status">Invoiced / Non-Invoiced Projects</option>
+               <option value="party_project_invoice_details">Client/Vendor Invoice Project Details</option>
                <option value="unbilled_shows">Unbilled Shows + Reimbursables (by Client)</option>
                <option value="projects_summary">Revenue Summary (Date Range)</option>
                <option value="rejected_expenses">Rejected Expenses</option>
@@ -1343,6 +1470,28 @@ const Reports = ({
                 <option value="Not Invoiced">Not Invoiced Only</option>
               </select>
             </div>
+          )}
+
+          {reportType === 'party_project_invoice_details' && (
+            <>
+            <div className="w-full md:w-auto">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Select Client / Vendor</label>
+              <select className="w-full rounded border p-2 min-w-[240px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+                <option value="">-- Choose Client / Vendor --</option>
+                {clients.map(c => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.type || 'Client'})</option>
+                ))}
+              </select>
+            </div>
+            <div className="w-full md:w-auto">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Invoice Filter</label>
+              <select className="w-full rounded border p-2 min-w-[200px] text-black" value={partyInvoiceFilter} onChange={(e) => setPartyInvoiceFilter(e.target.value)}>
+                <option value="">All Projects</option>
+                <option value="Invoiced">Invoiced Projects</option>
+                <option value="Not Invoiced">Non Invoiced Projects</option>
+              </select>
+            </div>
+            </>
           )}
 
           {reportType === 'unbilled_shows' && (
@@ -1390,7 +1539,7 @@ const Reports = ({
             </div>
           )}
 
-          {['projects_summary', 'employee_ledger', 'rejected_expenses', 'clarification_expenses', 'invoice_status', 'gst_report', 'gstr1', 'gst_ratewise', 'itc_register', 'pnl_timeline'].includes(reportType) && (
+          {['projects_summary', 'employee_ledger', 'rejected_expenses', 'clarification_expenses', 'invoice_status', 'party_project_invoice_details', 'gst_report', 'gstr1', 'gst_ratewise', 'itc_register', 'pnl_timeline'].includes(reportType) && (
             <>
               <div><label className="block text-sm font-medium text-slate-700 mb-1">From</label><input type="date" className="rounded border p-2 text-black" value={startDate} onChange={e => setStartDate(e.target.value)} /></div>
               <div><label className="block text-sm font-medium text-slate-700 mb-1">To</label><input type="date" className="rounded border p-2 text-black" value={endDate} onChange={e => setEndDate(e.target.value)} /></div>
