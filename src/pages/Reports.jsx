@@ -11,6 +11,7 @@ import * as XLSX from '@e965/xlsx';
 import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2 } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
+import { purchaseGstSplit } from '../utils/aiAccountant';
 import { can } from '../utils/permissions';
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
@@ -1021,6 +1022,9 @@ const Reports = ({
         if (s && d < s) return;
         if (e && d > e) return;
         const gstAmt = parseFloat(pi.gst_amount || 0);
+        // Prefer the split stored on the PI (4a); derive from stored supply_type
+        // otherwise; legacy PIs (no supply_type) show the lump only.
+        const split = purchaseGstSplit(gstAmt, pi.supply_type || 'unknown');
         rows.push({
           Date: pi.invoice_date || '—',
           Source: 'Purchase Invoice',
@@ -1031,6 +1035,9 @@ const Reports = ({
           Description: pi.description || pi.pi_no || '—',
           'Taxable Amount': parseFloat(pi.amount || 0),
           'GST (Input)': gstAmt,
+          CGST: split.cgst,
+          SGST: split.sgst,
+          IGST: split.igst,
           'Total': parseFloat(pi.amount || 0) + gstAmt,
           Status: pi.status || 'Active',
           'Eligible ITC': pi.include_in_ledger ? 'Yes' : 'No',
@@ -1067,6 +1074,9 @@ const Reports = ({
             Description: `PO for: ${p.project_name}`,
             'Taxable Amount': eff.base,
             'GST (Input)': eff.gst,
+            CGST: 0, // PO GST has no stored place-of-supply — kept as lump input
+            SGST: 0,
+            IGST: 0,
             'Total': eff.total,
             Status: po.status || 'Draft',
             'Eligible ITC': hasActualInvoice ? 'Yes' : 'Pending',
@@ -1080,6 +1090,9 @@ const Reports = ({
 
       const totalTaxable = rows.reduce((s, r) => s + r['Taxable Amount'], 0);
       const totalGST = rows.reduce((s, r) => s + r['GST (Input)'], 0);
+      const totalCgst = rows.reduce((s, r) => s + (r.CGST || 0), 0);
+      const totalSgst = rows.reduce((s, r) => s + (r.SGST || 0), 0);
+      const totalIgst = rows.reduce((s, r) => s + (r.IGST || 0), 0);
       const eligibleITC = rows.filter(r => r['Eligible ITC'] === 'Yes').reduce((s, r) => s + r['GST (Input)'], 0);
 
       rows.push({
@@ -1087,6 +1100,9 @@ const Reports = ({
         Description: `${rows.length} entries`,
         'Taxable Amount': totalTaxable,
         'GST (Input)': totalGST,
+        CGST: totalCgst,
+        SGST: totalSgst,
+        IGST: totalIgst,
         Total: totalTaxable + totalGST,
         Status: '',
         'Eligible ITC': `Confirmed: ₹${eligibleITC.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
