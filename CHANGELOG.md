@@ -4,6 +4,15 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.5 — History project filter lists all projects (current FY by default)
+
+The Expenses → History **Project** filter only listed expense-*eligible* projects
+(Confirmed / Ongoing / Completed-within-15-days), so approvers couldn't filter to
+older completed/closed projects to find expenses to share. Now, for approvers, it
+lists **all** projects — scoped to the **current financial year** (Apr–Mar) by
+default, or to the **date range** when one is set. (The Submit form's project picker
+is unchanged — you still log new expenses only against active projects.)
+
 ## 3.6.4 — Approvers see all expenses in History (to share employee submissions)
 
 The **Expenses → History** tab filtered to your **own** expenses (`employee_id === you`),

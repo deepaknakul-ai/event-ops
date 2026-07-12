@@ -117,6 +117,9 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
 
   // Use currentEmpId if available (for mapped employees), otherwise fallback to user.uid
   const effectiveUserId = currentEmpId || user.uid;
+  // Approvers (admin/accountant/manager) manage EVERYONE's expenses — drives the
+  // "see all in History" + all-projects filter below. (Regular users: own only.)
+  const canSeeAllExpenses = can(role, 'expenses', 'approve');
 
   const isProjectEligibleForExpense = (p) => {
     const eligibleStatuses = ['Confirmed', 'Ongoing', 'Completed'];
@@ -133,6 +136,28 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     : projects.filter(p => isProjectEligibleForExpense(p)), [role, projects, effectiveUserId]);
 
   const filteredProjects = useMemo(() => availableProjects.filter(p => p.project_name.toLowerCase().includes(projectSearch.toLowerCase())), [availableProjects, projectSearch]);
+
+  // Projects listed in the History PROJECT filter. Approvers audit/share expenses for
+  // ANY project (not just expense-eligible ones), so list all — but when no date range
+  // is set, scope to the CURRENT financial year (Indian FY, Apr–Mar) to keep it short;
+  // a date range widens/moves the window. Non-approvers keep their eligible list.
+  const fyStartYear = (dstr) => { const d = new Date(dstr); return isNaN(d.getTime()) ? null : (d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear()); };
+  const historyProjects = useMemo(() => {
+    if (!canSeeAllExpenses) return availableProjects;
+    const hasRange = !!(historyFilter.startDate || historyFilter.endDate);
+    const start = historyFilter.startDate ? new Date(historyFilter.startDate) : null;
+    const end = historyFilter.endDate ? new Date(`${historyFilter.endDate}T23:59:59`) : null;
+    const nowFy = fyStartYear(new Date());
+    return projects
+      .filter((p) => {
+        const dstr = p.end_date || p.start_date || p.created_at || p.date;
+        const d = dstr ? new Date(dstr) : null;
+        if (!d || isNaN(d.getTime())) return !hasRange; // undated: only in the default (no-range) view
+        if (hasRange) return (!start || d >= start) && (!end || d <= end);
+        return fyStartYear(d) === nowFy; // no range → current FY
+      })
+      .sort((a, b) => (a.project_name || '').localeCompare(b.project_name || ''));
+  }, [canSeeAllExpenses, availableProjects, projects, historyFilter.startDate, historyFilter.endDate]);
 
   const handleAddToBatch = () => {
     if (!expenseForm.amount || (!expenseForm.is_general && !expenseForm.project_id)) return notify("Fill required fields", 'error');
@@ -372,12 +397,10 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const myAdvances = useMemo(() => advances.filter(a => String(a.employee_id) === String(effectiveUserId)), [advances, effectiveUserId]);
   const myPayouts = useMemo(() => payouts.filter(p => String(p.employee_id) === String(effectiveUserId)), [payouts, effectiveUserId]);
 
-  // Approvers (admin/accountant/manager) manage EVERYONE's expenses, so History
-  // shows all of them — the loaded `expenses` set is already all-expenses for these
-  // roles (App.jsx expensesViewer). This is what lets them find & Share expenses
-  // that OTHER employees submitted; regular users still see only their own. The
+  // History shows all expenses for approvers (the loaded `expenses` set is already
+  // all-expenses for these roles via App.jsx expensesViewer) so they can find & Share
+  // what OTHER employees submitted; regular users still see only their own. The
   // personal Ledger/dashboard below keep using myExpenses (personal balance).
-  const canSeeAllExpenses = can(role, 'expenses', 'approve');
   const historyExpenses = useMemo(
     () => (canSeeAllExpenses ? expenses : myExpenses),
     [canSeeAllExpenses, expenses, myExpenses]
@@ -924,7 +947,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
         <div className="space-y-4">
           <div className="flex flex-wrap gap-4 p-4 bg-white rounded-xl shadow-sm border border-slate-200">
              <select className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.time} onChange={e => setHistoryFilter({...historyFilter, time: e.target.value})}><option value="all">All Time</option><option value="week">This Week</option><option value="month">This Month</option></select>
-             <select className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.project} onChange={e => setHistoryFilter({...historyFilter, project: e.target.value})}><option value="all">All Projects</option>{availableProjects.map(p => <option key={p.id} value={p.id}>{p.project_name}</option>)}</select>
+             <select className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.project} onChange={e => setHistoryFilter({...historyFilter, project: e.target.value})}><option value="all">All Projects</option>{historyProjects.map(p => <option key={p.id} value={p.id}>{p.project_name}</option>)}</select>
              <input type="date" className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.startDate} onChange={e => setHistoryFilter({...historyFilter, startDate: e.target.value})} />
              <input type="date" className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.endDate} onChange={e => setHistoryFilter({...historyFilter, endDate: e.target.value})} />
              <select className="rounded border border-slate-300 p-1 text-sm text-black" value={historyFilter.status} onChange={e => setHistoryFilter({...historyFilter, status: e.target.value})}>
