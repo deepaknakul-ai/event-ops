@@ -4,7 +4,7 @@ import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
 import { formatCurrency, getProjectGrandTotal, getEffectivePOCost } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
-import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight } from 'lucide-react';
+import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
@@ -25,6 +25,7 @@ const PublicLedger = () => {
   const [error, setError] = useState('');
   const [fyFilter, setFyFilter] = useState('ALL');
   const [detailProject, setDetailProject] = useState(null); // project shown in detail modal
+  const [expenseProject, setExpenseProject] = useState(null); // project whose actual-expense + proof drill-in is open
   const [invoiceViewOpen, setInvoiceViewOpen] = useState(false);
   const [selectedInvoiceNo, setSelectedInvoiceNo] = useState(''); // invoice number filter in invoice view
   const companyFilterId = useMemo(() => new URLSearchParams(location.search).get('company') || '', [location.search]);
@@ -414,9 +415,27 @@ const PublicLedger = () => {
       }));
   }, [allRows, fyFilter]);
 
+  // Projects the owner has opted into sharing actual expense details for (with proofs).
+  const sharedExpenseProjects = useMemo(
+    () => (projects || []).filter(p => p.share_expense_details
+      && (((p.direct_expenses || []).length) || ((p.reimbursable_expenses || []).length))),
+    [projects]
+  );
+
   // ── Detail breakdown helpers ────────────────────────────────────────────
   const fmtAmt = (v) => formatCurrency(parseFloat(v) || 0);
   const fmtD = (ds) => ds ? new Date(ds).toLocaleDateString('en-IN') : '—';
+  // Proof link — mirrors PublicReimbursable: the tokenised Storage URL opens in a
+  // new tab; icon picks PDF vs image from the filename/URL.
+  const renderProof = (url, name) => {
+    if (!url) return <span className="text-xs text-slate-300">—</span>;
+    const isPdf = String(name || url).toLowerCase().includes('.pdf');
+    return (
+      <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-teal-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-100 hover:bg-teal-100">
+        {isPdf ? <FileText size={11} /> : <ImageIcon size={11} />} View
+      </a>
+    );
+  };
 
   const getDetailSections = (p) => {
     if (!p) return {};
@@ -728,6 +747,38 @@ const PublicLedger = () => {
             {!selectedInvoiceNo && (
               <div className="p-6 text-center text-slate-400 text-sm">Select an invoice above to view its projects.</div>
             )}
+          </div>
+        )}
+
+        {/* Actual expense transparency — only projects the owner opted into sharing */}
+        {sharedExpenseProjects.length > 0 && (
+          <div className="bg-white rounded-xl border border-teal-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b bg-teal-50 flex items-center gap-2">
+              <Receipt size={18} className="text-teal-600" />
+              <span className="font-semibold text-slate-800">Actual Expense Details</span>
+              <span className="text-xs text-slate-500 hidden sm:inline">— shared at actuals, with proofs</span>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {sharedExpenseProjects.map(p => {
+                const de = p.direct_expenses || [];
+                const re = p.reimbursable_expenses || [];
+                const total = de.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0)
+                  + re.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+                return (
+                  <div key={p.id} className="p-4 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-medium text-slate-800">{p.project_name || 'Project'}</div>
+                      <div className="text-xs text-slate-500">
+                        {de.length} expense{de.length === 1 ? '' : 's'} · {re.length} reimbursable{re.length === 1 ? '' : 's'} · {fmtAmt(total)}
+                      </div>
+                    </div>
+                    <button onClick={() => setExpenseProject(p)} className="shrink-0 inline-flex items-center gap-1.5 text-sm bg-teal-600 text-white px-3 py-1.5 rounded-lg hover:bg-teal-700 transition-colors whitespace-nowrap">
+                      <Eye size={14} /> View Expenses &amp; Proofs
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -1050,6 +1101,115 @@ const PublicLedger = () => {
                   <span className="text-sm font-bold uppercase tracking-wide">Total Project Value</span>
                   <span className="text-2xl font-extrabold">{fmtAmt(grandTotal)}</span>
                 </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Actual Expense & Proof Detail Modal ───────────────────────────── */}
+      {expenseProject && (() => {
+        const p = expenseProject;
+        const de = p.direct_expenses || [];
+        const re = p.reimbursable_expenses || [];
+        const deTotal = de.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+        const reTotal = re.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-4 overflow-y-auto">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-6 overflow-hidden">
+              <div className="bg-teal-700 px-6 py-4 flex items-center justify-between">
+                <div>
+                  <div className="text-white/70 text-xs uppercase tracking-widest">Actual Expenses &amp; Proofs</div>
+                  <div className="text-white text-xl font-bold mt-0.5">{p.project_name}</div>
+                </div>
+                <button onClick={() => setExpenseProject(null)} className="text-white/70 hover:text-white transition-colors"><X size={22} /></button>
+              </div>
+
+              <div className="p-6 space-y-6 overflow-y-auto max-h-[80vh]">
+                {/* Direct / actual expenses */}
+                {de.length > 0 && (
+                  <section>
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-sm font-bold text-slate-700 uppercase tracking-wide">Expenses Incurred</span>
+                      <span className="ml-auto text-sm font-bold text-teal-700">{fmtAmt(deTotal)}</span>
+                    </div>
+                    <div className="overflow-x-auto rounded-xl border border-slate-200">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+                          <tr>
+                            <th className="p-2 text-left">Date</th>
+                            <th className="p-2 text-left">Category</th>
+                            <th className="p-2 text-left">Description</th>
+                            <th className="p-2 text-right">Amount</th>
+                            <th className="p-2 text-center">Proof</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {de.map((e, i) => (
+                            <tr key={i} className="hover:bg-slate-50">
+                              <td className="p-2 text-slate-500 whitespace-nowrap">{fmtD(e.date)}</td>
+                              <td className="p-2">
+                                <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{e.category || '—'}</span>
+                                {e.status && e.status !== 'Approved' && <span className="ml-1 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">{e.status}</span>}
+                              </td>
+                              <td className="p-2 text-slate-700">{e.description || '—'}</td>
+                              <td className="p-2 text-right font-semibold text-slate-800">{fmtAmt(e.amount)}</td>
+                              <td className="p-2 text-center">{renderProof(e.proof_url, e.proof_name)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-teal-50">
+                          <tr><td colSpan={3} className="p-2 text-right text-xs font-bold text-teal-700 uppercase">Subtotal</td><td className="p-2 text-right font-bold text-teal-700">{fmtAmt(deTotal)}</td><td /></tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {/* Reimbursable expenses (with proofs) */}
+                {re.length > 0 && (
+                  <section>
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-sm font-bold text-slate-700 uppercase tracking-wide">Reimbursable Expenses</span>
+                      <span className="ml-auto text-sm font-bold text-teal-700">{fmtAmt(reTotal)}</span>
+                    </div>
+                    <div className="overflow-x-auto rounded-xl border border-slate-200">
+                      <table className="w-full text-sm">
+                        <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+                          <tr>
+                            <th className="p-2 text-left">Date</th>
+                            <th className="p-2 text-left">Description</th>
+                            <th className="p-2 text-right">Amount</th>
+                            <th className="p-2 text-center">Proof</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {re.map((e, i) => (
+                            <tr key={i} className="hover:bg-slate-50">
+                              <td className="p-2 text-slate-500 whitespace-nowrap">{fmtD(e.date)}</td>
+                              <td className="p-2 text-slate-700">{e.description || e.category || '—'}</td>
+                              <td className="p-2 text-right font-semibold text-slate-800">{fmtAmt(e.amount)}</td>
+                              <td className="p-2 text-center">{renderProof(e.proof_url, e.proof_name)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-teal-50">
+                          <tr><td colSpan={2} className="p-2 text-right text-xs font-bold text-teal-700 uppercase">Subtotal</td><td className="p-2 text-right font-bold text-teal-700">{fmtAmt(reTotal)}</td><td /></tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {de.length === 0 && re.length === 0 && (
+                  <div className="text-center text-slate-400 py-8">No expense details shared for this project.</div>
+                )}
+
+                <div className="rounded-xl bg-teal-700 text-white px-6 py-4 flex items-center justify-between">
+                  <span className="text-sm font-bold uppercase tracking-wide">Total Actual Expenses</span>
+                  <span className="text-2xl font-extrabold">{fmtAmt(deTotal + reTotal)}</span>
+                </div>
+                <p className="text-[11px] text-slate-400">Proofs open in a new tab. Figures are actuals recorded by {orgSettings?.name || 'us'} for this project.</p>
               </div>
             </div>
           </div>

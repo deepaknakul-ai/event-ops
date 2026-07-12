@@ -5,7 +5,7 @@ import {
   AlertCircle, ArrowDownRight, ArrowLeft, ArrowUpRight, Calculator, CheckCircle, ChevronDown, ChevronUp,
   ClipboardList, Clock, Copy, Download, Edit, FileCheck, FileText, History, ListChecks,
   MessageCircle, Monitor, Package, Percent, Plus, Printer, Receipt, RotateCcw,
-  Search, Share2, Trash2, Truck, TrendingUp, Users, X, Zap, Upload, Image as ImageIcon, MapPin
+  Search, Share2, Trash2, Truck, TrendingUp, Users, X, Zap, Upload, Image as ImageIcon, MapPin, Eye
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
@@ -972,6 +972,27 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setReimbursableShareUrl(url);
     setIsReimbursableShareOpen(true);
     logAction('projects', 'share_reimbursable', selectedProject.id, {}, selectedProject.project_name);
+  };
+
+  // Per-project opt-in: when ON, this project's ACTUAL expenses + reimbursables
+  // (with employee-submitted proof images/PDFs) become visible to the client on
+  // their existing ledger link. Off by default; reveals real cost/margin, so it
+  // is a deliberate per-project choice. Enforced server-side in getLedgerData.
+  const toggleShareExpenseDetails = async () => {
+    if (!can(role, 'projects', 'edit')) return addToast('Access denied.', 'error');
+    if (!selectedProject) return;
+    const next = !selectedProject.share_expense_details;
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
+        share_expense_details: next, updated_at: serverTimestamp(),
+      });
+      logAction('projects', next ? 'share_expenses_on' : 'share_expenses_off', selectedProject.id, {}, selectedProject.project_name);
+      addToast(next
+        ? 'Actual expense details + proofs will now show on the client ledger link.'
+        : 'Expense sharing turned off for this project.', 'success');
+    } catch (e) {
+      addToast('Failed to update sharing: ' + e.message, 'error');
+    }
   };
 
   const reimbursableTotal = useMemo(() => {
@@ -2946,7 +2967,16 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                 <Receipt size={20} className="text-teal-600" /> Client Reimbursable Expenses
                 <span className="text-xs font-normal text-slate-400 ml-1">(As Actual)</span>
               </h3>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                {can(role, 'projects', 'edit') && (
+                  <button
+                    onClick={toggleShareExpenseDetails}
+                    title="When ON, this project's actual expenses + reimbursables (with proofs) show on the client's ledger link"
+                    className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition ${selectedProject.share_expense_details ? 'border-teal-600 bg-teal-600 text-white hover:bg-teal-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                  >
+                    <Eye size={14} /> {selectedProject.share_expense_details ? 'Visible on ledger link' : 'Show on ledger link'}
+                  </button>
+                )}
                 {(selectedProject.reimbursable_expenses || []).length > 0 && (
                   <button onClick={handleShareReimbursable} className="flex items-center gap-1.5 rounded-lg border border-teal-200 px-3 py-1.5 text-sm text-teal-700 hover:bg-teal-50 transition">
                     <Share2 size={14} /> Share with Client

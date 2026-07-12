@@ -126,9 +126,57 @@ function selectVendorProjectPOs(finDocs, cid, clientPids) {
   return out;
 }
 
+/**
+ * EXTERNAL whitelist projection of `expenses`-collection rows for a project the
+ * owner has flagged `share_expense_details`. Drops rejected/disapproved rows (to
+ * match the project's direct_expense_total) and NEVER emits the submitting
+ * employee, project_id, storage path, or internal ids — only date/category/
+ * description/amount/status + the proof link the client opens.
+ * @param {Array<object>} rows  raw expense docs
+ * @returns {Array<{date,category,description,amount,status,proof_url,proof_name}>}
+ */
+function projectSharedExpenses(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((e) => e && e.status !== 'Rejected' && e.status !== 'Disapproved')
+    .map((e) => ({
+      date: e.date || '',
+      category: e.category || '',
+      description: e.remarks || '',
+      amount: round2(e.amount),
+      status: e.status || '',
+      proof_url: typeof e.proof_url === 'string' ? e.proof_url : '',
+      proof_name: typeof e.proof_name === 'string' ? e.proof_name : '',
+    }));
+}
+
+/**
+ * Whitelist projection of a project's embedded reimbursable_expenses[] for the
+ * client ledger. Amounts always show (existing behaviour); proof links ride along
+ * ONLY when the project is flagged for expense sharing. Never emits the storage
+ * path, internal id, created_at, or free-text remarks.
+ * @param {Array<object>} rows
+ * @param {boolean} includeProofs  true only when share_expense_details is on
+ */
+function projectSharedReimbursables(rows, includeProofs) {
+  return (Array.isArray(rows) ? rows : []).map((e) => ({
+    date: e.date || '',
+    description: e.description || '',
+    category: e.category || '',
+    amount: round2(e.amount),
+    ...(includeProofs
+      ? {
+        proof_url: typeof e.proof_url === 'string' ? e.proof_url : '',
+        proof_name: typeof e.proof_name === 'string' ? e.proof_name : '',
+      }
+      : {}),
+  }));
+}
+
 module.exports = {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
   selectVendorProjectPOs,
+  projectSharedExpenses,
+  projectSharedReimbursables,
 };

@@ -42,6 +42,8 @@ const {
   projectPartyJournalRows,
   projectOpeningBalance,
   selectVendorProjectPOs,
+  projectSharedExpenses,
+  projectSharedReimbursables,
 } = require('./ledger-project');
 
 admin.initializeApp();
@@ -1341,6 +1343,9 @@ async function mergeProjectFin(appId, id, data) {
 
 function pickLedgerProject(data, cid) {
   const d = data || {};
+  // Per-project opt-in: only when the owner flags share_expense_details do proof
+  // links ride along (reimbursables) and does getLedgerData attach direct_expenses.
+  const shareExp = d.share_expense_details === true;
   return {
     client_id: d.client_id || '',
     project_name: d.project_name || '',
@@ -1357,7 +1362,8 @@ function pickLedgerProject(data, cid) {
     package_cost_gst: d.package_cost_gst ?? 0,
     items: d.items || [],
     logistics_costs: d.logistics_costs || {},
-    reimbursable_expenses: d.reimbursable_expenses || [],
+    reimbursable_expenses: projectSharedReimbursables(d.reimbursable_expenses, shareExp),
+    share_expense_details: shareExp,
     purchase_orders: (d.purchase_orders || []).filter((po) => po && po.vendor_id === cid),
   };
 }
@@ -1404,6 +1410,23 @@ exports.getLedgerData = onCall(
     const clientPids = new Set(clientDocs.map((d) => d.id));
     const clientProjectsOut = await Promise.all(clientDocs.map(async (d) =>
       ({ id: d.id, ...pickLedgerProject(await mergeProjectFin(appId, d.id, d.data()), cid) })));
+
+    // Actual-expense transparency (opt-in): for the client's OWN projects flagged
+    // share_expense_details, fetch the `expenses` collection (project_id linkage)
+    // and attach a whitelisted `direct_expenses` payload so the client can see the
+    // real spend + open each employee-submitted proof. Non-flagged projects fetch
+    // nothing — safe-by-default, same posture as the whole endpoint.
+    const flaggedPids = clientDocs.filter((d) => d.data().share_expense_details === true).map((d) => d.id);
+    if (flaggedPids.length) {
+      const expSnaps = await Promise.all(
+        flaggedPids.map((pid) => col('expenses').where('project_id', '==', pid).get().catch(() => null)));
+      const expenseByPid = new Map();
+      flaggedPids.forEach((pid, i) => {
+        const snap = expSnaps[i];
+        expenseByPid.set(pid, snap ? projectSharedExpenses(snap.docs.map((x) => x.data())) : []);
+      });
+      clientProjectsOut.forEach((p) => { if (expenseByPid.has(p.id)) p.direct_expenses = expenseByPid.get(p.id); });
+    }
 
     // Vendor POs are embedded in OTHER parties' projects. Post field-split they sit
     // in the gated project_financials sibling, but a not-yet-scrubbed project may

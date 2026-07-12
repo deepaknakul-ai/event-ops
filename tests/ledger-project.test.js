@@ -4,6 +4,8 @@ import {
   projectPartyJournalRows,
   projectOpeningBalance,
   selectVendorProjectPOs,
+  projectSharedExpenses,
+  projectSharedReimbursables,
 } from '../functions/ledger-project.js';
 
 describe('partyLegNameSet', () => {
@@ -172,5 +174,62 @@ describe('selectVendorProjectPOs', () => {
     expect(selectVendorProjectPOs(finDocs, VID, ['projA', 'projOwn']).map((r) => r.pid)).toEqual([]);
     expect(selectVendorProjectPOs([], VID, new Set())).toEqual([]);
     expect(selectVendorProjectPOs(null, VID, null)).toEqual([]);
+  });
+});
+
+describe('projectSharedExpenses', () => {
+  const raw = [
+    { date: '2026-05-01', category: 'Travel', remarks: 'Cab to venue', amount: 1200, status: 'Approved',
+      proof_url: 'https://fb/o/x?token=1', proof_name: 'cab.jpg',
+      employee_id: 'emp-7', project_id: 'projA', proof_path: 'expense-proofs/app/x.jpg', is_general: false },
+    { date: '2026-05-02', category: 'Food', remarks: 'Crew lunch', amount: 800, status: 'Pending', proof_url: '', proof_name: '' },
+    { date: '2026-05-03', category: 'Misc', remarks: 'bogus', amount: 500, status: 'Rejected' },
+    { date: '2026-05-04', category: 'Misc', remarks: 'nope', amount: 400, status: 'Disapproved' },
+  ];
+
+  it('keeps non-rejected rows and maps remarks→description', () => {
+    const out = projectSharedExpenses(raw);
+    expect(out).toHaveLength(2); // Rejected + Disapproved dropped
+    expect(out[0]).toMatchObject({ date: '2026-05-01', category: 'Travel', description: 'Cab to venue', amount: 1200, status: 'Approved', proof_name: 'cab.jpg' });
+    expect(out[1]).toMatchObject({ description: 'Crew lunch', amount: 800, status: 'Pending' });
+  });
+
+  it('NEVER leaks employee, project_id, storage path or internal flags', () => {
+    const out = projectSharedExpenses(raw);
+    expect(Object.keys(out[0]).sort()).toEqual(
+      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url', 'status'].sort());
+    const blob = JSON.stringify(out);
+    expect(blob).not.toContain('emp-7');
+    expect(blob).not.toContain('projA');
+    expect(blob).not.toContain('expense-proofs');
+  });
+
+  it('tolerates empty / non-array input', () => {
+    expect(projectSharedExpenses([])).toEqual([]);
+    expect(projectSharedExpenses(null)).toEqual([]);
+  });
+});
+
+describe('projectSharedReimbursables', () => {
+  const raw = [{ id: 'r1', date: '2026-05-01', description: 'Flowers', category: 'Decor', amount: 2500,
+    remarks: 'internal note', proof_url: 'https://fb/o/y?token=2', proof_name: 'bill.pdf', proof_path: 'reimbursable-proofs/app/y.pdf', created_at: 'x' }];
+
+  it('always emits amount, only emits proofs when the project is flagged', () => {
+    const off = projectSharedReimbursables(raw, false);
+    expect(off[0]).toEqual({ date: '2026-05-01', description: 'Flowers', category: 'Decor', amount: 2500 });
+    expect(off[0].proof_url).toBeUndefined();
+    const on = projectSharedReimbursables(raw, true);
+    expect(on[0]).toMatchObject({ amount: 2500, proof_url: 'https://fb/o/y?token=2', proof_name: 'bill.pdf' });
+  });
+
+  it('never leaks remarks / internal id / storage path even when flagged', () => {
+    const blob = JSON.stringify(projectSharedReimbursables(raw, true));
+    expect(blob).not.toContain('internal note');
+    expect(blob).not.toContain('reimbursable-proofs');
+    expect(blob).not.toContain('r1');
+  });
+
+  it('tolerates empty / non-array input', () => {
+    expect(projectSharedReimbursables(null, true)).toEqual([]);
   });
 });
