@@ -1153,7 +1153,6 @@ const PublicLedger = () => {
                               <td className="p-2 text-slate-500 whitespace-nowrap">{fmtD(e.date)}</td>
                               <td className="p-2">
                                 <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{e.category || '—'}</span>
-                                {e.status && e.status !== 'Approved' && <span className="ml-1 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">{e.status}</span>}
                               </td>
                               <td className="p-2 text-slate-700">{e.description || '—'}</td>
                               <td className="p-2 text-right font-semibold text-slate-800">{fmtAmt(e.amount)}</td>

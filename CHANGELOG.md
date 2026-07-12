@@ -4,6 +4,21 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.3 — Share any decided expense (not just approved)
+
+3.6.1 only offered the **Share** toggle on *Approved* expenses, so Pending/Disapproved
+ones showed no toggle — making it look like only reimbursables could be shared. Now:
+
+- The **Share** toggle (Expenses → History) appears on any **decided** expense —
+  **Approved or Disapproved** — for project-linked, admin/accountant/manager users.
+  The **admin's share decision**, not approval status, controls what the client sees.
+- Shared direct expenses show to the client **per project, with proof**, on their
+  ledger link (the *Actual Expense Details* panel). They are **transparency-only** —
+  the ledger **balance is unchanged** (client still owes *project cost + reimbursables*);
+  a shared expense is never added to what's owed.
+- The **internal approval status is no longer sent to the client** — they see only
+  date / category / description / amount / proof.
+
 ## 3.6.2 — Version badge + logistics input fix
 
 **Visible running-version badge.** The build version was only in `/version.json` and

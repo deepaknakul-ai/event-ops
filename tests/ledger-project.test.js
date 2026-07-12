@@ -188,21 +188,22 @@ describe('projectSharedExpenses', () => {
     { date: '2026-05-04', category: 'Misc', remarks: 'nope', amount: 400, status: 'Disapproved' },
   ];
 
-  it('keeps non-rejected rows and maps remarks→description', () => {
+  it('keeps ALL shared rows regardless of status and maps remarks→description', () => {
     const out = projectSharedExpenses(raw);
-    expect(out).toHaveLength(2); // Rejected + Disapproved dropped
-    expect(out[0]).toMatchObject({ date: '2026-05-01', category: 'Travel', description: 'Cab to venue', amount: 1200, status: 'Approved', proof_name: 'cab.jpg' });
-    expect(out[1]).toMatchObject({ description: 'Crew lunch', amount: 800, status: 'Pending' });
+    expect(out).toHaveLength(4); // approved, pending, rejected, disapproved all kept — admin decides
+    expect(out[0]).toMatchObject({ date: '2026-05-01', category: 'Travel', description: 'Cab to venue', amount: 1200, proof_name: 'cab.jpg' });
+    expect(out[3]).toMatchObject({ category: 'Misc', description: 'nope', amount: 400 });
   });
 
-  it('NEVER leaks employee, project_id, storage path or internal flags', () => {
+  it('NEVER leaks employee, project_id, storage path, or internal approval status', () => {
     const out = projectSharedExpenses(raw);
     expect(Object.keys(out[0]).sort()).toEqual(
-      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url', 'status'].sort());
+      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url'].sort());
     const blob = JSON.stringify(out);
     expect(blob).not.toContain('emp-7');
     expect(blob).not.toContain('projA');
     expect(blob).not.toContain('expense-proofs');
+    expect(blob).not.toContain('Disapproved'); // internal status never surfaces
   });
 
   it('tolerates empty / non-array input', () => {
@@ -245,24 +246,25 @@ describe('groupClientSharedExpenses', () => {
     { project_id: 'pZ', status: 'Approved', shared_with_client: true, category: 'X', amount: 999 },      // another client's project
   ];
 
-  it('keeps only approved + shared + client-owned expenses, grouped by project', () => {
+  it('keeps shared + client-owned expenses regardless of status, grouped by project', () => {
     const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
     expect(Object.keys(g).sort()).toEqual(['pA', 'pB']);
-    expect(g.pA).toHaveLength(1);
+    expect(g.pA).toHaveLength(1); // the non-shared pA row is excluded
     expect(g.pA[0]).toMatchObject({ category: 'Travel', description: 'Cab', amount: 500 });
-    expect(g.pB[0]).toMatchObject({ category: 'Stay', amount: 4000 });
+    expect(g.pB).toHaveLength(2); // Pending + Approved, both shared → both shown (admin decides)
+    expect(g.pB.map((r) => r.amount).sort((a, b) => a - b)).toEqual([200, 4000]);
   });
 
-  it('drops another client\'s project even if approved+shared', () => {
+  it('drops another client\'s project even if shared', () => {
     const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
     expect(g.pZ).toBeUndefined();
   });
 
-  it('whitelists rows — employee id never survives grouping', () => {
+  it('whitelists rows — employee id and status never survive grouping', () => {
     const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
     expect(JSON.stringify(g)).not.toContain('emp-1');
     expect(Object.keys(g.pA[0]).sort()).toEqual(
-      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url', 'status'].sort());
+      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url'].sort());
   });
 
   it('accepts a plain array of pids and tolerates empty input', () => {

@@ -127,23 +127,23 @@ function selectVendorProjectPOs(finDocs, cid, clientPids) {
 }
 
 /**
- * EXTERNAL whitelist projection of `expenses`-collection rows for a project the
- * owner has flagged `share_expense_details`. Drops rejected/disapproved rows (to
- * match the project's direct_expense_total) and NEVER emits the submitting
- * employee, project_id, storage path, or internal ids — only date/category/
- * description/amount/status + the proof link the client opens.
- * @param {Array<object>} rows  raw expense docs
- * @returns {Array<{date,category,description,amount,status,proof_url,proof_name}>}
+ * EXTERNAL whitelist projection of `expenses`-collection rows an admin has marked
+ * `shared_with_client`. The admin's share decision — not approval status — gates
+ * visibility (an approved OR disapproved expense can be shared). NEVER emits the
+ * submitting employee, project_id, storage path, internal ids, or the internal
+ * approval status — only date/category/description/amount + the proof link the
+ * client opens. These are transparency-only; they do NOT enter the ledger balance.
+ * @param {Array<object>} rows  raw expense docs (already filtered to shared)
+ * @returns {Array<{date,category,description,amount,proof_url,proof_name}>}
  */
 function projectSharedExpenses(rows) {
   return (Array.isArray(rows) ? rows : [])
-    .filter((e) => e && e.status !== 'Rejected' && e.status !== 'Disapproved')
+    .filter((e) => e)
     .map((e) => ({
       date: e.date || '',
       category: e.category || '',
       description: e.remarks || '',
       amount: round2(e.amount),
-      status: e.status || '',
       proof_url: typeof e.proof_url === 'string' ? e.proof_url : '',
       proof_name: typeof e.proof_name === 'string' ? e.proof_name : '',
     }));
@@ -173,12 +173,13 @@ function projectSharedReimbursables(rows, includeProofs) {
 }
 
 /**
- * Group per-expense-shared expenses onto the client's OWN projects. An expense
- * reaches the client ledger only when finance marked it `shared_with_client`
- * AND it is Approved AND its `project_id` is one of the client's projects. Each
- * surviving project's rows are whitelisted via projectSharedExpenses (identity /
- * path / internal fields stripped). Returns a plain map { [project_id]: rows }.
- * @param {Array<object>} expenseDocs  raw expense docs (already filtered to shared_with_client==true is fine, re-checked here)
+ * Group admin-shared expenses onto the client's OWN projects. An expense reaches
+ * the client ledger only when an admin marked it `shared_with_client` AND its
+ * `project_id` is one of the client's projects — approval status does NOT gate it
+ * (the Expenses UI only offers the toggle on decided expenses, but the server just
+ * honors the flag). Each project's rows are whitelisted via projectSharedExpenses
+ * (identity / path / status / internal fields stripped). Returns { [project_id]: rows }.
+ * @param {Array<object>} expenseDocs  raw expense docs
  * @param {Set<string>|string[]} clientPids  the client's own project ids
  * @returns {Object<string, Array>}
  */
@@ -186,7 +187,7 @@ function groupClientSharedExpenses(expenseDocs, clientPids) {
   const owned = clientPids instanceof Set ? clientPids : new Set(clientPids || []);
   const byPid = {};
   (Array.isArray(expenseDocs) ? expenseDocs : []).forEach((e) => {
-    if (!e || e.status !== 'Approved' || e.shared_with_client !== true) return;
+    if (!e || e.shared_with_client !== true) return;
     const pid = e.project_id;
     if (!pid || !owned.has(pid)) return;
     (byPid[pid] = byPid[pid] || []).push(e);
