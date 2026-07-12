@@ -4,6 +4,16 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.4 — Approvers see all expenses in History (to share employee submissions)
+
+The **Expenses → History** tab filtered to your **own** expenses (`employee_id === you`),
+so admins/accountants/managers couldn't see — or **Share** — expenses that *other*
+employees submitted; only their own (e.g. project quick-expenses) showed, which looked
+like "only reimbursables can be shared." Now **approvers see all expenses in History**
+(use the **Project** filter to focus one job), so they can find and Share any employee's
+project expense with the client. Regular users still see only their own, and the personal
+Ledger/balance is unchanged.
+
 ## 3.6.3 — Share any decided expense (not just approved)
 
 3.6.1 only offered the **Share** toggle on *Approved* expenses, so Pending/Disapproved

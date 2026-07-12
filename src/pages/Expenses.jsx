@@ -372,7 +372,21 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const myAdvances = useMemo(() => advances.filter(a => String(a.employee_id) === String(effectiveUserId)), [advances, effectiveUserId]);
   const myPayouts = useMemo(() => payouts.filter(p => String(p.employee_id) === String(effectiveUserId)), [payouts, effectiveUserId]);
 
-  const filteredHistory = useMemo(() => myExpenses.filter(e => {
+  // Approvers (admin/accountant/manager) manage EVERYONE's expenses, so History
+  // shows all of them — the loaded `expenses` set is already all-expenses for these
+  // roles (App.jsx expensesViewer). This is what lets them find & Share expenses
+  // that OTHER employees submitted; regular users still see only their own. The
+  // personal Ledger/dashboard below keep using myExpenses (personal balance).
+  const canSeeAllExpenses = can(role, 'expenses', 'approve');
+  const historyExpenses = useMemo(
+    () => (canSeeAllExpenses ? expenses : myExpenses),
+    [canSeeAllExpenses, expenses, myExpenses]
+  );
+  // Name of the employee who submitted an expense (History lists everyone's for
+  // approvers). Empty string if the id doesn't resolve — the label just hides.
+  const empName = (id) => employees.find((e) => String(e.id) === String(id))?.name || '';
+
+  const filteredHistory = useMemo(() => historyExpenses.filter(e => {
     const d = new Date(e.date);
     const now = new Date();
     const isWeek = (now - d) / (1000 * 3600 * 24) <= 7;
@@ -397,7 +411,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
               ? e.status !== 'Approved' && !isExpenseExcludedStatus(e.status)
               : true;
     return timeMatch && projMatch && startMatch && endMatch && statusMatch;
-  }), [myExpenses, historyFilter]);
+  }), [historyExpenses, historyFilter]);
 
   useEffect(() => {
     setHistoryPage(1);
@@ -929,6 +943,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                     <div>
                       <div className="text-xs text-slate-500">{new Date(exp.date).toLocaleDateString()}</div>
                       <div className="font-medium text-slate-800 text-sm mt-0.5">{exp.is_general ? <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded text-xs">General Ops</span> : projects.find(p=>p.id===exp.project_id)?.project_name}</div>
+                      {canSeeAllExpenses && empName(exp.employee_id) && <div className="text-[11px] text-slate-400">by {empName(exp.employee_id)}</div>}
                     </div>
                     <div className="text-right">
                       <div className="text-base font-bold text-slate-900">{formatCurrency(exp.amount)}</div>
@@ -958,7 +973,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
               {filteredHistory.length === 0 && <div className="p-8 text-center text-slate-400">No records found.</div>}
             </div>
             {/* Desktop table layout for history */}
-            <div className="hidden md:block rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm text-black"><thead className="bg-slate-50 text-slate-700 font-semibold"><tr><th className="p-4">Date</th><th className="p-4">Project / Type</th><th className="p-4">Category</th><th className="p-4 text-right">Amount</th><th className="p-4 text-center">Status</th><th className="p-4 text-center">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{paginatedHistory.map(exp => (<tr key={exp.id}><td className="p-4 whitespace-nowrap">{new Date(exp.date).toLocaleDateString()}</td><td className="p-4 text-black">{exp.is_general ? <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded text-xs">General Ops</span> : projects.find(p=>p.id===exp.project_id)?.project_name}</td><td className="p-4">{exp.category}{exp.proof_url && <div className="mt-1"><ProofBadge proof_url={exp.proof_url} /></div>}</td><td className="p-4 text-right font-medium whitespace-nowrap">{formatCurrency(exp.amount)}</td><td className="p-4 text-center"><div className="flex flex-col items-center gap-2"><span className="text-xs bg-slate-100 px-2 py-1 rounded">{exp.status}</span>{exp.status === 'Clarification' && (<div className="flex flex-col items-center gap-2"><span className="text-xs text-amber-700">{exp.clarification_request || 'Clarification requested'}</span><button onClick={() => handleSubmitClarification(exp)} className="rounded bg-amber-600 px-2 py-1 text-xs text-white hover:bg-amber-700">Submit Clarification</button></div>)}{exp.status === 'Disapproved' && exp.disapproved_reason && (<span className="text-xs text-red-600">{exp.disapproved_reason}</span>)}</div></td><td className="p-4 text-center">{isEditableExpense(exp) ? (<div className="flex items-center justify-center gap-2"><button onClick={() => handleOpenEdit(exp)} className="p-1 text-blue-600 hover:bg-blue-50 rounded" title="Edit"><Edit size={16} /></button><button onClick={() => handleDeleteExpense(exp)} className="p-1 text-red-600 hover:bg-red-50 rounded" title="Delete"><Trash2 size={16} /></button></div>) : !exp.is_general ? (can(role, 'expenses', 'approve') ? (<button onClick={() => handleToggleShareExpense(exp)} title={exp.shared_with_client ? 'Shared with client — click to unshare' : 'Share with client on their ledger link'} className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium border ${exp.shared_with_client ? 'text-teal-700 bg-teal-50 hover:bg-teal-100 border-teal-200' : 'text-slate-500 hover:bg-slate-100 border-slate-200'}`}><Share2 size={13} /> {exp.shared_with_client ? 'Shared' : 'Share'}</button>) : (exp.shared_with_client ? <span className="inline-flex items-center gap-1 text-xs text-teal-600"><Share2 size={12} /> Shared</span> : <span className="text-xs text-slate-400">-</span>)) : <span className="text-xs text-slate-400">-</span>}</td></tr>))}</tbody></table>{filteredHistory.length === 0 && <div className="p-8 text-center text-slate-400">No records found.</div>}</div></div>
+            <div className="hidden md:block rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden"><div className="overflow-x-auto"><table className="w-full text-left text-sm text-black"><thead className="bg-slate-50 text-slate-700 font-semibold"><tr><th className="p-4">Date</th><th className="p-4">Project / Type</th><th className="p-4">Category</th><th className="p-4 text-right">Amount</th><th className="p-4 text-center">Status</th><th className="p-4 text-center">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{paginatedHistory.map(exp => (<tr key={exp.id}><td className="p-4 whitespace-nowrap">{new Date(exp.date).toLocaleDateString()}</td><td className="p-4 text-black">{exp.is_general ? <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded text-xs">General Ops</span> : projects.find(p=>p.id===exp.project_id)?.project_name}{canSeeAllExpenses && empName(exp.employee_id) && <span className="block text-[11px] text-slate-400">by {empName(exp.employee_id)}</span>}</td><td className="p-4">{exp.category}{exp.proof_url && <div className="mt-1"><ProofBadge proof_url={exp.proof_url} /></div>}</td><td className="p-4 text-right font-medium whitespace-nowrap">{formatCurrency(exp.amount)}</td><td className="p-4 text-center"><div className="flex flex-col items-center gap-2"><span className="text-xs bg-slate-100 px-2 py-1 rounded">{exp.status}</span>{exp.status === 'Clarification' && (<div className="flex flex-col items-center gap-2"><span className="text-xs text-amber-700">{exp.clarification_request || 'Clarification requested'}</span><button onClick={() => handleSubmitClarification(exp)} className="rounded bg-amber-600 px-2 py-1 text-xs text-white hover:bg-amber-700">Submit Clarification</button></div>)}{exp.status === 'Disapproved' && exp.disapproved_reason && (<span className="text-xs text-red-600">{exp.disapproved_reason}</span>)}</div></td><td className="p-4 text-center">{isEditableExpense(exp) ? (<div className="flex items-center justify-center gap-2"><button onClick={() => handleOpenEdit(exp)} className="p-1 text-blue-600 hover:bg-blue-50 rounded" title="Edit"><Edit size={16} /></button><button onClick={() => handleDeleteExpense(exp)} className="p-1 text-red-600 hover:bg-red-50 rounded" title="Delete"><Trash2 size={16} /></button></div>) : !exp.is_general ? (can(role, 'expenses', 'approve') ? (<button onClick={() => handleToggleShareExpense(exp)} title={exp.shared_with_client ? 'Shared with client — click to unshare' : 'Share with client on their ledger link'} className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium border ${exp.shared_with_client ? 'text-teal-700 bg-teal-50 hover:bg-teal-100 border-teal-200' : 'text-slate-500 hover:bg-slate-100 border-slate-200'}`}><Share2 size={13} /> {exp.shared_with_client ? 'Shared' : 'Share'}</button>) : (exp.shared_with_client ? <span className="inline-flex items-center gap-1 text-xs text-teal-600"><Share2 size={12} /> Shared</span> : <span className="text-xs text-slate-400">-</span>)) : <span className="text-xs text-slate-400">-</span>}</td></tr>))}</tbody></table>{filteredHistory.length === 0 && <div className="p-8 text-center text-slate-400">No records found.</div>}</div></div>
             {filteredHistory.length > historyItemsPerPage && (
             <div className="flex items-center justify-between p-4 border-t bg-white bg-slate-50 border-slate-200">
               <div className="text-sm text-slate-500">
