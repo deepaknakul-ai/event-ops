@@ -4,6 +4,22 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.2 — Version badge + logistics input fix
+
+**Visible running-version badge.** The build version was only in `/version.json` and
+a near-invisible sidebar line (`text-slate-300`, 10px). Now the **sidebar footer shows
+a clear version badge** (`v<x.y.z> · <sha> · <date>`); clicking it opens `/version.json`
+— the authoritative **live** deploy stamp, so you can confirm what's actually running
+even if the browser cached an older bundle. The login screen already showed the version.
+
+**Logistics cost inputs no longer "sticky."** The Travel / Accommodation / Transport /
+Food & Beverage amount and description fields in a project's *Logistics & Services*
+section wrote to Firestore on **every keystroke** — each character triggered a network
+round-trip + snapshot re-render that reverted the field mid-type, so typing felt laggy
+and the cursor jumped. They now use a **commit-on-blur** input (`CommitInput`): you type
+freely into local state and it saves when you leave the field or press Enter. Also shows
+an empty box instead of a stubborn `0`. GST dropdowns were unaffected (discrete changes).
+
 ## 3.6.1 — Expense sharing is now per-expense (approved only)
 
 **Why.** 3.6.0 gated direct expenses at the *project* level and showed every

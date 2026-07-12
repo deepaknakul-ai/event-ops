@@ -3804,7 +3804,16 @@ const [payroll, setPayroll] = useState([]);
           {impersonating && (
             <button onClick={() => setImpersonating(null)} className="flex w-full items-center gap-2 rounded p-2 mt-1 text-sm text-amber-700 bg-amber-50 hover:bg-amber-100 font-semibold border border-amber-200"><Eye size={16} className="text-amber-600" /> Exit: {impersonating.name}</button>
           )}
-          <div className="mt-2 px-2 text-[10px] text-slate-300 truncate" title={`Online: ${VERSION_LABEL}`}>{VERSION_LABEL}</div>
+          <a
+            href="/version.json"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-medium text-slate-500 transition-colors hover:border-indigo-200 hover:text-indigo-600"
+            title={`Running version ${VERSION_LABEL} — click to verify the live deploy (/version.json)`}
+          >
+            <Package size={12} className="shrink-0 text-slate-400" />
+            <span className="truncate">{VERSION_LABEL}</span>
+          </a>
         </div>
       </aside>
       <div className="flex flex-1 flex-col overflow-hidden">

@@ -32,6 +32,33 @@ import LocationPicker from '../components/LocationPicker';
 import { can } from '../utils/permissions';
 import { useEmployeeLocations, isLocationLive } from '../utils/useEmployeeLocations';
 
+// Commit-on-blur input. Types into LOCAL state (instant — no lag) and only calls
+// onCommit on blur / Enter, so a field wired to a Firestore write PER KEYSTROKE
+// (logistics costs) stops feeling "sticky": previously each character triggered a
+// network updateDoc → snapshot → re-render that reverted the input mid-type. Adopts
+// external value changes at render time (React's recommended prop→state sync) without
+// clobbering in-progress typing, since the parent value only changes after commit.
+const CommitInput = memo(function CommitInput({ value, onCommit, className = '', type = 'text', placeholder, disabled, min }) {
+  const norm = (v) => (v === null || v === undefined ? '' : String(v));
+  const [local, setLocal] = useState(() => norm(value));
+  const [prev, setPrev] = useState(value);
+  if (value !== prev) { setPrev(value); setLocal(norm(value)); }
+  const commit = () => { if (norm(value) !== local) onCommit(local); };
+  return (
+    <input
+      type={type}
+      min={min}
+      placeholder={placeholder}
+      className={className}
+      value={local}
+      disabled={disabled}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
+    />
+  );
+});
+
 // M-1 fix: explicit state machine. Free transitions previously allowed
 // Closed → Quoted, leaving stale invoice fields. Map below blocks invalid moves
 // and signals which transitions need invoice cleanup.
@@ -2358,7 +2385,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                                 {hasSplit ? (
                                   <span className="text-slate-500 italic text-xs">From split lines</span>
                                 ) : (
-                                  <input type="number" min="0" className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400" value={legacy.amount} onChange={(e) => updateLogisticsCost(type.id, 'amount', e.target.value)} disabled={!canEditProjects} />
+                                  <CommitInput type="number" min="0" className="w-full rounded-lg border border-slate-200 p-2 focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400" value={legacy.amount || ''} onCommit={(v) => updateLogisticsCost(type.id, 'amount', v)} disabled={!canEditProjects} />
                                 )}
                               </td>
                               <td className="p-3">
@@ -2379,22 +2406,22 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                             {hasSplit && split.map((line) => (
                               <tr key={line.id} className="bg-amber-50/40">
                                 <td className="p-2 pl-10">
-                                  <input
+                                  <CommitInput
                                     type="text"
                                     placeholder="Description"
                                     className="w-full rounded-lg border border-slate-200 p-1.5 text-xs"
                                     value={line.description || ''}
-                                    onChange={(e) => updateLogisticsLine(type.id, line.id, 'description', e.target.value)}
+                                    onCommit={(v) => updateLogisticsLine(type.id, line.id, 'description', v)}
                                     disabled={!canEditProjects}
                                   />
                                 </td>
                                 <td className="p-2">
-                                  <input
+                                  <CommitInput
                                     type="number"
                                     min="0"
                                     className="w-full rounded-lg border border-slate-200 p-1.5 text-xs"
-                                    value={line.amount || 0}
-                                    onChange={(e) => updateLogisticsLine(type.id, line.id, 'amount', e.target.value)}
+                                    value={line.amount || ''}
+                                    onCommit={(v) => updateLogisticsLine(type.id, line.id, 'amount', v)}
                                     disabled={!canEditProjects}
                                   />
                                 </td>
