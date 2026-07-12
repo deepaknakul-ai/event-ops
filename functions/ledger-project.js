@@ -172,6 +172,29 @@ function projectSharedReimbursables(rows, includeProofs) {
   }));
 }
 
+/**
+ * Group per-expense-shared expenses onto the client's OWN projects. An expense
+ * reaches the client ledger only when finance marked it `shared_with_client`
+ * AND it is Approved AND its `project_id` is one of the client's projects. Each
+ * surviving project's rows are whitelisted via projectSharedExpenses (identity /
+ * path / internal fields stripped). Returns a plain map { [project_id]: rows }.
+ * @param {Array<object>} expenseDocs  raw expense docs (already filtered to shared_with_client==true is fine, re-checked here)
+ * @param {Set<string>|string[]} clientPids  the client's own project ids
+ * @returns {Object<string, Array>}
+ */
+function groupClientSharedExpenses(expenseDocs, clientPids) {
+  const owned = clientPids instanceof Set ? clientPids : new Set(clientPids || []);
+  const byPid = {};
+  (Array.isArray(expenseDocs) ? expenseDocs : []).forEach((e) => {
+    if (!e || e.status !== 'Approved' || e.shared_with_client !== true) return;
+    const pid = e.project_id;
+    if (!pid || !owned.has(pid)) return;
+    (byPid[pid] = byPid[pid] || []).push(e);
+  });
+  Object.keys(byPid).forEach((pid) => { byPid[pid] = projectSharedExpenses(byPid[pid]); });
+  return byPid;
+}
+
 module.exports = {
   partyLegNameSet,
   projectPartyJournalRows,
@@ -179,4 +202,5 @@ module.exports = {
   selectVendorProjectPOs,
   projectSharedExpenses,
   projectSharedReimbursables,
+  groupClientSharedExpenses,
 };

@@ -4,6 +4,23 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.1 — Expense sharing is now per-expense (approved only)
+
+**Why.** 3.6.0 gated direct expenses at the *project* level and showed every
+non-rejected expense — too blunt. Finance needs to choose *which* expenses a
+client sees, and only after they're vetted.
+
+**What changed.**
+- **Per-expense opt-in.** In **Expenses → History**, each **Approved** expense now
+  has a **"Share"** toggle (Admin/Accountant/Manager only). Only expenses you mark
+  `shared_with_client` reach the client — and only while they stay Approved.
+- **Ledger link.** `getLedgerData` now attaches a project's direct expenses from the
+  set of `shared_with_client` + Approved expenses (one indexed read), scoped to the
+  client's own projects. The project-level `share_expense_details` toggle now governs
+  **reimbursable** proofs only.
+- Same whitelist + leak-regression guarantees; new `groupClientSharedExpenses`
+  helper + tests enforce "approved + shared + this-client-only, identity stripped."
+
 ## 3.6.0 — Client-visible actual expense details & proofs (opt-in per project)
 
 **What changed.** A client viewing their shared **ledger link** can now dive into a

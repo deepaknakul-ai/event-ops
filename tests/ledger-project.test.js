@@ -6,6 +6,7 @@ import {
   selectVendorProjectPOs,
   projectSharedExpenses,
   projectSharedReimbursables,
+  groupClientSharedExpenses,
 } from '../functions/ledger-project.js';
 
 describe('partyLegNameSet', () => {
@@ -231,5 +232,42 @@ describe('projectSharedReimbursables', () => {
 
   it('tolerates empty / non-array input', () => {
     expect(projectSharedReimbursables(null, true)).toEqual([]);
+  });
+});
+
+describe('groupClientSharedExpenses', () => {
+  const CLIENT_PIDS = new Set(['pA', 'pB']);
+  const docs = [
+    { project_id: 'pA', status: 'Approved', shared_with_client: true, date: '2026-05-01', category: 'Travel', remarks: 'Cab', amount: 500, proof_url: 'u1', proof_name: 'c.jpg', employee_id: 'emp-1' },
+    { project_id: 'pA', status: 'Approved', shared_with_client: false, category: 'Food', amount: 300 }, // not shared
+    { project_id: 'pB', status: 'Pending', shared_with_client: true, category: 'Misc', amount: 200 },   // not approved
+    { project_id: 'pB', status: 'Approved', shared_with_client: true, date: '2026-05-02', category: 'Stay', remarks: 'Hotel', amount: 4000, proof_url: 'u2', proof_name: 'h.pdf' },
+    { project_id: 'pZ', status: 'Approved', shared_with_client: true, category: 'X', amount: 999 },      // another client's project
+  ];
+
+  it('keeps only approved + shared + client-owned expenses, grouped by project', () => {
+    const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
+    expect(Object.keys(g).sort()).toEqual(['pA', 'pB']);
+    expect(g.pA).toHaveLength(1);
+    expect(g.pA[0]).toMatchObject({ category: 'Travel', description: 'Cab', amount: 500 });
+    expect(g.pB[0]).toMatchObject({ category: 'Stay', amount: 4000 });
+  });
+
+  it('drops another client\'s project even if approved+shared', () => {
+    const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
+    expect(g.pZ).toBeUndefined();
+  });
+
+  it('whitelists rows — employee id never survives grouping', () => {
+    const g = groupClientSharedExpenses(docs, CLIENT_PIDS);
+    expect(JSON.stringify(g)).not.toContain('emp-1');
+    expect(Object.keys(g.pA[0]).sort()).toEqual(
+      ['amount', 'category', 'date', 'description', 'proof_name', 'proof_url', 'status'].sort());
+  });
+
+  it('accepts a plain array of pids and tolerates empty input', () => {
+    expect(groupClientSharedExpenses(docs, ['pA'])).toHaveProperty('pA');
+    expect(groupClientSharedExpenses([], CLIENT_PIDS)).toEqual({});
+    expect(groupClientSharedExpenses(null, null)).toEqual({});
   });
 });

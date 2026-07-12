@@ -42,8 +42,8 @@ const {
   projectPartyJournalRows,
   projectOpeningBalance,
   selectVendorProjectPOs,
-  projectSharedExpenses,
   projectSharedReimbursables,
+  groupClientSharedExpenses,
 } = require('./ledger-project');
 
 admin.initializeApp();
@@ -1411,21 +1411,15 @@ exports.getLedgerData = onCall(
     const clientProjectsOut = await Promise.all(clientDocs.map(async (d) =>
       ({ id: d.id, ...pickLedgerProject(await mergeProjectFin(appId, d.id, d.data()), cid) })));
 
-    // Actual-expense transparency (opt-in): for the client's OWN projects flagged
-    // share_expense_details, fetch the `expenses` collection (project_id linkage)
-    // and attach a whitelisted `direct_expenses` payload so the client can see the
-    // real spend + open each employee-submitted proof. Non-flagged projects fetch
-    // nothing — safe-by-default, same posture as the whole endpoint.
-    const flaggedPids = clientDocs.filter((d) => d.data().share_expense_details === true).map((d) => d.id);
-    if (flaggedPids.length) {
-      const expSnaps = await Promise.all(
-        flaggedPids.map((pid) => col('expenses').where('project_id', '==', pid).get().catch(() => null)));
-      const expenseByPid = new Map();
-      flaggedPids.forEach((pid, i) => {
-        const snap = expSnaps[i];
-        expenseByPid.set(pid, snap ? projectSharedExpenses(snap.docs.map((x) => x.data())) : []);
-      });
-      clientProjectsOut.forEach((p) => { if (expenseByPid.has(p.id)) p.direct_expenses = expenseByPid.get(p.id); });
+    // Actual-expense transparency (PER-EXPENSE opt-in): finance marks an APPROVED
+    // expense `shared_with_client` in the Expenses screen; only those reach the
+    // client, grouped onto the client's OWN projects. One indexed read of the
+    // (small) shared set, then whitelist + project-scope in groupClientSharedExpenses
+    // — never leaks the employee, path, or another client's projects.
+    const sharedExpSnap = await col('expenses').where('shared_with_client', '==', true).get().catch(() => null);
+    if (sharedExpSnap && !sharedExpSnap.empty) {
+      const sharedByPid = groupClientSharedExpenses(sharedExpSnap.docs.map((d) => d.data()), clientPids);
+      clientProjectsOut.forEach((p) => { if (sharedByPid[p.id]) p.direct_expenses = sharedByPid[p.id]; });
     }
 
     // Vendor POs are embedded in OTHER parties' projects. Post field-split they sit

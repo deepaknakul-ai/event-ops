@@ -416,9 +416,12 @@ const PublicLedger = () => {
   }, [allRows, fyFilter]);
 
   // Projects the owner has opted into sharing actual expense details for (with proofs).
+  // Direct expenses are shared PER-EXPENSE (attached server-side only when marked),
+  // reimbursables PER-PROJECT (share_expense_details). A project surfaces if either
+  // shared set is non-empty.
   const sharedExpenseProjects = useMemo(
-    () => (projects || []).filter(p => p.share_expense_details
-      && (((p.direct_expenses || []).length) || ((p.reimbursable_expenses || []).length))),
+    () => (projects || []).filter(p => ((p.direct_expenses || []).length)
+      || (p.share_expense_details && (p.reimbursable_expenses || []).length)),
     [projects]
   );
 
@@ -761,7 +764,7 @@ const PublicLedger = () => {
             <div className="divide-y divide-slate-100">
               {sharedExpenseProjects.map(p => {
                 const de = p.direct_expenses || [];
-                const re = p.reimbursable_expenses || [];
+                const re = p.share_expense_details ? (p.reimbursable_expenses || []) : [];
                 const total = de.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0)
                   + re.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
                 return (
@@ -1111,7 +1114,7 @@ const PublicLedger = () => {
       {expenseProject && (() => {
         const p = expenseProject;
         const de = p.direct_expenses || [];
-        const re = p.reimbursable_expenses || [];
+        const re = p.share_expense_details ? (p.reimbursable_expenses || []) : [];
         const deTotal = de.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
         const reTotal = re.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
         return (
