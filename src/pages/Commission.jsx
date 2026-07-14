@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { addDoc, collection } from 'firebase/firestore';
-import { getFunctions, httpsCallable } from 'firebase/functions';
-import { Percent, ChevronDown, ChevronRight, IndianRupee, RefreshCw } from 'lucide-react';
+import { Percent, ChevronDown, ChevronRight, IndianRupee } from 'lucide-react';
 import { can } from '../utils/permissions';
 import { notify } from '../utils/toast';
 import { promptDialog } from '../utils/dialog';
@@ -11,22 +10,9 @@ import { formatCurrency, getProjectCommission } from '../utils/helpers';
 // profit of that client's projects, realized in proportion to the cash received.
 const Commission = ({ clients = [], projects = [], expenses = [], payments = [], payouts = [], employees = [], role = 'user', currentEmpId, db, appId, logAction = () => {} }) => {
   const [expanded, setExpanded] = useState({});
-  const [backfilling, setBackfilling] = useState(false);
   const seeAll = role === 'admin' || role === 'accountant';
   const canPay = can(role, 'commission', 'pay');
   const empName = (id) => employees.find((e) => e.id === id)?.name || id;
-
-  // Admin one-shot: recompute each project's denormalised direct_expense_total so a
-  // Coordinator's (self-scoped-expenses) commission estimate is accurate for
-  // historical projects too — the onExpenseWritten trigger only covers new writes.
-  const runBackfill = async () => {
-    setBackfilling(true);
-    try {
-      const res = await httpsCallable(getFunctions(), 'backfillProjectExpenseTotals')({ appId });
-      notify(`Recalculated cost totals for ${res?.data?.stamped ?? 0} project(s).`, 'success');
-    } catch (e) { notify(`Recalculation failed: ${e.message || e}`, 'error'); }
-    finally { setBackfilling(false); }
-  };
 
   const data = useMemo(() => {
     const ownedClients = clients.filter((c) => c.owner_id && (seeAll || c.owner_id === currentEmpId));
@@ -75,11 +61,6 @@ const Commission = ({ clients = [], projects = [], expenses = [], payments = [],
     <div className="space-y-4 p-1">
       <div className="flex items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Percent size={20} className="text-indigo-600" /> Referral Commission</h2>
-        {role === 'admin' && (
-          <button onClick={runBackfill} disabled={backfilling} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50" title="Recompute each project's cost total so coordinator estimates are accurate for historical projects">
-            <RefreshCw size={13} className={backfilling ? 'animate-spin' : ''} /> {backfilling ? 'Recalculating…' : 'Recalculate cost totals'}
-          </button>
-        )}
       </div>
       <p className="text-xs text-slate-500">Earned as the client's projects are paid: <span className="font-medium">rate% × net profit (revenue − direct costs − outsourcing) × fraction paid</span>.</p>
       {!seeAll && (

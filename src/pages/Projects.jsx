@@ -15,7 +15,6 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
 import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
-import { getFunctions, httpsCallable } from 'firebase/functions';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 
@@ -254,24 +253,6 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   const [isDefaultFilter, setIsDefaultFilter] = useState(true);
   const [myProjectsOnly, setMyProjectsOnly] = useState(role === 'tech');
   const [quickFilter, setQuickFilter] = useState('');
-  // Field-split slice 3 — one-time admin migration of project money → gated sibling.
-  const [pfMigrating, setPfMigrating] = useState('');
-  const runProjectMigration = async (which) => {
-    const fnName = which === 'scrub' ? 'scrubProjectEmbeddedMoney' : 'backfillProjectFinancials';
-    const msg = which === 'scrub'
-      ? 'SCRUB project money from the base docs (closes the SDK leak — operational roles can no longer read rates/costs/margins). Only affects projects already mirrored to project_financials. Run this AFTER Backfill + confirming money still displays. Proceed?'
-      : 'BACKFILL: mirror every project\'s money into the gated project_financials sibling (safe + idempotent). Proceed?';
-    if (!(await confirmDialog(msg))) return;
-    setPfMigrating(which);
-    try {
-      const res = await httpsCallable(getFunctions(), fnName)({ appId });
-      const d = res?.data || {};
-      addToast(which === 'scrub'
-        ? `Scrubbed ${d.scrubbed ?? 0} project(s); ${d.skipped ?? 0} skipped (no sibling yet).`
-        : `Mirrored ${d.mirrored ?? 0} of ${d.projects ?? 0} project(s) to project_financials.`, 'success');
-    } catch (e) { addToast(`Migration failed: ${e.message || e}`, 'error'); }
-    finally { setPfMigrating(''); }
-  };
 
   // Bulk / Group Invoice state
   const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
@@ -3742,16 +3723,6 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                   <button onClick={exportFilteredProjects} className="flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50 whitespace-nowrap w-full md:w-auto"><Download size={18} /> Export</button>
                   <button onClick={() => { setBulkInvoiceOpen(true); setBulkInvoiceSelected(new Set()); }} className="flex items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap w-full md:w-auto">
                       <Receipt size={18} /> Group Invoice
-                  </button>
-                </>
-              )}
-              {role === 'admin' && (
-                <>
-                  <button onClick={() => runProjectMigration('backfill')} disabled={!!pfMigrating} title="One-time: mirror all projects' money into the gated project_financials sibling" className="flex items-center justify-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-amber-700 hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap w-full md:w-auto">
-                    {pfMigrating === 'backfill' ? 'Backfilling…' : 'Backfill project money'}
-                  </button>
-                  <button onClick={() => runProjectMigration('scrub')} disabled={!!pfMigrating} title="One-time: remove money from base project docs (leak closure). Run after Backfill + verifying displays." className="flex items-center justify-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-rose-700 hover:bg-rose-100 disabled:opacity-50 whitespace-nowrap w-full md:w-auto">
-                    {pfMigrating === 'scrub' ? 'Scrubbing…' : 'Scrub base'}
                   </button>
                 </>
               )}

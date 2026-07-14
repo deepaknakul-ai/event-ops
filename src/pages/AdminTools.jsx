@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
-import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin, Sparkles } from 'lucide-react';
+import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin, Sparkles, Database } from 'lucide-react';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc, writeBatch, deleteField } from 'firebase/firestore';
+import { httpsCallable, getFunctions } from 'firebase/functions';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
 import { getFinancialYear } from '../utils/helpers';
@@ -26,6 +27,23 @@ const DEFAULT_CALENDAR_INVOICE_TEXT = {
 const CALENDAR_STATUS_OPTIONS = ['Quoted', 'Confirmed', 'Ongoing', 'Completed', 'Closed', 'Cancelled'];
 const CALENDAR_INVOICE_OPTIONS = ['Invoiced', 'Not Invoiced'];
 
+// One-time zero-trust field-split migrations, relocated here from the Projects /
+// Inventory / Employees pages. Backfill mirrors money into the gated *_financials
+// sibling (safe + idempotent); Scrub then removes it from the base docs (leak
+// closure). New records migrate automatically via triggers — these are only for
+// re-running after a bulk import of old data.
+const MIGRATIONS = [
+  { key: 'proj', label: 'Projects', noun: 'money',
+    backfill: { fn: 'backfillProjectFinancials', msg: "BACKFILL: mirror every project's money into the gated project_financials sibling (safe + idempotent). Proceed?", fmt: (d) => `Mirrored ${d.mirrored ?? 0} of ${d.projects ?? 0} project(s).` },
+    scrub: { fn: 'scrubProjectEmbeddedMoney', msg: 'SCRUB project money from the base docs (closes the SDK leak). Only affects projects already mirrored to project_financials. Run AFTER Backfill + confirming money still displays. Proceed?', fmt: (d) => `Scrubbed ${d.scrubbed ?? 0} project(s); ${d.skipped ?? 0} skipped (no sibling yet).` } },
+  { key: 'inv', label: 'Inventory', noun: 'rates',
+    backfill: { fn: 'backfillInventoryFinancials', msg: 'BACKFILL: copy existing inventory rates/costs into the gated inventory_financials sibling. Safe and idempotent. Proceed?', fmt: (d) => `Mirrored ${d.mirrored ?? 0} of ${d.items ?? 0} item(s).` },
+    scrub: { fn: 'scrubInventoryEmbeddedMoney', msg: 'SCRUB inventory rates/costs from the base docs. Only affects items already mirrored to inventory_financials. Run AFTER Backfill + confirming rates still display. Proceed?', fmt: (d) => `Scrubbed ${d.scrubbed ?? 0} item(s); ${d.skipped ?? 0} skipped (no sibling yet).` } },
+  { key: 'emp', label: 'Employees', noun: 'pay',
+    backfill: { fn: 'backfillEmployeePay', msg: 'BACKFILL: copy existing employee pay (rate/salary) into the gated employee_pay sibling. Safe and idempotent. Proceed?', fmt: (d) => `Mirrored ${d.mirrored ?? 0} of ${d.employees ?? 0} employee(s).` },
+    scrub: { fn: 'scrubEmployeeEmbeddedPay', msg: 'SCRUB pay from the base employee docs. Only affects employees already mirrored to employee_pay. Run AFTER Backfill + confirming pay still displays for Owner/Accountant. Proceed?', fmt: (d) => `Scrubbed ${d.scrubbed ?? 0} employee(s); ${d.skipped ?? 0} skipped (no sibling yet).` } },
+];
+
 const AdminTools = ({ db, appId, logAction, role }) => {
   // NOTE: the access-restricted return lives BELOW the hooks (rules-of-hooks —
   // an early return above useState/useEffect breaks hook ordering). The fetch
@@ -33,6 +51,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const allowed = can(role, 'admin_tools', 'view');
   const [backupStatus, setBackupStatus] = useState('idle');
   const [restoreStatus, setRestoreStatus] = useState('idle');
+  const [migrating, setMigrating] = useState('');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
   const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2, msme_reg: '', signature: '' });
   const [bankAccounts, setBankAccounts] = useState([]);
@@ -121,6 +140,18 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   }, [db, appId, allowed]);
 
   const collections = ['projects', 'clients', 'inventory', 'expenses', 'employees', 'advances', 'payments', 'payouts', 'audit_logs'];
+
+  // Generic one-time migration runner (see MIGRATIONS). confirmMsg='' skips the
+  // confirm (used by the non-destructive commission recalc).
+  const runMigration = async (key, fnName, fmt, confirmMsg = '') => {
+    if (confirmMsg && !(await confirmDialog(confirmMsg))) return;
+    setMigrating(key);
+    try {
+      const res = await httpsCallable(getFunctions(), fnName)({ appId });
+      notify(fmt(res?.data || {}), 'success');
+    } catch (e) { notify(`Migration failed: ${e.message || e}`, 'error'); }
+    finally { setMigrating(''); }
+  };
 
   const handleBackup = async () => {
     setBackupStatus('loading');
@@ -633,6 +664,32 @@ const AdminTools = ({ db, appId, logAction, role }) => {
              {restoreStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Restore Complete!</div>}
           </div>
        </div>
+
+       {role === 'admin' && (
+         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Database size={20} /> Data Migration</h3>
+            <p className="text-slate-500 text-sm mb-4">One-time zero-trust field-split tools (moved here from the Projects / Inventory / Employees pages). New records migrate automatically via triggers — only re-run these after a bulk import of old data. <span className="text-rose-600 font-medium">Scrub removes money from the base docs — run it only after Backfill and confirming figures still display.</span></p>
+            <div className="space-y-3">
+              {MIGRATIONS.map(m => (
+                <div key={m.key} className="flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3 last:border-0 last:pb-0">
+                  <span className="w-24 shrink-0 text-sm font-semibold text-slate-700">{m.label}</span>
+                  <button onClick={() => runMigration(`${m.key}-b`, m.backfill.fn, m.backfill.fmt, m.backfill.msg)} disabled={!!migrating} className="rounded border border-amber-300 bg-amber-50 text-amber-700 px-3 py-1.5 text-sm hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap">
+                    {migrating === `${m.key}-b` ? 'Backfilling…' : `Backfill ${m.noun}`}
+                  </button>
+                  <button onClick={() => runMigration(`${m.key}-s`, m.scrub.fn, m.scrub.fmt, m.scrub.msg)} disabled={!!migrating} className="rounded border border-rose-300 bg-rose-50 text-rose-700 px-3 py-1.5 text-sm hover:bg-rose-100 disabled:opacity-50 whitespace-nowrap">
+                    {migrating === `${m.key}-s` ? 'Scrubbing…' : 'Scrub base'}
+                  </button>
+                </div>
+              ))}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="w-24 shrink-0 text-sm font-semibold text-slate-700">Commission</span>
+                <button onClick={() => runMigration('exp', 'backfillProjectExpenseTotals', (d) => `Recalculated cost totals for ${d.stamped ?? 0} project(s).`)} disabled={!!migrating} className="rounded border border-slate-300 text-slate-600 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap">
+                  {migrating === 'exp' ? 'Recalculating…' : 'Recalculate cost totals'}
+                </button>
+              </div>
+            </div>
+         </div>
+       )}
 
        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
             <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-slate-800"><Briefcase size={20} /> Organization Settings</h3>

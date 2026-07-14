@@ -4,6 +4,16 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.6 — Migration tools relocated to Admin Tools
+
+The one-time zero-trust field-split buttons (**Backfill money / Scrub base**) lived on the
+everyday **Projects, Inventory, and Employees** pages — including a red *Scrub* button that
+strips data from base docs, a mis-click risk in daily use. They're now consolidated into a
+single **Data Migration** card in **Admin Tools → System Settings** (admin-only), alongside
+Commission's *Recalculate cost totals*. The underlying Cloud Functions are unchanged — new
+records sync automatically via triggers; these are only for re-running after a bulk import
+of old data. Hosting-only.
+
 ## 3.6.5 — History project filter lists all projects (current FY by default)
 
 The Expenses → History **Project** filter only listed expense-*eligible* projects
