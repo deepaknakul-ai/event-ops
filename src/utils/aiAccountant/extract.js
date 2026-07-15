@@ -113,6 +113,49 @@ export function extractTDSBreakdown(text) {
   return { gross: round2(gross), tds: round2(tds), net: round2(gross - tds) };
 }
 
+/**
+ * Client-deducted TDS on OUR receipt: a client pays us NET of TDS. Unlike
+ * extractTDSBreakdown (which assumes the largest number is gross), here the
+ * received figure is the NET, so gross = net + tds. Requires an inflow cue so a
+ * vendor outflow never routes here.
+ * @param {string} text
+ * @returns {{net:number, tds:number, gross:number}|null}
+ */
+export function extractClientTDSReceipt(text) {
+  if (!text || !/\btds\b/i.test(text)) return null;
+  if (!/\b(received|recd|got|credited|paid\s+(?:us|me|to\s+us|our)|net\s+of\s+tds|after\s+deduct)/i.test(text)) return null;
+  const clean = text.replace(/\b(?:u\/s\s*)?(?:section\s*)?19[0-9][a-z]{0,3}\b/gi, ' ');
+
+  let tds = 0;
+  const m = clean.match(/tds[^0-9]{0,14}?(\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?)/i)
+        || clean.match(/(\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?)\s*(?:as\s+)?tds/i);
+  if (m) tds = round2(extractAmount(m[1]));
+  if (tds <= 0) return null;
+
+  const nums = [];
+  const re = /\d[\d.,]*\s*(?:lakh|lac|l|crore|cr|k)?/gi;
+  let mm;
+  while ((mm = re.exec(clean))) {
+    const v = extractAmount(mm[0]);
+    if (v > 0) nums.push(round2(v));
+  }
+  // Drop one occurrence of the TDS figure; what's left is the net (and maybe a stated gross).
+  const idx = nums.indexOf(tds);
+  const rest = idx >= 0 ? nums.slice(0, idx).concat(nums.slice(idx + 1)) : nums.slice();
+  if (!rest.length) return null;
+
+  const maxRest = Math.max(...rest);
+  const minRest = Math.min(...rest);
+  let net, gross;
+  if (rest.length >= 2 && Math.abs(maxRest - (minRest + tds)) <= 1) {
+    net = minRest; gross = maxRest;          // both the net and a stated gross were given
+  } else {
+    net = maxRest; gross = round2(net + tds); // only the net was given
+  }
+  if (net <= 0 || gross <= tds) return null;
+  return { net: round2(net), tds: round2(tds), gross: round2(gross) };
+}
+
 // ── Voucher reference ───────────────────────────────────────────────────────
 /**
  * Detect a voucher reference like:

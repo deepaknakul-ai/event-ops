@@ -8,7 +8,7 @@
 import { extractAmountSmart, detectPaymentMode } from './amount.js';
 import { extractParty, stripHonorifics, diceSimilarity, nameSegments, segmentCoverage, normalizeAliasKey } from './party.js';
 import { parseDate } from './dates.js';
-import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag, extractTDSBreakdown } from './extract.js';
+import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag, extractTDSBreakdown, extractClientTDSReceipt } from './extract.js';
 import { inferAccountMeta, KNOWN_ACCOUNT_DEFAULTS, round2 } from './schema.js';
 import { suggestAccountForText, suggestAccountForParty, suggestIntentFromPhrase } from './learning.js';
 import { determineSupplyType, outputGSTLines, inputGSTLines, classifyExpenseAccount, fuelContext, tdsSectionForTransaction } from './knowledge.js';
@@ -265,6 +265,20 @@ export function classifyIntent(text) {
     scores.receipt = (scores.receipt || 0) + 18;
   }
   if (scores.expense > 0 && scores.payment > 0 && hasTo) scores.payment += 3;
+
+  // Client-deducted TDS on OUR receipt: a client paid us net of TDS ("Acme paid us
+  // 90000 after deducting 10000 TDS", "received 90000 from Acme, TDS 10000 deducted").
+  // Force the `tds` (receivable) intent so the receipt keyword / payment tie-break
+  // can't win. Runs BEFORE the outflow tie-break below.
+  if (scores.tds > 0 && /\btds\b/i.test(text) && (
+        /\bpaid\s+(?:us|me|to\s+us|our)\b/i.test(text)
+        || ((scores.receipt > 0 || /\b(received|recd|got|credited)\b/i.test(text)) && /deduct|less|net\s+of|withh/i.test(text))
+      )) {
+    scores.tds += 25;
+    scores.payment = 0;
+    scores.salary = 0;
+    scores.receipt = 0;
+  }
 
   // Net-of-TDS outflow: when a salary/payment verb co-occurs with "TDS", WE are
   // withholding tax on an outflow — keep salary/payment (the compound parser
@@ -961,9 +975,22 @@ export function parseMessage(text, ctx = {}) {
       break;
     }
     case 'tds': {
-      const p = party || 'Unknown Party';
-      base.entries = [{ debitAccount: 'TDS Receivable', creditAccount: `Party: ${p}`, amount }];
-      base.narration = `TDS deducted by ${p}`;
+      const p = party || 'Unknown Client';
+      const c = extractClientTDSReceipt(trimmed);
+      if (c) {
+        // Client withheld TDS on our receipt: Dr Bank net + Dr TDS Receivable tds
+        // / Cr Party gross — expressed as two per-line-balanced pairs.
+        base.entries = [
+          { debitAccount: cashOrBank, creditAccount: `Party: ${p}`, amount: c.net },
+          { debitAccount: 'TDS Receivable', creditAccount: `Party: ${p}`, amount: c.tds },
+        ];
+        base.narration = `Receipt from ${p} net of TDS (gross ${c.gross}, TDS ${c.tds})`;
+        base.meta = { ...base.meta, compound: true, gross: c.gross, tds: c.tds, net: c.net, amount: c.gross };
+      } else {
+        // Legacy bare "TDS deducted by X" with a single figure.
+        base.entries = [{ debitAccount: 'TDS Receivable', creditAccount: `Party: ${p}`, amount }];
+        base.narration = `TDS deducted by ${p}`;
+      }
       base.party = { type: 'client', name: p };
       break;
     }

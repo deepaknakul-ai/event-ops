@@ -4,6 +4,24 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.11 — Virtual Accountant: TDS depth (client-deducted flow + monthly deposit summary)
+
+Deeper TDS handling in the AI Accountant chat + Accounts:
+
+- **Client-deducted TDS (a client withholds tax on our receipt)** — new. *"received 90000
+  from Acme, TDS 10000 deducted"* / *"Acme paid us 90000 after deducting 10000 TDS"* now books
+  **Dr Bank 90,000 + Dr TDS Receivable 10,000 / Cr Acme 1,00,000** (the receivable you claim at
+  ITR). Previously this produced a wrong single-leg entry or misfired as a vendor payment.
+- **Vendor-deducted TDS** (we withhold paying a vendor) was already correct (Dr Party gross /
+  Cr Bank net / Cr TDS Payable) — now the **section is tagged** (194C/194J/194I/194H/194A) and
+  **salary TDS tags 192**. An explicitly stated section ("…TDS under 194J") is honoured.
+- **Monthly TDS Payable deposit summary** — new read-only table in Accounts → TDS: what you
+  withheld, grouped by month × section, with the **deposit-by date (7th of next month)**.
+  Aggregates every TDS-Payable credit leg already posted (chat + manual entries).
+
+Deterministic rules engine — no Anthropic key required. The section is persisted on the
+journal entry (`tds_section`) so the summary ties out.
+
 ## 3.6.10 — Virtual Accountant: employee reimbursements + fuel "ask each time"
 
 The AI Accountant chat now understands **employee out-of-pocket spends** and **ambiguous fuel**:

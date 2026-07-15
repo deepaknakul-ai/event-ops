@@ -170,9 +170,17 @@ const TDS_RULES = [
  */
 export function tdsSectionForTransaction(intent, text) {
   const t = String(text || '');
+  // An explicitly stated section code wins ("...TDS under 194J", "u/s 194C").
+  if (/\btds\b|u\/s|section|under/i.test(t)) {
+    const ex = t.match(/\b(194[a-z]{1,2}|192[a-z]?|195)\b/i);
+    if (ex) return ex[1].toUpperCase();
+  }
   if (intent === 'rent') return '194I';
   if (intent === 'interest_paid') return '194A';
-  if (intent === 'salary' || intent === 'advance') return null; // salary TDS is 192, handled separately
+  // Salary TDS is section 192 — stamp it only when TDS is actually mentioned so a
+  // plain salary stays unstamped. Advances never attract TDS.
+  if (intent === 'salary') return /\btds\b/i.test(t) ? '192' : null;
+  if (intent === 'advance') return null;
   for (const rule of TDS_RULES) {
     if (rule.re.test(t)) return rule.section;
   }

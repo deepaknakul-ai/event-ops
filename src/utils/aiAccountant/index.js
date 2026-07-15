@@ -10,6 +10,8 @@ export {
   extractSplitLines,
   extractVoucherNo,
   extractProjectTag,
+  extractTDSBreakdown,
+  extractClientTDSReceipt,
 } from './extract.js';
 export {
   ACCOUNT_TYPES,
