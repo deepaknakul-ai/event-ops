@@ -19,6 +19,7 @@ export {
   totalOf,
 } from './schema.js';
 export { validateTransaction, canPost, canDispatch, issueSummary } from './validator.js';
+export { runOrchestrator, runAuditAgent, POLICY_VERSION } from './orchestrator.js';
 export {
   learnFromEntries,
   suggestAccountForParty,
