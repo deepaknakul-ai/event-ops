@@ -42,3 +42,6 @@ database-debug.log
 
 # Google Drive sync temp files
 .tmp.driveupload/
+
+# Local Anthropic key for functions/llm-eval.cjs (never commit)
+functions/.eval-key
