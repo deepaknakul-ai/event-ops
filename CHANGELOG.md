@@ -4,6 +4,24 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.12 — Virtual Accountant: Process-Analyst insights (Accounts → AI Insights)
+
+A new read-only **AI Insights** tab in Accounts (finance/accountant only) mines the decision
+traces now saved on AI-posted entries (v3.6.9) to show what the assistant is learning:
+
+- **Audit health** — entries analysed, average audit score, % posted below the confidence bar,
+  count posted with warnings/advisories.
+- **Most common audit findings** — ranked finding codes (fuel-ambiguous, possible-duplicate,
+  unknown-party…) with severity + fix hint.
+- **Rule ideas** — when a finding recurs to the same account ("you booked entries flagged X to
+  Travelling & Conveyance 6/7 times — add a rule?"). Advisory only; nothing changes automatically.
+- **Weak spots** — parties, accounts, and prompt words that most often produce flagged drafts.
+- **Party-name corrections** — which typed names keep getting remapped.
+
+Pure/deterministic, driven entirely by journal entries already in memory — no new database
+reads, no writes, no Anthropic key. Honest by design: it reports observed outcomes (the final
+posted account), not the AI's pre-edit draft, which isn't stored.
+
 ## 3.6.11 — Virtual Accountant: TDS depth (client-deducted flow + monthly deposit summary)
 
 Deeper TDS handling in the AI Accountant chat + Accounts:

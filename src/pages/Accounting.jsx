@@ -51,6 +51,7 @@ import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
 import { auditFromIssues, POLICY_VERSION } from '../utils/aiAccountant';
+import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
 import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
 import { exportReport as exportReportImpl, exportGstToExcel as exportGstToExcelImpl, exportGstrJson as exportGstrJsonImpl, exportAiEntries as exportAiEntriesImpl } from '../utils/accountingExports';
 
@@ -71,6 +72,7 @@ const TABS = [
   { id: 'gst',                 label: 'GST Reports',           icon: Receipt,         group: 'reports', hint: 'GSTR-1, GSTR-2, HSN summary' },
   { id: 'tds',                 label: 'TDS Tracker',           icon: Receipt,         group: 'reports', hint: 'TDS deducted & deductible' },
   { id: 'ai_review',           label: 'AI Entries',            icon: Sparkles,        group: 'reports', hint: 'Entries created by the AI assistant — review with the original message (for CA/accountant)' },
+  { id: 'ai_insights',         label: 'AI Insights',           icon: Sparkles,        group: 'reports', hint: 'Patterns the assistant is learning — audit health, weak spots, rule ideas (read-only)' },
   // ── Admin & Setup (accountant-level) ──
   { id: 'journal',             label: 'All Entries',           icon: BookOpen,        group: 'admin' },
   { id: 'approvals',           label: 'Approvals',             icon: ClipboardCheck,  group: 'admin', hint: 'Pending manager-created drafts' },
@@ -2882,6 +2884,12 @@ const Accounting = ({
             );
           })()}
         </div>
+      )}
+
+      {activeTab === 'ai_insights' && (
+        canEditFinance
+          ? <AiInsightsPanel entries={manualJournalEntries} fyFilter={fyFilter} />
+          : <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-400">AI Insights are available to finance/accountant roles.</div>
       )}
 
       {activeTab === 'ai_review' && (
