@@ -4,6 +4,18 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.7 — Ledger-link PO amount ties out with the books + employee-label fix
+
+The client/vendor ledger link computed a vendor **PO's amount** with a hand-rolled calc
+(`package_cost×(1+gst%)` or `po.amount`) that **ignored any embedded vendor invoice** and
+**mis-derived package GST** — so the figure could differ from the in-app vendor balance. It
+now reuses the same authoritative **`getOutsourcingCost`** the in-app derived ledger uses:
+embedded vendor invoice → package cost (with the stored GST) → itemised. Linked purchase
+invoices flagged `include_in_ledger` still supersede their PO row as before. Also fixed a
+latent **object-sum bug** in the project-details PO totals (was summing objects → garbage),
+and the Expenses → History **"by _employee_"** label now resolves the current user's own
+project quick-expenses (which store the auth uid rather than an employee id).
+
 ## 3.6.6 — Migration tools relocated to Admin Tools
 
 The one-time zero-trust field-split buttons (**Backfill money / Scrub base**) lived on the

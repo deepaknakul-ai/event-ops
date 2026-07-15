@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
-import { formatCurrency, getProjectGrandTotal, getEffectivePOCost } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal } from '../utils/helpers';
+import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
 import jsPDF from 'jspdf';
@@ -201,14 +202,16 @@ const PublicLedger = () => {
               const stableKey = po.id || '';
               const poKey = `${p.id}::${po.po_no}`;
               if (supersededPOKeys.has(stableKey) || supersededPOKeys.has(poKey)) return; // PI supersedes this PO
-              const poAmount = (po.package_cost && po.package_cost > 0)
-                ? po.package_cost * (1 + (po.package_cost_gst || 0) / 100)
-                : parseFloat(po.amount || 0);
+              // Same cost fn the in-app derived ledger uses, so the PO figure ties out:
+              // embedded vendor_invoice → package cost (incl. stored GST) → itemised.
+              // linkedPI is null — include_in_ledger PIs already superseded their PO above.
+              const cost = getOutsourcingCost(po, null);
+              if ((cost.total || 0) <= 0) return; // skip zero-cost POs (matches accounting.js)
               raw.push({
                 date: po.date,
                 desc: `PO: ${po.po_no} — ${p.project_name}`,
                 entry_tag: 'PO',
-                debit: 0, credit: poAmount,
+                debit: 0, credit: cost.total,
                 invoice_status: null, invoice_no: null, invoice_date: null,
                 company_key: resolveCompany(po.party_company_id || p.party_company_id).id,
                 company_name: resolveCompany(po.party_company_id || p.party_company_id).name,
@@ -469,7 +472,7 @@ const PublicLedger = () => {
       po_no: po.po_no || '—',
       description: po.description || po.service_type || '—',
       date: po.date || '',
-      amount: getEffectivePOCost(po),
+      amount: getOutsourcingCost(po, null).total,
       status: po.status || '—'
     }));
     const poTotal = pos.reduce((s, po) => s + po.amount, 0);

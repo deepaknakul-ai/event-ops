@@ -407,7 +407,16 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   );
   // Name of the employee who submitted an expense (History lists everyone's for
   // approvers). Empty string if the id doesn't resolve — the label just hides.
-  const empName = (id) => employees.find((e) => String(e.id) === String(id))?.name || '';
+  const empName = (id) => {
+    const byId = employees.find((e) => String(e.id) === String(id))?.name;
+    if (byId) return byId;
+    // Project "quick expenses" store employee_id = the creator's auth uid (not an
+    // employee doc id), so id-match fails → resolve the current viewer's own uid.
+    if (user && String(id) === String(user.uid)) {
+      return employees.find((e) => String(e.id) === String(currentEmpId))?.name || user.displayName || user.email || '';
+    }
+    return '';
+  };
 
   const filteredHistory = useMemo(() => historyExpenses.filter(e => {
     const d = new Date(e.date);

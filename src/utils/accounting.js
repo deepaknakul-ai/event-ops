@@ -57,7 +57,7 @@ const getProjectRevenue = (project, taxInvoiceForProject) => {
  *   Level 1 (lowest):  Vendor allocation itemised cost
  * Returns { taxable, gst, total, source }
  */
-const getOutsourcingCost = (po, linkedPurchaseInvoice) => {
+export const getOutsourcingCost = (po, linkedPurchaseInvoice) => {
   // Level 3a: Standalone Purchase Invoice (from purchaseInvoices collection)
   if (linkedPurchaseInvoice) {
     const taxable = round2(linkedPurchaseInvoice.amount || 0);
