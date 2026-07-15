@@ -78,6 +78,8 @@ const STATIC_SYSTEM_PROMPT = [
   '- Debit what comes in / expenses / assets; credit what goes out / income / liabilities.',
   '- Party receivable/payable accounts are named "Party: <Name>". Employee accounts are named "Employee: <Name>".',
   '- Prefer account names EXACTLY as given in the provided account list. Only introduce a new account name when nothing in the list fits.',
+  '- Settlement adjusting a prior advance: ONLY when the message explicitly says a larger bill is being settled AND a prior advance/part-payment is applied, emit multiple lines whose debits total the FULL bill — one line crediting the advance account for the advance, one crediting Cash/Bank for the amount actually paid now. If no prior advance is mentioned, book only the amount paid (do NOT invent an advance leg).',
+  '  Example: "36000 ka bill, 6000 advance pehle diya tha, baaki 30000 pay kiya" -> payment with lines [{Dr Party: X, Cr Employee Advances, 6000}, {Dr Party: X, Cr Bank, 30000}] (debits total 36000).',
   '',
   '## Intent definitions (choose exactly one)',
   '- receipt: money received from a client (Dr Cash/Bank, Cr Party: X)',

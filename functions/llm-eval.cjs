@@ -86,7 +86,7 @@ const CASES = [
   { t: 'client ne 5000 wapas kiya galti se',
     check: (tx) => ({ ok: near(total(tx), 5000), why: `total=${total(tx)} intent=${tx.intent} (want some 5000 entry)` }) },
   { t: '36000 ka bill tha, usme se 6000 advance pehle diya tha, baaki 30000 pay kiya',
-    check: (tx) => ({ ok: near(total(tx), 36000, 1) || near(total(tx), 30000, 1), why: `total=${total(tx)} legs=${(tx.entries || []).length} (want compound ~36000/30000)` }) },
+    check: (tx) => ({ ok: near(total(tx), 36000, 1) && (tx.entries || []).length >= 2, why: `total=${total(tx)} legs=${(tx.entries || []).length} (want full 36000 with advance leg + payment leg)` }) },
 ];
 
 const client = new Anthropic({ apiKey: API_KEY, timeout: 60000, maxRetries: 1 });
