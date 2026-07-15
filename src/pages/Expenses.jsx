@@ -108,6 +108,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   const [trackerFilters, setTrackerFilters] = useState({ employee: '', project: '', category: '', status: '', startDate: '', endDate: '' });
   const [trackerPage, setTrackerPage] = useState(1);
   const trackerItemsPerPage = 25;
+  const [masterSearch, setMasterSearch] = useState(''); // Expense Master employee search
 
   // --- Employee Dashboard state ---
   const [empDashId, setEmpDashId] = useState(null);
@@ -635,6 +636,43 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     disapproved: trackerExpenses.filter(e => isExpenseExcludedStatus(e.status)).reduce((s, e) => s + parseFloat(e.amount || 0), 0),
   }), [trackerExpenses]);
 
+  // ─── Expense Master: per-employee summary (unapproved / approved / payments / balance)
+  // Mirrors the single-employee empDashKpis math, aggregated across everyone in one pass.
+  // Balance = total payments received (advances + payouts) − approved expenses.
+  const expenseMaster = useMemo(() => {
+    const expByEmp = {};
+    expenses.forEach(e => {
+      const k = String(e.employee_id);
+      if (!expByEmp[k]) expByEmp[k] = { approved: 0, unapproved: 0 };
+      const amt = parseFloat(e.amount || 0);
+      if (e.status === 'Approved') expByEmp[k].approved += amt;
+      else if (!isExpenseExcludedStatus(e.status)) expByEmp[k].unapproved += amt; // Pending + Clarification
+    });
+    const sumBy = (arr) => arr.reduce((m, x) => { const k = String(x.employee_id); m[k] = (m[k] || 0) + parseFloat(x.amount || 0); return m; }, {});
+    const advByEmp = sumBy(advances);
+    const payByEmp = sumBy(payouts);
+    return employees
+      .map(emp => {
+        const k = String(emp.id);
+        const approved = expByEmp[k]?.approved || 0;
+        const unapproved = expByEmp[k]?.unapproved || 0;
+        const payments = (advByEmp[k] || 0) + (payByEmp[k] || 0);
+        return { id: emp.id, name: emp.name || '—', status: emp.status || '', approved, unapproved, payments, balance: payments - approved };
+      })
+      .filter(r => r.approved || r.unapproved || r.payments) // only employees with activity
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [expenses, advances, payouts, employees]);
+
+  const expenseMasterFiltered = useMemo(
+    () => expenseMaster.filter(r => r.name.toLowerCase().includes(masterSearch.toLowerCase())),
+    [expenseMaster, masterSearch]
+  );
+
+  const expenseMasterTotals = useMemo(() => expenseMasterFiltered.reduce((t, r) => ({
+    unapproved: t.unapproved + r.unapproved, approved: t.approved + r.approved,
+    payments: t.payments + r.payments, balance: t.balance + r.balance,
+  }), { unapproved: 0, approved: 0, payments: 0, balance: 0 }), [expenseMasterFiltered]);
+
   // ─── Employee Dashboard computations ────────────────────────────────────────
   const empDashEmployee = useMemo(() => employees.find(e => e.id === empDashId), [employees, empDashId]);
   const empDashExpenses = useMemo(() => expenses.filter(e => String(e.employee_id) === String(empDashId)), [expenses, empDashId]);
@@ -719,8 +757,71 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
               <span className="flex items-center gap-1"><Users size={13} /> Tracker</span>
             </button>
           )}
+          {can(role, 'expenses', 'view_payments') && (
+            <button onClick={() => setViewMode('master')} className={`px-2 sm:px-3 py-1 text-xs sm:text-sm rounded ${viewMode === 'master' ? 'bg-teal-100 text-teal-700 font-medium' : 'text-slate-600'}`}>
+              <span className="flex items-center gap-1"><Wallet size={13} /> Master</span>
+            </button>
+          )}
         </div>
       </div>
+
+      {viewMode === 'master' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-white rounded-xl shadow-sm border border-slate-200">
+            <div className="text-sm text-slate-600">
+              <span className="font-semibold text-slate-800">Expense Master</span> — per-employee summary.
+              <span className="block text-xs text-slate-400 mt-0.5">Balance = payments received (advances + payouts) − approved expenses. Positive = advance held by employee; negative = reimbursement payable.</span>
+            </div>
+            <input type="text" placeholder="Search employee…" value={masterSearch} onChange={e => setMasterSearch(e.target.value)} className="rounded border border-slate-300 p-1.5 text-sm text-black" />
+          </div>
+          <div className="rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-slate-600 text-xs uppercase">
+                  <tr>
+                    <th className="p-3">Employee</th>
+                    <th className="p-3 text-right">Unapproved</th>
+                    <th className="p-3 text-right">Approved</th>
+                    <th className="p-3 text-right">Total Payment</th>
+                    <th className="p-3 text-right">Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {expenseMasterFiltered.map(r => (
+                    <tr key={r.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => openEmpDash(r.id)} title="Open employee dashboard">
+                      <td className="p-3 font-medium text-slate-800">
+                        {r.name}
+                        {r.status && r.status !== 'Active' && <span className="ml-2 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{r.status}</span>}
+                      </td>
+                      <td className="p-3 text-right text-amber-700">{r.unapproved ? formatCurrency(r.unapproved) : '—'}</td>
+                      <td className="p-3 text-right text-slate-800">{r.approved ? formatCurrency(r.approved) : '—'}</td>
+                      <td className="p-3 text-right text-slate-800">{r.payments ? formatCurrency(r.payments) : '—'}</td>
+                      <td className={`p-3 text-right font-semibold ${r.balance < 0 ? 'text-red-600' : 'text-green-700'}`}>
+                        {formatCurrency(Math.abs(r.balance))}
+                        <span className="ml-1 text-[10px] font-normal text-slate-400">{r.balance < 0 ? 'payable' : 'held'}</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {expenseMasterFiltered.length === 0 && (
+                    <tr><td colSpan={5} className="p-8 text-center text-slate-400">No employees with expense or payment activity.</td></tr>
+                  )}
+                </tbody>
+                {expenseMasterFiltered.length > 0 && (
+                  <tfoot className="bg-slate-50 font-semibold text-slate-800">
+                    <tr>
+                      <td className="p-3 text-right text-xs uppercase text-slate-500">Total</td>
+                      <td className="p-3 text-right text-amber-700">{formatCurrency(expenseMasterTotals.unapproved)}</td>
+                      <td className="p-3 text-right">{formatCurrency(expenseMasterTotals.approved)}</td>
+                      <td className="p-3 text-right">{formatCurrency(expenseMasterTotals.payments)}</td>
+                      <td className={`p-3 text-right ${expenseMasterTotals.balance < 0 ? 'text-red-600' : 'text-green-700'}`}>{formatCurrency(Math.abs(expenseMasterTotals.balance))}</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {viewMode === 'submit' && (
         <div className="grid gap-6 md:grid-cols-2">

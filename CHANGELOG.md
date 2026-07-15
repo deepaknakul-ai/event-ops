@@ -4,6 +4,15 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.8 — Expense Master (per-employee summary)
+
+New **Master** tab in the Expense Tracker (Owner / Accountant only): a per-employee table
+showing **Unapproved**, **Approved**, **Total Payment** (advances + payouts) and **Balance**
+(= payments received − approved expenses; positive = advance held by the employee, negative
+= reimbursement payable). Includes an employee search, a totals row, and click-through to
+each employee's dashboard. Aggregates the same figures the single-employee dashboard already
+computes, in one pass.
+
 ## 3.6.7 — Ledger-link PO amount ties out with the books + employee-label fix
 
 The client/vendor ledger link computed a vendor **PO's amount** with a hand-rolled calc
