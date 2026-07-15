@@ -213,6 +213,7 @@ function inferPartyTypeFromIntent(intent) {
       return 'vendor';
     case 'salary':
     case 'advance':
+    case 'reimbursement':
       return 'employee';
     default:
       return '';

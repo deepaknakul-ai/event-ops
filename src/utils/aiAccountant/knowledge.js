@@ -113,6 +113,26 @@ const EXPENSE_RULES = [
   { re: /\b(courier|shipping|freight|transport|logistics|delivery)\b/i, account: 'Freight & Logistics' },
 ];
 
+// Fuel disambiguation — the owner's rule is "ask each time" when it's unclear
+// whether fuel is generator/site power vs vehicle fuel.
+const FUEL_RE     = /\b(diesel|petrol|fuel|cng|lpg)\b/i;
+const GEN_FUEL_RE = /\b(generator|genset|gen\s*set|dg\s*set|\bdg\b|genny|power\s*backup|site\s*power)\b/i;
+const VEHICLE_RE  = /\b(car|bike|scooter|scooty|activa|bullet|motorcycle|motorbike|two[-\s]?wheeler|four[-\s]?wheeler|vehicle|van|truck|tempo|lorry|auto|bus)\b/i;
+
+/**
+ * Classify the CONTEXT of a fuel mention so callers can route the account.
+ * @param {string} text
+ * @param {{ hasProject?: boolean }} [opts]  // a job/site reference implies generator/site fuel
+ * @returns {'generator'|'vehicle'|'ambiguous'|null}  null = not a fuel mention
+ */
+export function fuelContext(text, opts = {}) {
+  const t = String(text || '');
+  if (!FUEL_RE.test(t)) return null;
+  if (VEHICLE_RE.test(t)) return 'vehicle';
+  if (GEN_FUEL_RE.test(t) || opts.hasProject) return 'generator';
+  return 'ambiguous';
+}
+
 /**
  * Pick the best expense account for a description.
  * @param {string} desc

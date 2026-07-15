@@ -108,6 +108,7 @@ const Accounting = ({
   payouts = [],
   expenses = [],
   advances = [],
+  employees = [],
   chartOfAccounts = [],
   manualJournalEntries = [],
   openingBalances = [],
@@ -952,6 +953,13 @@ const Accounting = ({
     clients.forEach(c => c.name && names.add(c.name));
     return Array.from(names).sort();
   }, [snapshot.ledger, clients]);
+
+  // Employee names for the assistant's reimbursement detection. Kept separate from
+  // partyNames — an employee must never be grounded as a client/vendor party.
+  const employeeNames = useMemo(
+    () => Array.from(new Set((employees || []).map((e) => e && e.name).filter(Boolean))).sort(),
+    [employees]
+  );
 
   // Party-name → GSTIN map so the assistant can decide CGST/SGST vs IGST and
   // validate the counterparty's GSTIN (keyed by lowercased name).
@@ -4452,6 +4460,7 @@ const Accounting = ({
         orgGstin={orgGstin}
         partyGstins={partyGstins}
         projectNames={projectNames}
+        employeeNames={employeeNames}
         aiEnabled={aiEnabled}
       />
 

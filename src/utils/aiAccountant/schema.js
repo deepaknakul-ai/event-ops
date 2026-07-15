@@ -81,6 +81,7 @@ export const KNOWN_ACCOUNT_DEFAULTS = {
   'Output SGST':                 { type: 'Liability', subType: 'Current Liability',  normalSide: 'Cr' },
   'Output IGST':                 { type: 'Liability', subType: 'Current Liability',  normalSide: 'Cr' },
   'TDS Payable':                 { type: 'Liability', subType: 'Current Liability',  normalSide: 'Cr' },
+  'Employee Payable':            { type: 'Liability', subType: 'Current Liability',  normalSide: 'Cr' },
   'Outstanding Expenses':        { type: 'Liability', subType: 'Current Liability',  normalSide: 'Cr' },
   'Loans':                       { type: 'Liability', subType: 'Loan',               normalSide: 'Cr' },
   // Equity

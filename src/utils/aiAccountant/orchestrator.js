@@ -55,6 +55,8 @@ const FIX_HINTS = {
   cash_cap_breached: 'Cash payment exceeds the ₹10,000/day limit (Sec 40A(3)).',
   contra_unresolved: 'The contra account is unresolved (Suspense) — set the correct account.',
   missing_narration: 'Add a short narration for the audit trail.',
+  fuel_account_ambiguous: 'Pick Site Power & Fuel (generator/site) or Travelling & Conveyance (vehicle).',
+  employee_expense_ambiguous: 'Set the debit/credit for a reimbursement (Cr Employee Payable), advance (Dr Employee Advances), or plain company expense.',
 };
 
 const SEVERITY_PENALTY = { blocking: 40, warning: 12, advisory: 3 };

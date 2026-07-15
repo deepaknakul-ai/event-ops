@@ -11,7 +11,7 @@ import { parseDate } from './dates.js';
 import { extractGSTRate, splitGSTByRate, extractSplitLines, extractVoucherNo, extractProjectTag, extractTDSBreakdown } from './extract.js';
 import { inferAccountMeta, KNOWN_ACCOUNT_DEFAULTS, round2 } from './schema.js';
 import { suggestAccountForText, suggestAccountForParty, suggestIntentFromPhrase } from './learning.js';
-import { determineSupplyType, outputGSTLines, inputGSTLines, classifyExpenseAccount, tdsSectionForTransaction } from './knowledge.js';
+import { determineSupplyType, outputGSTLines, inputGSTLines, classifyExpenseAccount, fuelContext, tdsSectionForTransaction } from './knowledge.js';
 
 // ── Intent keyword table ─────────────────────────────────────────────────────
 // Each list intentionally contains many natural-language variants — formal,
@@ -526,6 +526,62 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ── Employee-expense + fuel helpers ──────────────────────────────────────────
+
+// Given a description that already classified to 'Site Power & Fuel', decide the
+// real account: reclassify obvious vehicle fuel to Travelling & Conveyance, and
+// on an ambiguous fuel mention keep the site-fuel default but attach an advisory
+// (owner's "ask each time" rule). Returns { account, issue? }.
+function resolveFuelAccount(desc, baseAccount, hasProject) {
+  const ctxFuel = fuelContext(desc, { hasProject });
+  if (ctxFuel === 'vehicle') return { account: 'Travelling & Conveyance' };
+  if (ctxFuel === 'ambiguous') {
+    return {
+      account: baseAccount, // sensible default = Site Power & Fuel
+      issue: {
+        level: 'info',
+        code: 'fuel_account_ambiguous',
+        message: 'Fuel expense: confirm "Site Power & Fuel" (generator/site power) vs "Travelling & Conveyance" (vehicle fuel) before posting.',
+      },
+    };
+  }
+  return { account: baseAccount }; // generator/site or non-fuel → unchanged
+}
+
+// Explicit signals that an employee paid out of pocket and the company owes them.
+const REIMBURSE_CUES = /\b(reimburse|reimbursement|on behalf|out of pocket|out-of-pocket|paid from (?:his|her|their) own|spent from (?:his|her|their) own|apni jeb se|khud ke paise)\b/i;
+// Implicit "<name> paid/spent N ..." — only trusted when <name> is a known employee.
+const PERSON_ACTED_RE = /\b([a-z][a-z.]{1,})\s+(?:paid|spent|gave|incurred)\b/i;
+
+/**
+ * Decide whether an expense/payment is an employee reimbursement.
+ * Explicit cue → confident 'reimbursement'. A KNOWN employee acting ("Rahul paid
+ * ... for ...") → 'ambiguous' (could be advance/company-paid; advisory only). We
+ * never guess an employee from an arbitrary token — that avoids "cash paid"/"we
+ * paid" false positives.
+ * @returns {{ kind:'reimbursement'|'ambiguous'|null, employee:string }}
+ */
+function detectEmployeeExpense(text, ctx, party) {
+  const emps = Array.isArray(ctx?.employeeNames) ? ctx.employeeNames : [];
+  const lower = String(text || '').toLowerCase();
+  const isKnownParty = party && Array.isArray(ctx?.partyNames)
+    && ctx.partyNames.some((n) => String(n).toLowerCase() === String(party).toLowerCase());
+  const empHit = emps.find((n) => n && new RegExp(`\\b${escapeRegex(String(n).toLowerCase())}\\b`).test(lower));
+
+  if (REIMBURSE_CUES.test(text)) {
+    const m = PERSON_ACTED_RE.exec(text);
+    const captured = empHit
+      || (party && !isKnownParty ? party : '')
+      || (m ? titleCaseName(m[1]) : '');
+    return { kind: 'reimbursement', employee: captured || party || 'Employee' };
+  }
+  // Implicit: a known employee "paid ... for ..." — surface as advisory, don't reroute.
+  if (empHit && /\bfor\b/i.test(text)) {
+    return { kind: 'ambiguous', employee: empHit };
+  }
+  return { kind: null, employee: '' };
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 /**
  * Parse a free-text user message into a canonical Transaction.
@@ -716,12 +772,22 @@ export function parseMessage(text, ctx = {}) {
   const confidence = Math.min(1, round2(score / MAX_SIGNAL));
   const projectTag = extractProjectTag(trimmed, ctx.projectNames);
 
+  // Employee-expense detection (only for expense/payment). An explicit "reimburse …"
+  // cue promotes the intent to 'reimbursement'; a known employee "paid … for …" is
+  // left as-is but flagged advisory below.
+  let empExp = { kind: null, employee: '' };
+  if (intent === 'expense' || intent === 'payment') {
+    empExp = detectEmployeeExpense(trimmed, ctx, party);
+    if (empExp.kind === 'reimbursement') intent = 'reimbursement';
+  }
+
   /** @type {import('./schema.js').Transaction} */
   const base = {
     intent,
     date,
     narration: '',
     entries: [],
+    issues: [],
     party: party
       ? { type: /vendor|supplier|bought|purchase/i.test(trimmed) ? 'vendor' : 'client', name: party }
       : { type: 'unknown', name: '' },
@@ -756,6 +822,13 @@ export function parseMessage(text, ctx = {}) {
         base.narration = `Payment made to ${p}${bankSignal ? ' (bank)' : ''}`;
       }
       base.party = { type: 'vendor', name: p };
+      if (empExp.kind === 'ambiguous') {
+        base.issues.push({
+          level: 'info',
+          code: 'employee_expense_ambiguous',
+          message: `Is this a reimbursement to ${empExp.employee} (they paid), an advance, or a company-paid expense? Confirm before posting.`,
+        });
+      }
       break;
     }
     case 'invoice': {
@@ -803,29 +876,59 @@ export function parseMessage(text, ctx = {}) {
       const hasProject = !!projectTag;
       const split = extractSplitLines(trimmed);
       if (split.length >= 2) {
-        base.entries = split.map((item) => ({
-          debitAccount: classifyExpenseAccount(item.description, { hasProject }).account,
-          creditAccount: cashOrBank,
-          amount: item.amount,
-        }));
+        base.entries = split.map((item) => {
+          const acct = classifyExpenseAccount(item.description, { hasProject }).account;
+          const fuel = acct === 'Site Power & Fuel' ? resolveFuelAccount(item.description, acct, hasProject) : { account: acct };
+          if (fuel.issue) base.issues.push(fuel.issue);
+          return { debitAccount: fuel.account, creditAccount: cashOrBank, amount: item.amount };
+        });
         base.narration = `Expense (split): ${split.map((i) => i.description).join(' + ')}`;
         base.meta = { ...base.meta, split: true, lineCount: split.length };
       } else {
         const learnedAcct = suggestAccountForText(trimmed, ctx.learned);
         const classified = classifyExpenseAccount(trimmed, { hasProject });
-        const account = (learnedAcct && learnedAcct.confidence >= 0.4 ? learnedAcct.account : null)
+        let account = (learnedAcct && learnedAcct.confidence >= 0.4 ? learnedAcct.account : null)
           || classified.account;
+        if (account === 'Site Power & Fuel') {
+          const fuel = resolveFuelAccount(trimmed, account, hasProject);
+          account = fuel.account;
+          if (fuel.issue) base.issues.push(fuel.issue);
+        }
         base.entries = [{ debitAccount: account, creditAccount: cashOrBank, amount }];
         base.narration = `Expense: ${party || trimmed}`;
         base.meta = { ...base.meta, expenseGroup: classified.direct ? 'Direct' : 'Indirect' };
       }
+      if (empExp.kind === 'ambiguous') {
+        base.issues.push({
+          level: 'info',
+          code: 'employee_expense_ambiguous',
+          message: `Is this a reimbursement to ${empExp.employee} (they paid), an advance, or a company-paid expense? Confirm before posting.`,
+        });
+      }
       break;
     }
     case 'advance': {
-      const name = party || 'Employee';
+      const emps = Array.isArray(ctx.employeeNames) ? ctx.employeeNames : [];
+      const empHit = emps.find((n) => n && new RegExp(`\\b${escapeRegex(String(n).toLowerCase())}\\b`).test(trimmed.toLowerCase()));
+      const name = empHit || party || 'Employee';
       base.entries = [{ debitAccount: 'Employee Advances', creditAccount: cashOrBank, amount }];
       base.narration = `Advance given to ${name}`;
       base.party = { type: 'employee', name };
+      break;
+    }
+    case 'reimbursement': {
+      const hasProject = !!projectTag;
+      const name = empExp.employee || party || 'Employee';
+      const classified = classifyExpenseAccount(trimmed, { hasProject });
+      const fuel = classified.account === 'Site Power & Fuel'
+        ? resolveFuelAccount(trimmed, classified.account, hasProject)
+        : { account: classified.account };
+      if (fuel.issue) base.issues.push(fuel.issue);
+      // Dr the expense, Cr Employee Payable — the company now owes the employee.
+      base.entries = [{ debitAccount: fuel.account, creditAccount: 'Employee Payable', amount }];
+      base.narration = `Reimbursement to ${name} — ${fuel.account}`;
+      base.party = { type: 'employee', name };
+      base.meta = { ...base.meta, employeeExpense: 'reimbursement', expenseGroup: classified.direct ? 'Direct' : 'Indirect' };
       break;
     }
     case 'purchase': {

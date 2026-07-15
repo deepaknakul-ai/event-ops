@@ -4,6 +4,27 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.10 — Virtual Accountant: employee reimbursements + fuel "ask each time"
+
+The AI Accountant chat now understands **employee out-of-pocket spends** and **ambiguous fuel**:
+
+- **Employee reimbursement** — phrases like *"reimburse Rahul 2000 for site food"* or
+  *"paid on behalf of Raj 1500 for printing"* now book **Dr &lt;Expense&gt; / Cr Employee Payable**
+  (the company owes the employee), with the employee on the party leg — instead of wrongly
+  treating the person as a vendor. A new **Employee Payable** account is seeded. When a known
+  employee is merely mentioned (*"Rahul paid 2000 for taxi"*) the entry is left as a company
+  expense but carries an **advisory** to confirm whether it's a reimbursement, an advance, or
+  company-paid — never silently rerouted. Company advances (*"advance 5000 to Raj"*) are
+  unchanged (Dr Employee Advances).
+- **Fuel "ask each time"** — generic *"spent 5000 on fuel"* books to **Site Power & Fuel** but
+  now carries an **advisory** to confirm Site Power & Fuel (generator/site) vs Travelling &
+  Conveyance (vehicle) before posting. Clear context skips the prompt: *"diesel for generator"*
+  → Site Power & Fuel; *"petrol for car" / "bike petrol"* → auto-reclassified to Travelling &
+  Conveyance. These advisories surface in the v3.6.9 audit banner.
+
+Deterministic rules engine — no Anthropic key required. Employee names are read from the HR
+module and are never grounded as a client/vendor party.
+
 ## 3.6.9 — Virtual Accountant: Audit Agent verdict in the chat
 
 The AI Accountant chat now runs its drafts past a deterministic **Audit Agent** before you

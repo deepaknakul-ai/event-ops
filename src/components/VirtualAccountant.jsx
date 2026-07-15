@@ -63,6 +63,7 @@ const TYPE_LABELS = {
   credit_note: 'Credit Note',
   debit_note: 'Debit Note',
   advance: 'Advance',
+  reimbursement: 'Employee Reimbursement',
 };
 
 // Entry Preview Card
@@ -284,6 +285,7 @@ const VirtualAccountant = ({
   orgGstin = '',
   partyGstins = {},      // { 'party name (lower)': 'GSTIN' }
   projectNames = [],
+  employeeNames = [],    // for employee-reimbursement detection (never grounded as a vendor/client)
   // LLM escalation (settings/ai_public.enabled — the key itself never reaches the client):
   aiEnabled = false,
 }) => {
@@ -312,8 +314,8 @@ const VirtualAccountant = ({
 
   const learned = useMemo(() => learnFromEntries(recentJournalEntries || []), [recentJournalEntries]);
   const ctx = useMemo(
-    () => ({ partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames }),
-    [partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames]
+    () => ({ partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames, employeeNames }),
+    [partyNames, allAccounts, learned, orgGstin, partyGstins, projectNames, employeeNames]
   );
   const validatorCtx = useMemo(() => ({
     knownAccounts: allAccounts,

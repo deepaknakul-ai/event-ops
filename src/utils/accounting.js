@@ -146,6 +146,7 @@ export const DEFAULT_CHART_OF_ACCOUNTS = [
   { code: '5200', name: 'Expense:General', type: 'Expense', subType: 'Operating Expense', normalSide: 'Dr', isSystem: true, isActive: true },
   { code: '1400', name: 'TDS Receivable', type: 'Asset', subType: 'Current Asset', normalSide: 'Dr', isSystem: true, isActive: true },
   { code: '2200', name: 'TDS Payable', type: 'Liability', subType: 'Current Liability', normalSide: 'Cr', isSystem: true, isActive: true },
+  { code: '2210', name: 'Employee Payable', type: 'Liability', subType: 'Current Liability', normalSide: 'Cr', isSystem: true, isActive: true },
   { code: '3020', name: 'Profit And Loss Closing', type: 'Equity', subType: 'Equity', normalSide: 'Dr', isSystem: true, isActive: true },
 
   // ── Extended professional CoA (editable; seeded for the AI Accountant) ──────
