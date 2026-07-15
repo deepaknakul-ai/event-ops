@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runAuditAgent, runOrchestrator, POLICY_VERSION } from '../src/utils/aiAccountant/orchestrator.js';
+import { runAuditAgent, runOrchestrator, auditFromIssues, POLICY_VERSION } from '../src/utils/aiAccountant/orchestrator.js';
 import { parseMessage } from '../src/utils/aiAccountant/index.js';
 
 // A structurally-clean expense draft (the Accounting Agent's canonical Transaction).
@@ -43,6 +43,37 @@ describe('runAuditAgent (deterministic Audit Agent)', () => {
     expect(same).toBeTruthy();
     expect(same.severity).toBe('blocking'); // validator level 'error' → blocking
     expect(same.fix).toBeTruthy();
+  });
+});
+
+describe('auditFromIssues (UI/persist path — no re-validation)', () => {
+  it('scores a clean draft from its issues without a validator ctx', () => {
+    const r = auditFromIssues(cleanExpense());
+    expect(r.blocking).toBe(false);
+    expect(r.auditScore).toBeGreaterThanOrEqual(90);
+    expect(Array.isArray(r.findings)).toBe(true);
+  });
+
+  it('maps an already-attached error issue to a blocking finding with a fix hint', () => {
+    const r = auditFromIssues(cleanExpense({ issues: [{ level: 'error', code: 'same_account', message: 'Dr = Cr' }] }));
+    const f = r.findings.find((x) => x.code === 'same_account');
+    expect(f.severity).toBe('blocking');
+    expect(f.fix).toBeTruthy();
+    expect(r.blocking).toBe(true);
+  });
+
+  it('adds the missing-narration advisory when narration is blank', () => {
+    const r = auditFromIssues(cleanExpense({ narration: '', issues: [] }));
+    expect(r.findings.some((f) => f.code === 'missing_narration' && f.severity === 'advisory')).toBe(true);
+    expect(r.blocking).toBe(false);
+  });
+
+  it('matches runAuditAgent output for an already-validated draft (same findings/score)', () => {
+    const txn = cleanExpense();
+    const viaAgent = runAuditAgent(txn); // validates (no issues added) then scores
+    const viaIssues = auditFromIssues(txn);
+    expect(viaIssues.auditScore).toBe(viaAgent.auditScore);
+    expect(viaIssues.findings).toEqual(viaAgent.findings);
   });
 });
 

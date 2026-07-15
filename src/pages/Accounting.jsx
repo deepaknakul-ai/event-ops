@@ -50,6 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
+import { auditFromIssues, POLICY_VERSION } from '../utils/aiAccountant';
 import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
 import { exportReport as exportReportImpl, exportGstToExcel as exportGstToExcelImpl, exportGstrJson as exportGstrJsonImpl, exportAiEntries as exportAiEntriesImpl } from '../utils/accountingExports';
 
@@ -1089,6 +1090,15 @@ const Accounting = ({
       ai_model: parsed.model || 'rule-v1',
       ai_prompt: parsed.rawPrompt || '',
       ai_issues: (parsed.issues || []).filter((i) => i.level !== 'error'),
+      // Orchestrator/Audit-Agent decision trace (Phase 1). Persisted here on the
+      // single AI write path so the Process-Analyst slice can later mine it.
+      ai_decision_trace: {
+        policy_version: POLICY_VERSION,
+        audit: auditFromIssues(parsed),
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null,
+        model_version: parsed.model || 'rule-v1',
+        created_by_agent: 'orchestrator',
+      },
       // Clarify correction ("typed name" → chosen party) — mined by
       // learnFromEntries so the same phrase resolves silently next time.
       ai_party_alias: parsed?.meta?.partyAlias || null,

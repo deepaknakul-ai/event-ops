@@ -66,24 +66,38 @@ const SEVERITY_PENALTY = { blocking: 40, warning: 12, advisory: 3 };
  * @param {object} ctx  ValidatorContext { knownAccounts, closedFYs, getFY, recentJournalEntries, partyGstin, tdsSection, ... }
  * @returns {AuditResult}
  */
-export function runAuditAgent(txn, ctx = {}) {
-  const validated = validateTransaction(txn, ctx);
-  const issues = Array.isArray(validated.issues) ? validated.issues : [];
+/**
+ * Build findings + score from a Transaction that ALREADY carries validator issues
+ * (i.e. was validated at parse time). Lets the chat UI + the persist path render
+ * the Audit Agent's output without re-running validateTransaction.
+ * @param {object} txn  a validated Transaction (has `issues`)
+ * @returns {{ findings:AuditFinding[], auditScore:number, blocking:boolean }}
+ */
+export function auditFromIssues(txn) {
+  const issues = Array.isArray(txn?.issues) ? txn.issues : [];
   const findings = issues.map((iss) => ({
     severity: SEVERITY_BY_LEVEL[iss.level] || 'advisory',
     code: iss.code,
     message: iss.message,
     ...(FIX_HINTS[iss.code] ? { fix: FIX_HINTS[iss.code] } : {}),
   }));
-
   // Audit-only advisory not covered by the validator: missing narration.
   if (!String(txn?.narration || '').trim()) {
     findings.push({ severity: 'advisory', code: 'missing_narration', message: 'No narration provided.', fix: FIX_HINTS.missing_narration });
   }
-
   const auditScore = Math.max(0, 100 - findings.reduce((s, f) => s + (SEVERITY_PENALTY[f.severity] || 0), 0));
   const blocking = findings.some((f) => f.severity === 'blocking');
-  return { findings, auditScore, blocking, postable: canPost(validated) };
+  return { findings, auditScore, blocking };
+}
+
+/**
+ * Audit Agent — deterministic. Validates then scores. `postable` uses the same
+ * canPost gate the UI uses (entries present, no error-level issue, non-control intent).
+ * @returns {AuditResult}
+ */
+export function runAuditAgent(txn, ctx = {}) {
+  const validated = validateTransaction(txn, ctx);
+  return { ...auditFromIssues(validated), postable: canPost(validated) };
 }
 
 /** Concise human-facing summary of the batch decision. */

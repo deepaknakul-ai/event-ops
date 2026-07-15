@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { X, Sparkles, Send, Check, Edit3, RotateCcw, AlertTriangle, Info, Mic, MicOff, HelpCircle, BookmarkPlus } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { formatCurrency } from '../utils/helpers';
-import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
+import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, auditFromIssues, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
 import { aiAvailable, aiExtractEntry } from '../utils/aiParse';
 
 // Web Speech API (prefix-agnostic). Returns null when unsupported.
@@ -69,19 +69,24 @@ const TYPE_LABELS = {
 const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, onAskAi, editingEntry, setEditingEntry, allAccounts }) => {
   const { parsed, status } = msg;
   const totalAmount = parsed.entries.reduce((s, e) => s + e.amount, 0);
-  const issues = parsed.issues || [];
   const { errors, warnings, infos } = issueSummary(parsed);
   const hasErrors = errors > 0;
-  const badgeFor = (lvl) => ({
-    error:   'bg-red-50 border-red-200 text-red-700',
-    warning: 'bg-amber-50 border-amber-200 text-amber-700',
-    info:    'bg-blue-50 border-blue-200 text-blue-700',
-  }[lvl] || 'bg-slate-50 border-slate-200 text-slate-700');
-  const iconFor = (lvl) => lvl === 'error'
-    ? <AlertTriangle size={12} className="shrink-0" />
-    : lvl === 'warning'
-      ? <AlertTriangle size={12} className="shrink-0" />
-      : <Info size={12} className="shrink-0" />;
+
+  // Audit Agent — the draft was already validated at parse time, so score it from
+  // its issues (no re-validation). Severity + fix-hints + an audit score come back;
+  // the Orchestrator's per-draft "safe" gate decides the ready/needs-review banner.
+  const audit = auditFromIssues(parsed);
+  const conf = typeof parsed.confidence === 'number' ? parsed.confidence : 1;
+  const auditReady = canPost(parsed) && !audit.blocking && audit.auditScore >= 70 && conf >= 0.55;
+
+  const badgeFor = (sev) => ({
+    blocking: 'bg-red-50 border-red-200 text-red-700',
+    warning:  'bg-amber-50 border-amber-200 text-amber-700',
+    advisory: 'bg-blue-50 border-blue-200 text-blue-700',
+  }[sev] || 'bg-slate-50 border-slate-200 text-slate-700');
+  const iconFor = (sev) => sev === 'advisory'
+    ? <Info size={12} className="shrink-0" />
+    : <AlertTriangle size={12} className="shrink-0" />;
 
   const statusColor = {
     pending: hasErrors ? 'border-red-200 bg-red-50/40' : 'border-indigo-200 bg-white',
@@ -188,12 +193,28 @@ const EntryPreview = ({ msg, onPost, onPark, onCancel, onEdit, onAskAi, editingE
         <span className="font-bold text-slate-600">Total: {formatCurrency(totalAmount)}</span>
       </div>
 
-      {status === 'pending' && issues.length > 0 && (
+      {status === 'pending' && (
+        <div
+          className={`flex items-center justify-between rounded-md border px-2 py-1 text-[11px] ${auditReady ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}
+          title="Audit Agent verdict — deterministic check before you post"
+        >
+          <span className="inline-flex items-center gap-1 font-semibold">
+            {auditReady ? <Check size={12} className="shrink-0" /> : <AlertTriangle size={12} className="shrink-0" />}
+            {auditReady ? 'Audit passed — ready to post' : 'Audit flagged — review before posting'}
+          </span>
+          <span className="font-mono text-[10px] opacity-80">audit {audit.auditScore}/100</span>
+        </div>
+      )}
+
+      {status === 'pending' && audit.findings.length > 0 && (
         <div className="space-y-1 pt-1">
-          {issues.map((iss, i) => (
-            <div key={i} className={`flex items-start gap-1.5 rounded-md border px-2 py-1 text-[11px] ${badgeFor(iss.level)}`}>
-              {iconFor(iss.level)}
-              <span>{iss.message}</span>
+          {audit.findings.map((f, i) => (
+            <div key={i} className={`flex items-start gap-1.5 rounded-md border px-2 py-1 text-[11px] ${badgeFor(f.severity)}`}>
+              {iconFor(f.severity)}
+              <span>
+                {f.message}
+                {f.fix && <span className="block text-[10px] opacity-80 mt-0.5">→ {f.fix}</span>}
+              </span>
             </div>
           ))}
         </div>

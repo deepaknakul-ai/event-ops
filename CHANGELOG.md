@@ -4,6 +4,18 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.9 — Virtual Accountant: Audit Agent verdict in the chat
+
+The AI Accountant chat now runs its drafts past a deterministic **Audit Agent** before you
+post. Each entry preview shows an **audit verdict banner** — *"Audit passed — ready to post"*
+(green) or *"Audit flagged — review before posting"* (amber) with an **audit score /100** —
+and every finding is now tagged by severity (**blocking / warning / advisory**) with a
+plain-language **"→ how to fix"** hint. When an entry is posted, an **Agent Decision Trace**
+(the audit findings, score, confidence and policy version) is saved alongside it for the audit
+trail. No workflow change and no Anthropic key required — this runs on the existing rules
+engine. Foundation for the multi-agent Virtual Accountant (Orchestrator + Accounting + Audit
++ Process-Analyst); the LLM Accounting Agent, employee-expense flow and TDS depth follow.
+
 ## 3.6.8 — Expense Master (per-employee summary)
 
 New **Master** tab in the Expense Tracker (Owner / Accountant only): a per-employee table
