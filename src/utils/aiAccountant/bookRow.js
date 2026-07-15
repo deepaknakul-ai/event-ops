@@ -19,6 +19,7 @@
 import { round2, inferAccountMeta } from './schema.js';
 import { guessExpenseAccount, findPartyCandidates } from './nlu.js';
 import { suggestAccountForText } from './learning.js';
+import { classifyBankNarration } from './knowledge.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -61,6 +62,9 @@ export function buildRowBookingDraft(row, opts = {}) {
   // 2. Sole full-coverage party hit (a real name from the ledger, not noise).
   const cands = desc ? findPartyCandidates(desc, partyNames) : [];
   const soleParty = (cands.length === 1 && (cands[0].coverage ?? 1) >= 1) ? cands[0] : null;
+  // 3. Bank-pattern classifier — only consulted when no learned/party signal, so
+  //    a recognised name always wins. Handles charges, interest, cash, reversals.
+  const bankHit = (!(learnedHit && learnedHit.account) && !soleParty) ? classifyBankNarration(desc, direction) : null;
 
   if (learnedHit && learnedHit.account) {
     contra = learnedHit.account;
@@ -72,6 +76,9 @@ export function buildRowBookingDraft(row, opts = {}) {
     // name we actually recognise.
     party = { type: direction === 'credit' ? 'client' : 'vendor', name: soleParty.name };
     confidence = 0.6;
+  } else if (bankHit) {
+    contra = bankHit.account;          // 'Suspense' when review (reversal/refund)
+    confidence = bankHit.confidence;
   } else if (direction === 'debit') {
     contra = guessExpenseAccount(desc);
   } else {
@@ -83,8 +90,10 @@ export function buildRowBookingDraft(row, opts = {}) {
     confidence = 0.3;
     issues.push({
       level: 'warning',
-      code: 'contra_unresolved',
-      message: 'Could not infer the other side of this entry — pick the correct account before posting.',
+      code: bankHit?.review ? 'reversal_review' : 'contra_unresolved',
+      message: bankHit?.review
+        ? bankHit.reason
+        : 'Could not infer the other side of this entry — pick the correct account before posting.',
     });
   }
 
@@ -110,6 +119,7 @@ export function buildRowBookingDraft(row, opts = {}) {
     model: 'reco-v1',
     meta: {
       bankRow: { id: row?.id || null, date, amount, direction, ref, description: desc },
+      ...(bankHit && !bankHit.review ? { suggestion: { account: bankHit.account, reason: bankHit.reason } } : {}),
     },
   };
 }

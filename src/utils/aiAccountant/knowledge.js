@@ -151,6 +151,48 @@ export function classifyExpenseAccount(desc, opts = {}) {
   return { account: 'Miscellaneous Expense', direct: false };
 }
 
+// ── Bank-statement narration → confident contra (reconciliation suggestions) ──
+// Recognises the handful of unmatched bank rows that have an unambiguous other
+// side: bank charges/fees, interest, cash movements, and reversals/refunds.
+// Returns null for everything else so the caller falls back to the party/keyword
+// chain (a real vendor/client name must still win). Deliberately narrow —
+// bank-specific tokens only — so it never hijacks a normal expense/party row.
+const BANK_CHARGE_RE = /\b(chrg|chg|charges?|amb|min\s*bal|non[-\s]?maint|maintenance|sms\s*(?:chg|charge|alert)|atm\s*(?:chg|fee|decline)|(?:neft|imps|rtgs|ecs)\s*chg|chq\s*(?:ret|return|bounce|book)|service\s*charge|processing\s*(?:fee|charge)|conv(?:enience)?\s*(?:fee|charge)|penal|folio|debit\s*card\s*(?:fee|annual))\b/i;
+const BANK_INTEREST_RE = /\b(int|intt|interest)\b/i;
+const BANK_CASH_RE = /\b(cash\s*(?:dep(?:osit)?|wdl|withdrawal|withdrawn)|atm\s*(?:wdl|cw)|self\s*(?:dep|withdrawal)|by\s*cash)\b/i;
+const BANK_REVERSAL_RE = /\b(reversal|reversed|\brev\b|refund|charge\s*back|chargeback|(?:imps|neft|rtgs)\s*return|failed|declined|returned)\b/i;
+
+/**
+ * @param {string} desc   the bank row narration
+ * @param {'credit'|'debit'} direction  money-in vs money-out
+ * @returns {{ account:string, confidence:number, reason:string, review?:boolean }|null}
+ */
+export function classifyBankNarration(desc, direction) {
+  const t = String(desc || '');
+  if (!t.trim()) return null;
+  const dir = direction === 'credit' ? 'credit' : 'debit';
+
+  // Reversal / refund — never auto-pick a P&L account; force a human review.
+  if (BANK_REVERSAL_RE.test(t)) {
+    return { account: 'Suspense', confidence: 0.35, review: true, reason: 'Looks like a reversal/refund — confirm which entry it reverses before posting.' };
+  }
+  // Cash deposit / withdrawal — bank ↔ cash contra (clean either direction).
+  if (BANK_CASH_RE.test(t)) {
+    return { account: 'Cash', confidence: 0.8, reason: dir === 'credit' ? 'Cash deposited into the bank.' : 'Cash withdrawn from the bank.' };
+  }
+  // Interest — income when credited, finance cost when debited.
+  if (BANK_INTEREST_RE.test(t) && !BANK_CHARGE_RE.test(t)) {
+    return dir === 'credit'
+      ? { account: 'Interest Income', confidence: 0.85, reason: 'Interest credited by the bank.' }
+      : { account: 'Interest Expense', confidence: 0.8, reason: 'Interest / finance charge debited by the bank.' };
+  }
+  // Bank charges / fees — only on an outflow.
+  if (dir === 'debit' && BANK_CHARGE_RE.test(t)) {
+    return { account: 'Bank Charges', confidence: 0.85, reason: 'Bank charge / fee — booked to Bank Charges.' };
+  }
+  return null;
+}
+
 // ── TDS section inference ─────────────────────────────────────────────────────
 // Maps the nature of a payment to the most likely TDS section so the dormant
 // compliance.checkTDSApplicability() can warn the user.

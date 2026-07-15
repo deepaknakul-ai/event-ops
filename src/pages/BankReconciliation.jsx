@@ -1,10 +1,10 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { addDoc, collection, doc, updateDoc, deleteDoc, onSnapshot, orderBy, query } from 'firebase/firestore';
 import * as XLSX from '@e965/xlsx';
-import { FileUp, ScanLine, Check, X as XIcon, AlertTriangle, Download, Save, FolderOpen, Trash2, Scale, BookOpen } from 'lucide-react';
+import { FileUp, ScanLine, Check, X as XIcon, AlertTriangle, Download, Save, FolderOpen, Trash2, Scale, BookOpen, Info, Lightbulb } from 'lucide-react';
 import {
   parseStatementCSVDetailed, reconcile, rowKey, round2,
-  buildRowBookingDraft, learnFromEntries, validateTransaction, canPost, inferAccountMeta,
+  buildRowBookingDraft, learnFromEntries, validateTransaction, canPost, auditFromIssues, inferAccountMeta,
 } from '../utils/aiAccountant';
 import { getLedgerBalance } from '../utils/accounting';
 import { aiExtractStatement, statementRowsToCsv } from '../utils/aiParse';
@@ -73,8 +73,11 @@ function BookRowCard({ row, bankAccount, partyNames, allAccounts, learned, close
     [tx, allAccounts, closedFYs, getFY, recentJournalEntries],
   );
   const postable = canPost(validated);
-  const errors = (validated.issues || []).filter((i) => i.level === 'error');
-  const warnings = (validated.issues || []).filter((i) => i.level === 'warning');
+  // Audit Agent verdict on the suggested entry (same taxonomy as the chat banner).
+  const audit = auditFromIssues(validated);
+  const conf = typeof initial.confidence === 'number' ? initial.confidence : 1;
+  const auditReady = postable && !audit.blocking && audit.auditScore >= 70 && conf >= 0.55;
+  const suggestion = initial.meta?.suggestion;
 
   // Account suggestions: existing COA + the builder's pick + known party names.
   const accountOptions = useMemo(() => {
@@ -120,14 +123,30 @@ function BookRowCard({ row, bankAccount, partyNames, allAccounts, learned, close
       <div className="text-[11px] font-mono text-slate-600 bg-slate-50 rounded px-2 py-1.5">
         {bankLine} &nbsp;·&nbsp; {contra || '—'} ({contraSide}) &nbsp;·&nbsp; {formatCurrency(amount)}
       </div>
-      {errors.length > 0 && (
-        <div className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5">
-          {errors.map((e, i) => <div key={i}>⚠ {e.message}</div>)}
+      {suggestion && (
+        <div className="flex items-start gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
+          <Lightbulb size={12} className="mt-0.5 shrink-0" />
+          <span>Suggested <strong>{suggestion.account}</strong> — {suggestion.reason}</span>
         </div>
       )}
-      {warnings.length > 0 && (
-        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
-          {warnings.map((w, i) => <div key={i}>• {w.message}</div>)}
+      <div className={`flex items-center justify-between rounded-md border px-2 py-1 text-[11px] ${auditReady ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+        <span className="inline-flex items-center gap-1 font-semibold">
+          {auditReady ? <Check size={12} className="shrink-0" /> : <AlertTriangle size={12} className="shrink-0" />}
+          {auditReady ? 'Audit passed — ready to post' : 'Audit flagged — review before posting'}
+        </span>
+        <span className="font-mono text-[10px] opacity-80">audit {audit.auditScore}/100</span>
+      </div>
+      {audit.findings.length > 0 && (
+        <div className="space-y-1">
+          {audit.findings.map((f, i) => (
+            <div key={i} className={`flex items-start gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
+              f.severity === 'blocking' ? 'bg-red-50 border-red-200 text-red-700'
+              : f.severity === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-700'
+              : 'bg-blue-50 border-blue-200 text-blue-700'}`}>
+              {f.severity === 'advisory' ? <Info size={12} className="shrink-0 mt-0.5" /> : <AlertTriangle size={12} className="shrink-0 mt-0.5" />}
+              <span>{f.message}{f.fix && <span className="block text-[10px] opacity-80">→ {f.fix}</span>}</span>
+            </div>
+          ))}
         </div>
       )}
       <div className="flex items-center gap-2">

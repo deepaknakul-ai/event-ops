@@ -4,6 +4,22 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.13 — Bank reconciliation: smart suggestions for common unmatched rows
+
+When you book an unmatched bank-statement row, the assistant now **auto-suggests the right
+account** for the everyday patterns:
+
+- **Bank charges / fees** (SMS charge, AMB, NEFT/IMPS charge, service charge…) → **Bank Charges**
+- **Interest** → **Interest Income** (credited) / **Interest Expense** (debited)
+- **Cash deposit / withdrawal** → booked against **Cash**
+- **Reversals / refunds** → routed to Suspense with a clear "confirm which entry it reverses"
+  note, never a wrong guess
+
+Each suggested entry shows the reason and now runs the **Audit Agent verdict** (green/amber
+banner + score + fix hints) — the same check the chat uses — before you post. A recognised
+party name or your own learned mapping still wins over these patterns, and everything still
+posts through the one validated → human-confirm → post path. Deterministic; no Anthropic key.
+
 ## 3.6.12 — Virtual Accountant: Process-Analyst insights (Accounts → AI Insights)
 
 A new read-only **AI Insights** tab in Accounts (finance/accountant only) mines the decision
