@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveAccount, buildRunningLedger, partyBalanceAnswer, accountLedgerAnswer,
-  outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer,
+  outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, buildBooksDigest,
 } from '../src/utils/aiAccountant/queries.js';
 import { parseMessage } from '../src/utils/aiAccountant/nlu.js';
 
@@ -76,6 +76,32 @@ describe('outstanding / GST / TDS answers', () => {
     const r = tdsLiabilityAnswer(ledger, fmt);
     expect(r.tdsPayable).toBe(4000);
     expect(r.tdsReceivable).toBe(1000);
+  });
+});
+
+describe('buildBooksDigest (read-only LLM Q&A digest)', () => {
+  const snapshot = {
+    ledger,
+    profitAndLoss: { revenue: 100000, netProfit: 20000 },
+    balanceSheet: { assets: { total: 50000 }, liabilities: { gstPayable: 3000, total: 12000 } },
+    trialBalance: { totalDebit: 60000, totalCredit: 60000, isBalanced: true, difference: 0 },
+  };
+  it('emits a compact digest with statements, balances, receivables/payables, GST/TDS', () => {
+    const d = buildBooksDigest(snapshot, { fy: '2026-27', ageing: { receivableTotals: { total: 5000, '90_plus': 1000 }, payableTotals: { total: 3500, '90_plus': 0 } } });
+    expect(d.fy).toBe('2026-27');
+    expect(d.profit_and_loss.netProfit).toBe(20000);
+    expect(d.trial_balance.isBalanced).toBe(true);
+    expect(d.gst_payable).toBe(3000);
+    expect(d.tds_payable).toBe(4000);
+    expect(d.receivables.find((r) => r.name === 'Acme Corp').bal).toBe(5000);
+    expect(d.payables.find((r) => r.name === 'Zenith').bal).toBe(2000);
+    expect(d.aging.receivable_90plus).toBe(1000);
+  });
+  it('omits zero-balance accounts and is robust to empty input', () => {
+    const d = buildBooksDigest({});
+    expect(d.accounts).toEqual([]);
+    expect(d.receivables).toEqual([]);
+    expect(d.aging).toBe(null);
   });
 });
 

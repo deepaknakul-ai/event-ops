@@ -50,8 +50,9 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
+import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
 import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
 import { exportReport as exportReportImpl, exportGstToExcel as exportGstToExcelImpl, exportGstrJson as exportGstrJsonImpl, exportAiEntries as exportAiEntriesImpl } from '../utils/accountingExports';
@@ -2112,6 +2113,17 @@ const Accounting = ({
           ],
         } : null,
       };
+    }
+
+    // Long tail — a free-form question the deterministic menu didn't classify.
+    // Escalate to the read-only LLM agent, grounded on a compact books digest.
+    // Falls back to the plain summary when AI is off/offline or on any error.
+    if (aiAvailable({ aiEnabled })) {
+      try {
+        const digest = buildBooksDigest(snapshot, { ageing: ageingData, fy: fyFilter, asOn: new Date().toISOString().slice(0, 10) });
+        const answer = await aiAnswerQuery(parsed?.rawPrompt || '', digest);
+        if (answer) return { message: answer, model: 'llm:qa' };
+      } catch { /* fall through to the deterministic summary */ }
     }
 
     // Fallback summary

@@ -32,6 +32,7 @@ export {
   outstandingAnswer,
   gstLiabilityAnswer,
   tdsLiabilityAnswer,
+  buildBooksDigest,
 } from './queries.js';
 export {
   learnFromEntries,

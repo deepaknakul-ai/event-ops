@@ -4,6 +4,23 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.17 — Full Accountant, Phase 3: Ask-anything (AI Q&A over your books)
+
+The assistant can now answer **free-form questions** about your books, not just the fixed menu.
+When a question isn't one of the built-in answers, it escalates to a **read-only AI agent** that
+answers strictly from a compact digest of your actual figures — *"why is my cash lower than last
+month?"*, *"which client is my biggest exposure?"*, *"is my GST under control?"*
+
+- **Grounded & read-only:** the AI only sees a digest of your books (statements, account and
+  party balances, aging, GST/TDS) and is instructed to use **only those figures — never invent
+  numbers**. It cannot post or change anything.
+- **Hybrid, cost-aware:** the deterministic answers (v3.6.15) still handle the common questions
+  instantly and offline for free; the AI is used only for the long tail, and reuses the same
+  monthly budget + rate limits as the rest of the assistant.
+
+Requires the AI assistant to be enabled (Admin Tools → AI Assistant). Falls back to a plain
+summary when AI is off or offline.
+
 ## 3.6.16 — Full Accountant, Phase 2: Audit engine
 
 The AI Accountant can now **audit the whole book** and take responsibility for its health —

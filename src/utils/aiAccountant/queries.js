@@ -121,6 +121,42 @@ export function gstLiabilityAnswer(balanceSheet, fmt = String) {
   };
 }
 
+/**
+ * Compact, READ-ONLY digest of the books for the LLM ask-anything agent — "all
+ * the read tools pre-executed": statements + capped account/party balances +
+ * aging + GST/TDS. Pure; nothing here can post or write.
+ * @param {object} snapshot buildAccountingSnapshot output
+ * @param {{ asOn?:string, fy?:string, ageing?:object }} [extras]
+ */
+export function buildBooksDigest(snapshot = {}, extras = {}) {
+  const ledger = Array.isArray(snapshot.ledger) ? snapshot.ledger : [];
+  const bal = (re) => ledger.filter((r) => re.test(r.account)).reduce((s, r) => s + (r.balance || 0), 0);
+  const nonZero = ledger.filter((r) => Math.abs(r.balance || 0) > 0.5);
+  const parties = nonZero.filter((r) => isSubledger(r.account));
+  const tb = snapshot.trialBalance || {};
+  const tdsRow = ledger.find((r) => r.account === 'TDS Payable');
+  return {
+    as_on: extras.asOn || new Date().toISOString().slice(0, 10),
+    fy: extras.fy || 'all',
+    profit_and_loss: snapshot.profitAndLoss || {},
+    balance_sheet: snapshot.balanceSheet || {},
+    trial_balance: { totalDebit: tb.totalDebit, totalCredit: tb.totalCredit, isBalanced: tb.isBalanced, difference: tb.difference },
+    cash: round2(bal(/^cash/i)),
+    bank: round2(bal(/^bank/i)),
+    accounts: nonZero.slice(0, 250).map((r) => ({ a: r.account, bal: round2(r.balance) })),
+    receivables: parties.filter((r) => r.balance > 0).sort((a, b) => b.balance - a.balance).slice(0, 40).map((r) => ({ name: stripPrefix(r.account), bal: round2(r.balance) })),
+    payables: parties.filter((r) => r.balance < 0).sort((a, b) => a.balance - b.balance).slice(0, 40).map((r) => ({ name: stripPrefix(r.account), bal: round2(Math.abs(r.balance)) })),
+    gst_payable: round2(snapshot.balanceSheet?.liabilities?.gstPayable || 0),
+    tds_payable: tdsRow ? round2(Math.abs(Math.min(tdsRow.balance || 0, 0))) : 0,
+    aging: extras.ageing ? {
+      receivable_total: round2(extras.ageing.receivableTotals?.total || 0),
+      receivable_90plus: round2(extras.ageing.receivableTotals?.['90_plus'] || 0),
+      payable_total: round2(extras.ageing.payableTotals?.total || 0),
+      payable_90plus: round2(extras.ageing.payableTotals?.['90_plus'] || 0),
+    } : null,
+  };
+}
+
 /** TDS payable (deducted, yet to deposit) from the TDS Payable ledger balance. */
 export function tdsLiabilityAnswer(ledger, fmt = String) {
   const row = (ledger || []).find((r) => r.account === 'TDS Payable');

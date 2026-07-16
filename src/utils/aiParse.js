@@ -117,6 +117,23 @@ export const hydrateLlmTransaction = (txn, ctx = {}) => {
   return out;
 };
 
+// ── Ask-anything Q&A (Phase 3) — read-only ───────────────────────────────────
+// buildBooksDigest is a pure snapshot reader — it lives in aiAccountant/queries.js
+// (re-exported from the barrel) so it is testable without any firebase import.
+
+/**
+ * Ask a free-form accounting question, answered ONLY from the provided books
+ * digest by the read-only aiAnswerQuery callable. Never posts. Throws
+ * HttpsError-shaped errors (user-friendly message surfaced in chat).
+ */
+export const aiAnswerQuery = async (question, digest) => {
+  const fn = httpsCallable(getFunctions(), 'aiAnswerQuery');
+  const res = await fn({ appId, question: String(question || '').slice(0, 500), digest });
+  const answer = res && res.data && res.data.answer;
+  if (!answer) throw new Error('The AI could not answer that from your books. Try rephrasing.');
+  return String(answer);
+};
+
 /** Call the Cloud Function and hydrate the result. Throws HttpsError-shaped
  *  errors (err.message is user-friendly — surfaced directly in chat). */
 export const aiExtractEntry = async (text, ctx = {}) => {

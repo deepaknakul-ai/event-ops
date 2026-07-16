@@ -26,6 +26,7 @@ const { promisify } = require('util');
 const {
   LLM_TXN_SCHEMA,
   STATIC_SYSTEM_PROMPT,
+  STATIC_QA_PROMPT,
   LLM_STMT_SCHEMA,
   STATIC_STMT_PROMPT,
   LLM_INVOICE_SCHEMA,
@@ -882,6 +883,95 @@ exports.aiExtractEntry = onCall(
     }
 
     return { ok: true, transaction, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
+  }
+);
+
+// ── AI ask-anything Q&A (read-only) ─────────────────────────────────────────
+// Answers a free-form accounting question using ONLY a compact, read-only books
+// digest the client computes from the in-memory snapshot. Never posts, never
+// writes to the ledger. Reuses settings/ai + ai_usage + the same guards; a
+// separate rate-limit doc (rl_qa_) throttles Q&A independently of entry drafts.
+exports.aiAnswerQuery = onCall(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 60 },
+  async (req) => {
+    const { appId, question, digest } = req.data || {};
+    await assertRole(req.auth, appId, ['admin', 'accountant']);
+    const q = typeof question === 'string' ? question.trim() : '';
+    if (!q) throw new HttpsError('invalid-argument', 'Question text required');
+    if (q.length > 500) throw new HttpsError('invalid-argument', 'Question too long (max 500 characters)');
+    if (!digest || typeof digest !== 'object') throw new HttpsError('invalid-argument', 'Books digest required');
+
+    const cfg = await readAiConfig(appId);
+    const modelId = (typeof cfg.model === 'string' && cfg.model.trim()) || 'claude-opus-4-8';
+    const monthlyBudget = Number(cfg.monthly_token_budget) > 0 ? Number(cfg.monthly_token_budget) : 2000000;
+    const perUserRpm = Number(cfg.per_user_rpm) > 0 ? Number(cfg.per_user_rpm) : 6;
+
+    // Per-user fixed-window rate limit — separate doc from entry extraction.
+    const minute = new Date().toISOString().slice(0, 16);
+    const rlRef = db.doc(`artifacts/${appId}/public/data/ai_usage/rl_qa_${req.auth.uid}`);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(rlRef);
+      const cur = snap.exists ? snap.data() : {};
+      const count = cur.minute === minute ? Number(cur.count || 0) : 0;
+      if (count >= perUserRpm) throw new HttpsError('resource-exhausted', 'Too many AI questions — wait a minute and try again.');
+      tx.set(rlRef, { minute, count: count + 1, updated_at: new Date().toISOString() });
+    });
+
+    const month = new Date().toISOString().slice(0, 7);
+    const usageRef = db.doc(`artifacts/${appId}/public/data/ai_usage/usage_${month}`);
+    const usageSnap = await usageRef.get();
+    const used = usageSnap.exists ? Number(usageSnap.data().tokens_total || 0) : 0;
+    if (used >= monthlyBudget) throw new HttpsError('resource-exhausted', 'Monthly AI budget exhausted. Ask your admin to raise it in Admin Tools → AI Assistant.');
+
+    // Cap the digest payload defensively (client already compacts it).
+    const digestStr = JSON.stringify(digest).slice(0, 60000);
+
+    const client = new Anthropic({ apiKey: cfg.api_key, timeout: 45000, maxRetries: 1 });
+    let resp;
+    try {
+      resp = await client.messages.create({
+        model: modelId,
+        max_tokens: 1500,
+        ...(supportsAdaptiveThinking(modelId) ? { thinking: { type: 'adaptive' } } : {}),
+        system: [{ type: 'text', text: STATIC_QA_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{ role: 'user', content: `<question>\n${q}\n</question>\n\n<books_digest>\n${digestStr}\n</books_digest>` }],
+      });
+    } catch (err) {
+      if (err instanceof Anthropic.AuthenticationError) throw new HttpsError('failed-precondition', 'The configured AI API key is invalid. Update it in Admin Tools → AI Assistant.');
+      if (err instanceof Anthropic.RateLimitError) throw new HttpsError('resource-exhausted', 'The AI service is busy — try again in a moment.');
+      if (err instanceof Anthropic.APIConnectionError) throw new HttpsError('unavailable', 'Could not reach the AI service. Try again.');
+      if (err instanceof Anthropic.APIError) {
+        logger.error('aiAnswerQuery provider error', { appId, status: err.status });
+        if (Number(err.status) === 529) throw new HttpsError('resource-exhausted', 'The AI service is overloaded — try again in a moment.');
+        throw new HttpsError('internal', 'The AI service returned an error. Try again.');
+      }
+      throw err;
+    }
+
+    const u = resp.usage || {};
+    const totalTokens = Number(u.input_tokens || 0) + Number(u.output_tokens || 0)
+      + Number(u.cache_creation_input_tokens || 0) + Number(u.cache_read_input_tokens || 0);
+    try {
+      await usageRef.set({
+        tokens_in: admin.firestore.FieldValue.increment(Number(u.input_tokens || 0)),
+        tokens_out: admin.firestore.FieldValue.increment(Number(u.output_tokens || 0)),
+        tokens_total: admin.firestore.FieldValue.increment(totalTokens),
+        calls: admin.firestore.FieldValue.increment(1),
+        last_call_at: new Date().toISOString(),
+        last_model: modelId,
+      }, { merge: true });
+    } catch (err) {
+      logger.error('aiAnswerQuery usage increment failed', { appId, reason: err.message });
+    }
+
+    if (resp.stop_reason === 'refusal') throw new HttpsError('failed-precondition', 'The AI declined to answer that. Rephrase and try again.');
+    const textBlock = (resp.content || []).find((b) => b && b.type === 'text');
+    const answer = textBlock && typeof textBlock.text === 'string'
+      ? textBlock.text.replace(new RegExp('[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]','g'), ' ').trim().slice(0, 4000)
+      : '';
+    if (!answer) throw new HttpsError('internal', 'The AI could not answer that — try rephrasing.');
+
+    return { ok: true, answer, usage: { monthly_used: used + totalTokens, monthly_budget: monthlyBudget } };
   }
 );
 
