@@ -23,6 +23,7 @@ export {
 export { validateTransaction, canPost, canDispatch, issueSummary } from './validator.js';
 export { runOrchestrator, runAuditAgent, auditFromIssues, POLICY_VERSION } from './orchestrator.js';
 export { analyzePostedEntries, primaryAccount, isFlagged } from './analyst.js';
+export { runBooksAudit } from './booksAudit.js';
 export {
   resolveAccount,
   buildRunningLedger,

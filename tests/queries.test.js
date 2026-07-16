@@ -99,6 +99,10 @@ describe('detectQuery classification (via parseMessage)', () => {
     expect(q('what is my gst liability this month').meta.queryType).toBe('gst_liability');
     expect(q('tds payable to deposit').meta.queryType).toBe('tds_liability');
   });
+  it('classifies "audit my books" → audit', () => {
+    expect(q('audit my books').meta.queryType).toBe('audit');
+    expect(q('run a health check').meta.queryType).toBe('audit');
+  });
   it('keeps existing statement queries intact', () => {
     expect(q('show me the balance sheet').meta.queryType).toBe('balance_sheet');
     expect(q('what is the trial balance').meta.queryType).toBe('trial_balance');

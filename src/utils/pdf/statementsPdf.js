@@ -99,6 +99,35 @@ export function generateTrialBalancePdf(tb = {}, meta = {}) {
   doc.save(`TrialBalance_${meta.fyLabel || 'all'}.pdf`);
 }
 
+/** Books audit report. `audit` = runBooksAudit output. */
+export function generateAuditPdf(audit = {}, meta = {}) {
+  const doc = new jsPDF();
+  const y = header(doc, 'Books Audit Report', meta);
+  doc.setFontSize(11);
+  doc.text(`Health score: ${audit.score}/100  (Grade ${audit.grade})`, 14, y);
+  doc.setFontSize(9);
+  doc.text(audit.summary?.headline || '', 14, y + 6);
+  const body = (audit.findings || []).map((f) => [
+    (f.severity || '').toUpperCase(),
+    f.message + (f.fix ? `\nFix: ${f.fix}` : ''),
+  ]);
+  autoTable(doc, {
+    head: [['Severity', 'Finding']],
+    body: body.length ? body : [['—', 'No issues found — books look clean.']],
+    startY: y + 12,
+    styles: { fontSize: 9, cellPadding: 2, valign: 'top' },
+    columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 155 } },
+    didParseCell: (d) => {
+      if (d.section !== 'body' || d.column.index !== 0) return;
+      const sev = (audit.findings[d.row.index] || {}).severity;
+      if (sev === 'blocking') { d.cell.styles.textColor = [180, 30, 30]; d.cell.styles.fontStyle = 'bold'; }
+      else if (sev === 'warning') { d.cell.styles.textColor = [180, 120, 20]; }
+      else { d.cell.styles.textColor = [40, 90, 160]; }
+    },
+  });
+  doc.save(`BooksAudit_${meta.fyLabel || 'all'}.pdf`);
+}
+
 /** Single-account ledger. `rows` = buildRunningLedger output. */
 export function generateLedgerPdf(account, rows = [], meta = {}) {
   const doc = new jsPDF();

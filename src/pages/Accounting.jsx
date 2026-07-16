@@ -50,8 +50,8 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer } from '../utils/aiAccountant';
-import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf } from '../utils/pdf/statementsPdf';
+import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit } from '../utils/aiAccountant';
+import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
 import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
 import { exportReport as exportReportImpl, exportGstToExcel as exportGstToExcelImpl, exportGstrJson as exportGstrJsonImpl, exportAiEntries as exportAiEntriesImpl } from '../utils/accountingExports';
@@ -69,6 +69,7 @@ const TABS = [
   { id: 'pl',                  label: 'Profit & Loss',         icon: Wallet,          group: 'reports' },
   { id: 'bs',                  label: 'Balance Sheet',         icon: Scale,           group: 'reports' },
   { id: 'trial',               label: 'Trial Balance',         icon: ClipboardCheck,  group: 'reports' },
+  { id: 'audit',               label: 'Audit',                 icon: Scale,           group: 'reports', hint: 'Whole-book health check — findings, score & printable report' },
   { id: 'ageing',              label: 'Ageing Report',         icon: Clock,           group: 'reports', hint: '0-30-60-90 day outstanding' },
   { id: 'gst',                 label: 'GST Reports',           icon: Receipt,         group: 'reports', hint: 'GSTR-1, GSTR-2, HSN summary' },
   { id: 'tds',                 label: 'TDS Tracker',           icon: Receipt,         group: 'reports', hint: 'TDS deducted & deductible' },
@@ -380,6 +381,13 @@ const Accounting = ({
 
   // ── Export Reports to Excel / Tally ──
   const exportReport = (type) => exportReportImpl(type, { fyFilter, snapshot, ageingData, addToast });
+
+  // Books-audit (Phase 2) — one shared computation for the chat command + Audit tab.
+  const closedFYsList = useMemo(() => (fiscalYearClosings || []).filter((r) => r.status === 'closed').map((r) => r.fy), [fiscalYearClosings]);
+  const booksAudit = useMemo(
+    () => runBooksAudit(snapshot, { entries: manualJournalEntries, drafts: journalDrafts, ageing: ageingData, closedFYs: closedFYsList }),
+    [snapshot, manualJournalEntries, journalDrafts, ageingData, closedFYsList]
+  );
 
   // ── Credit/Debit Note CRUD ──
   const cnDnInitialForm = { type: 'credit_note', date: new Date().toISOString().slice(0, 10), party_name: '', original_invoice: '', taxable: '', gst: '', reason: '' };
@@ -1908,6 +1916,16 @@ const Accounting = ({
 
     const inPeriod = (d) => (!from || d >= from) && (!to || d <= to);
     const periodLabel = prettyPeriod(period, from, to);
+
+    if (qt === 'audit') {
+      const a = booksAudit;
+      const top = a.findings.slice(0, 4).map((f) => `• ${f.message}`).join('\n');
+      return {
+        message: `Books audit: ${a.score}/100 (grade ${a.grade}). ${a.summary.headline}`
+          + (top ? `\n\n${top}` : '')
+          + `\n\nOpen Accounts → Audit for the full report and a printable PDF.`,
+      };
+    }
 
     // ── Show / ledger-on-demand / party balance / liabilities (read-only) ──
     if (qt === 'party_balance' || qt === 'account_ledger') {
@@ -3530,6 +3548,43 @@ const Accounting = ({
               <p className="mt-1 text-sm">Create invoices, record payments, or add expenses to see ledger entries.</p>
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'audit' && (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <div className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl text-2xl font-bold ${booksAudit.score >= 90 ? 'bg-green-100 text-green-700' : booksAudit.score >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
+                {booksAudit.grade}
+              </div>
+              <div>
+                <div className="text-sm font-bold text-slate-700">Books health — {booksAudit.score}/100</div>
+                <div className="text-xs text-slate-500">{booksAudit.summary.headline} · {booksAudit.summary.postingsChecked} entries checked</div>
+              </div>
+            </div>
+            <button onClick={() => generateAuditPdf(booksAudit, { orgName, fyLabel: fyFilter })} className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Download size={13} /> Download Report
+            </button>
+          </div>
+          {booksAudit.findings.length === 0 ? (
+            <div className="rounded-xl border border-green-200 bg-green-50 p-10 text-center text-sm font-semibold text-green-700">✓ Your books look clean — no issues found.</div>
+          ) : (
+            <div className="space-y-2">
+              {booksAudit.findings.map((f, i) => (
+                <div key={i} className={`rounded-xl border p-3 ${f.severity === 'blocking' ? 'border-red-200 bg-red-50' : f.severity === 'warning' ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'}`}>
+                  <div className="flex items-start gap-2">
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${f.severity === 'blocking' ? 'bg-red-200 text-red-800' : f.severity === 'warning' ? 'bg-amber-200 text-amber-800' : 'bg-blue-200 text-blue-800'}`}>{f.severity}</span>
+                    <div className="text-sm text-slate-700">
+                      {f.message}
+                      {f.fix && <div className="mt-0.5 text-xs text-slate-500">→ {f.fix}</div>}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-slate-400">Read-only review of your posted books — nothing is changed. Fix each item from its respective tab.</p>
         </div>
       )}
 

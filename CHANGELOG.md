@@ -4,6 +4,22 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.16 — Full Accountant, Phase 2: Audit engine
+
+The AI Accountant can now **audit the whole book** and take responsibility for its health —
+not just score one entry at a time.
+
+- **New Audit tab** (Accounts → Audit): a health **score /100 + grade** with a categorised
+  findings list — trial-balance integrity, Suspense/unresolved balances, negative cash/bank,
+  book-wide duplicate vouchers, outstanding GST/TDS to deposit, stale 90+ day receivables/
+  payables, missing narrations, unreviewed AI entries, unposted drafts, and postings in a
+  closed FY. Each finding carries a plain-language fix. **Download Report** prints a PDF.
+- **"Audit my books" in chat** — ask the assistant and get the score, headline, and top findings
+  instantly, with a pointer to the full report.
+
+Read-only and deterministic — it reviews your posted books and reports; it never changes
+anything (fix each item from its own tab). Foundation for the proactive month/year-end close.
+
 ## 3.6.15 — Full Accountant, Phase 1: Show & Print
 
 The AI Accountant now **answers on demand** and **prints statements** — the first step from

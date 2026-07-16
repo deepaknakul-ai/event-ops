@@ -377,6 +377,7 @@ const QUERY_KEYWORDS = [
   { re: /\b(who\s+owes|owe\s+(?:us|me))\b/i, weight: 8 },
   { re: /\b(gst|tds)\b/i, weight: 6 },
   { re: /\b(liabilit\w*|deposit|due)\b/i, weight: 6 },
+  { re: /\b(audit|health\s*check|review\s+(?:my\s+)?books?|check\s+(?:my\s+)?books?)\b/i, weight: 15 },
 ];
 
 // Pull the entity name out of a "show X ledger" / "how much do we owe X" question.
@@ -425,7 +426,10 @@ function detectQuery(text) {
   /** @type {string[] | undefined} */
   let series;
   const subject = extractQuerySubject(text);
-  if (mentionsRevenue && mentionsExpenses && mentionsCompareWord) {
+  if (/\b(audit|health\s*check|review\s+(?:my\s+)?books?|check\s+(?:my\s+)?books?)\b/.test(lower)) {
+    queryType = 'audit';
+  }
+  else if (mentionsRevenue && mentionsExpenses && mentionsCompareWord) {
     queryType = 'compare';
     series = ['revenue', 'expenses'];
   }
