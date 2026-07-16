@@ -24,6 +24,15 @@ export { validateTransaction, canPost, canDispatch, issueSummary } from './valid
 export { runOrchestrator, runAuditAgent, auditFromIssues, POLICY_VERSION } from './orchestrator.js';
 export { analyzePostedEntries, primaryAccount, isFlagged } from './analyst.js';
 export {
+  resolveAccount,
+  buildRunningLedger,
+  partyBalanceAnswer,
+  accountLedgerAnswer,
+  outstandingAnswer,
+  gstLiabilityAnswer,
+  tdsLiabilityAnswer,
+} from './queries.js';
+export {
   learnFromEntries,
   suggestAccountForParty,
   suggestAccountForText,

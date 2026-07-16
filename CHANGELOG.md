@@ -4,6 +4,24 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.15 — Full Accountant, Phase 1: Show & Print
+
+The AI Accountant now **answers on demand** and **prints statements** — the first step from
+entry-maker toward a full accountant.
+
+- **Ask about your books** in the assistant chat: *"what's Acme's balance?"*, *"show me Rahul's
+  ledger"*, *"who owes us money?"*, *"GST liability this month"*, *"TDS payable"* — answered
+  instantly from your books (read-only, deterministic, works offline). Party and employee
+  balances are interpreted as receivable/payable; *"print Acme's ledger"* downloads a PDF.
+- **Print any statement** — new **Print PDF** buttons on the P&L, Balance Sheet, Trial Balance,
+  and Ledger tabs (these had no export before). A single account's ledger prints with a running
+  balance and closing figure.
+- **Balance Sheet fix** — the liabilities panel now shows **Owed to Employees** (employee
+  payable), which the data model carried but the screen omitted.
+
+Deterministic, read-only, nothing is posted. Foundation for the audit engine and the LLM
+"ask-anything" agent (later phases).
+
 ## 3.6.14 — Per-employee reimbursement accounts (consolidated) + Finance payout kinds
 
 Money owed to an employee now lives in **one account per employee** and clears when you pay them.

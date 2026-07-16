@@ -50,7 +50,8 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer } from '../utils/aiAccountant';
+import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf } from '../utils/pdf/statementsPdf';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
 import { enqueueDraft, flushQueue, queueSize } from '../utils/offlineDraftQueue';
 import { exportReport as exportReportImpl, exportGstToExcel as exportGstToExcelImpl, exportGstrJson as exportGstrJsonImpl, exportAiEntries as exportAiEntriesImpl } from '../utils/accountingExports';
@@ -529,6 +530,7 @@ const Accounting = ({
 
   // ── GST Reports Data ──
   const [orgGstin, setOrgGstin] = useState('');
+  const [orgName, setOrgName] = useState('');
   const [gstSubTab, setGstSubTab] = useState('gstr1');
   // AI escalation flag for the chat (non-secret mirror doc; the API key itself
   // lives in settings/ai which no client can read).
@@ -539,7 +541,7 @@ const Accounting = ({
     const fetchOrg = async () => {
       try {
         const snap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'));
-        if (snap.exists()) setOrgGstin(snap.data().gstin || '');
+        if (snap.exists()) { setOrgGstin(snap.data().gstin || ''); setOrgName(snap.data().name || snap.data().org_name || ''); }
       } catch { /* ignore */ }
       try {
         const aiSnap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'ai_public'));
@@ -1906,6 +1908,39 @@ const Accounting = ({
 
     const inPeriod = (d) => (!from || d >= from) && (!to || d <= to);
     const periodLabel = prettyPeriod(period, from, to);
+
+    // ── Show / ledger-on-demand / party balance / liabilities (read-only) ──
+    if (qt === 'party_balance' || qt === 'account_ledger') {
+      const subject = parsed?.meta?.subject || '';
+      const account = resolveAccount(subject, snapshot.ledger);
+      if (!account) {
+        return { message: `I couldn't find an account or party matching "${subject || 'that'}". Try the exact name — e.g. "show Acme Corp ledger".` };
+      }
+      if (qt === 'account_ledger') {
+        const ans = accountLedgerAnswer(snapshot.ledger, account, formatCurrency);
+        const wantsPrint = /\b(print|download|pdf|export|save|email)\b/i.test(parsed?.rawPrompt || '');
+        if (wantsPrint && ans.rows.length) {
+          try {
+            generateLedgerPdf(account, ans.rows, { orgName: orgName || 'Ledger', fyLabel: fyFilter, closing: ans.closing, closingType: ans.closingType });
+            return { message: `${ans.message} PDF downloaded.` };
+          } catch { return { message: `${ans.message} (couldn't generate the PDF — open Accounts → Ledger to print.)` }; }
+        }
+        return { message: `${ans.message} Say "print ${ans.name} ledger" to download it, or open Accounts → Ledger to view every entry.` };
+      }
+      return { message: partyBalanceAnswer(snapshot.ledger, account, formatCurrency).message };
+    }
+    if (qt === 'outstanding') {
+      const raw = parsed?.rawPrompt || '';
+      const kind = /\bpayables?\b|\bwe\s+owe\b|vendors?\b/i.test(raw) ? 'payable'
+        : /\breceivables?\b|owes?\s+us\b|clients?\b|customers?\b/i.test(raw) ? 'receivable' : 'both';
+      return { message: outstandingAnswer(snapshot.ledger, kind, formatCurrency).message };
+    }
+    if (qt === 'gst_liability') {
+      return { message: gstLiabilityAnswer(snapshot.balanceSheet, formatCurrency).message };
+    }
+    if (qt === 'tds_liability') {
+      return { message: tdsLiabilityAnswer(snapshot.ledger, formatCurrency).message };
+    }
 
     if (qt === 'cash_balance' || qt === 'bank_balance') {
       const want = qt === 'cash_balance' ? /^Cash($|:)/i : /^Bank($|:)/i;
@@ -3365,18 +3400,31 @@ const Accounting = ({
         <div className="space-y-3">
           <div className="rounded-xl border border-slate-200 bg-white p-3">
             <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Select Account</label>
-            <select
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
-              value={selectedLedgerRow?.account || ''}
-              onChange={(e) => setSelectedLedger(e.target.value)}
-            >
-              {snapshot.ledger.length === 0 && <option value="">No accounts found</option>}
-              {snapshot.ledger.map((row) => (
-                <option key={row.accountId || row.account} value={row.account}>
-                  {row.account} ({row.balanceType} {formatCurrency(Math.abs(row.balance))})
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2">
+              <select
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                value={selectedLedgerRow?.account || ''}
+                onChange={(e) => setSelectedLedger(e.target.value)}
+              >
+                {snapshot.ledger.length === 0 && <option value="">No accounts found</option>}
+                {snapshot.ledger.map((row) => (
+                  <option key={row.accountId || row.account} value={row.account}>
+                    {row.account} ({row.balanceType} {formatCurrency(Math.abs(row.balance))})
+                  </option>
+                ))}
+              </select>
+              {selectedLedgerRow && (
+                <button
+                  onClick={() => {
+                    const a = accountLedgerAnswer(snapshot.ledger, selectedLedgerRow.account, formatCurrency);
+                    generateLedgerPdf(selectedLedgerRow.account, a.rows, { orgName, fyLabel: fyFilter, closing: a.closing, closingType: a.closingType });
+                  }}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  <Download size={13} /> Print PDF
+                </button>
+              )}
+            </div>
           </div>
           {selectedLedgerRow && (
             <>
@@ -3487,8 +3535,13 @@ const Accounting = ({
 
       {activeTab === 'trial' && (
         <div className="space-y-3">
-          <div className={`rounded-xl border p-3 text-sm font-semibold ${snapshot.trialBalance.isBalanced ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-            Total Dr: {formatCurrency(snapshot.trialBalance.totalDebit)} | Total Cr: {formatCurrency(snapshot.trialBalance.totalCredit)} | Difference: {formatCurrency(snapshot.trialBalance.difference)}
+          <div className="flex items-center justify-between gap-3">
+            <div className={`flex-1 rounded-xl border p-3 text-sm font-semibold ${snapshot.trialBalance.isBalanced ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+              Total Dr: {formatCurrency(snapshot.trialBalance.totalDebit)} | Total Cr: {formatCurrency(snapshot.trialBalance.totalCredit)} | Difference: {formatCurrency(snapshot.trialBalance.difference)}
+            </div>
+            <button onClick={() => generateTrialBalancePdf(snapshot.trialBalance, { orgName, fyLabel: fyFilter })} className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Download size={13} /> Print PDF
+            </button>
           </div>
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
             <div className="overflow-x-auto">
@@ -4093,8 +4146,11 @@ const Accounting = ({
 
       {activeTab === 'pl' && (
         <div className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
-            How much you earned, how much you spent, and what's left as profit.
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
+            <span className="text-sm text-slate-500">How much you earned, how much you spent, and what's left as profit.</span>
+            <button onClick={() => generatePnlPdf(snapshot.profitAndLoss, { orgName, fyLabel: fyFilter })} className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Download size={13} /> Print PDF
+            </button>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-xl border border-green-200 bg-green-50/50 p-4">
@@ -4134,8 +4190,11 @@ const Accounting = ({
 
       {activeTab === 'bs' && (
         <div className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">
-            A snapshot of what your business owns, owes, and is worth right now.
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
+            <span className="text-sm text-slate-500">A snapshot of what your business owns, owes, and is worth right now.</span>
+            <button onClick={() => generateBalanceSheetPdf(snapshot.balanceSheet, { orgName, fyLabel: fyFilter })} className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Download size={13} /> Print PDF
+            </button>
           </div>
           <div className="grid gap-3 lg:grid-cols-3">
             <div className="rounded-xl border-2 border-green-200 bg-white p-4">
@@ -4155,6 +4214,7 @@ const Accounting = ({
               <div className="mb-3 text-sm font-bold text-rose-700">📋 What You Owe (Liabilities)</div>
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between"><span className="text-slate-600">Vendor Bills Pending</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.accountsPayable)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-600">Owed to Employees</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.employeePayable || 0)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-600">GST Due to Govt</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.gstPayable)}</span></div>
               </div>
               <div className="mt-3 border-t border-rose-200 pt-2 flex justify-between text-sm font-bold text-rose-800">

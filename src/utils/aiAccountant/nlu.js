@@ -371,7 +371,25 @@ const QUERY_KEYWORDS = [
   { re: /\b(balance\s*sheet|bs)\b/i, weight: 12 },
   { re: /\b(cash|bank)\s+balance\b/i, weight: 15 },
   { re: /\b(trial\s*balance|tb)\b/i, weight: 15 },
+  // Show / ledger-on-demand / party-balance / liability vocabulary
+  { re: /\b(ledger|statement|khata|account\s+of)\b/i, weight: 12 },
+  { re: /\b(owe[sd]?|payable|receivable|outstanding|dues?)\b/i, weight: 10 },
+  { re: /\b(who\s+owes|owe\s+(?:us|me))\b/i, weight: 8 },
+  { re: /\b(gst|tds)\b/i, weight: 6 },
+  { re: /\b(liabilit\w*|deposit|due)\b/i, weight: 6 },
 ];
+
+// Pull the entity name out of a "show X ledger" / "how much do we owe X" question.
+function extractQuerySubject(text) {
+  const t = String(text || '').trim();
+  let m;
+  if ((m = t.match(/\b(?:ledger|statement|account|khata|balance)\s+(?:of|for)\s+(.+?)[?.!]?$/i))) return m[1].trim();
+  if ((m = t.match(/\b(?:show|open|print|email|get|give\s+me|pull\s+up|display)\s+(?:me\s+)?(?:the\s+)?(.+?)(?:['’]s)?\s+(?:ledger|statement|account|khata|balance)\b/i))) return m[1].trim();
+  if ((m = t.match(/\bdoes\s+(.+?)\s+owe\b/i))) return m[1].trim();
+  if ((m = t.match(/\bowe[sd]?\s+(?:to\s+)?(.+?)[?.!]?$/i))) return m[1].replace(/\b(us|me|them|him|her)\b/gi, '').trim();
+  if ((m = t.match(/(.+?)(?:['’]s)?\s+(?:ledger|statement|khata|balance)\b/i))) return m[1].replace(/^\s*(show|open|print|email|the|me|for|of|what\s+is|whats)\s+/i, '').trim();
+  return '';
+}
 
 /** @param {string} text */
 function detectReversal(text) {
@@ -406,15 +424,22 @@ function detectQuery(text) {
   let queryType = 'summary';
   /** @type {string[] | undefined} */
   let series;
+  const subject = extractQuerySubject(text);
   if (mentionsRevenue && mentionsExpenses && mentionsCompareWord) {
     queryType = 'compare';
     series = ['revenue', 'expenses'];
   }
   else if (/\bcash\s+balance|how\s+much.*cash\b/.test(lower))      queryType = 'cash_balance';
   else if (/\bbank\s+balance|how\s+much.*bank\b/.test(lower))      queryType = 'bank_balance';
+  else if (/\bbalance\s*sheet\b|\bbs\b/.test(lower))               queryType = 'balance_sheet';
+  else if (/\btrial\s*balance\b|\btb\b/.test(lower))               queryType = 'trial_balance';
+  // On-demand ledger / party-balance / liabilities (before the generic P&L/expense fallbacks)
+  else if (/\b(ledger|statement|khata)\b/.test(lower))            queryType = 'account_ledger';
+  else if (/\bgst\b/.test(lower) && /\b(?:liabilit\w*|payable|owe|deposit|due)\b/.test(lower)) queryType = 'gst_liability';
+  else if (/\btds\b/.test(lower) && /\b(?:liabilit\w*|payable|owe|deposit|due)\b/.test(lower)) queryType = 'tds_liability';
+  else if (/\b(outstanding|who\s+owes|receivables?|payables?|dues?)\b/.test(lower)) queryType = 'outstanding';
+  else if (subject && /\b(owe[sd]?|balance|payable|receivable)\b/.test(lower)) queryType = 'party_balance';
   else if (/\bprofit|p\s*&\s*l|pnl|p\/l/.test(lower))              queryType = 'pnl';
-  else if (/\bbalance\s*sheet|bs\b/.test(lower))                   queryType = 'balance_sheet';
-  else if (/\btrial\s*balance|tb\b/.test(lower))                   queryType = 'trial_balance';
   else if (mentionsExpenses)                                       queryType = 'expenses';
   else if (mentionsRevenue)                                        queryType = 'revenue';
   // Period detection
@@ -430,7 +455,7 @@ function detectQuery(text) {
     const q = lower.match(/\bq([1-4])\b/);
     period = `quarter_${q[1]}`;
   }
-  return { queryType, period, score, series };
+  return { queryType, period, score, series, subject };
 }
 
 // ── Party candidate resolution (for clarify flow) ───────────────────────────
@@ -639,7 +664,7 @@ export function parseMessage(text, ctx = {}) {
       confidence: Math.min(1, round2(q.score / 40)),
       rawPrompt: trimmed,
       model: 'rule-v1',
-      meta: { queryType: q.queryType, period: q.period, series: q.series },
+      meta: { queryType: q.queryType, period: q.period, series: q.series, subject: q.subject },
     };
   }
 
