@@ -925,7 +925,8 @@ export function parseMessage(text, ctx = {}) {
       const emps = Array.isArray(ctx.employeeNames) ? ctx.employeeNames : [];
       const empHit = emps.find((n) => n && new RegExp(`\\b${escapeRegex(String(n).toLowerCase())}\\b`).test(trimmed.toLowerCase()));
       const name = empHit || party || 'Employee';
-      base.entries = [{ debitAccount: 'Employee Advances', creditAccount: cashOrBank, amount }];
+      // Dr the employee's per-employee account (net running balance) — they now owe us.
+      base.entries = [{ debitAccount: `Employee: ${name}`, creditAccount: cashOrBank, amount }];
       base.narration = `Advance given to ${name}`;
       base.party = { type: 'employee', name };
       break;
@@ -938,8 +939,8 @@ export function parseMessage(text, ctx = {}) {
         ? resolveFuelAccount(trimmed, classified.account, hasProject)
         : { account: classified.account };
       if (fuel.issue) base.issues.push(fuel.issue);
-      // Dr the expense, Cr Employee Payable — the company now owes the employee.
-      base.entries = [{ debitAccount: fuel.account, creditAccount: 'Employee Payable', amount }];
+      // Dr the expense, Cr the employee's per-employee account — the company now owes them.
+      base.entries = [{ debitAccount: fuel.account, creditAccount: `Employee: ${name}`, amount }];
       base.narration = `Reimbursement to ${name} — ${fuel.account}`;
       base.party = { type: 'employee', name };
       base.meta = { ...base.meta, employeeExpense: 'reimbursement', expenseGroup: classified.direct ? 'Direct' : 'Indirect' };

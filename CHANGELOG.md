@@ -4,6 +4,27 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.14 — Per-employee reimbursement accounts (consolidated) + Finance payout kinds
+
+Money owed to an employee now lives in **one account per employee** and clears when you pay them.
+
+- **Per-employee ledger account** — an approved expense claim now credits **`Employee: <name>`**
+  (a single net running balance per employee) instead of a lumped `Reimbursement Payable`.
+  Advances debit the same account, so each employee shows one balance: a **liability** when you
+  owe them (net Cr) or an **asset** when they hold an advance (net Dr). It appears on the Balance
+  Sheet and is selectable in the ledger drilldown — but stays out of client/vendor AR/AP.
+- **Consolidation** — the AI Accountant chat reimbursement/advance now target the **same**
+  `Employee: <name>` account (previously a separate `Employee Payable`), and a chat entry by name
+  merges into the derived per-employee balance.
+- **Finance payout kinds** — the employee-payout form gains a **Payment For** selector
+  (Salary / Reimbursement / Advance). A **Reimbursement** payment now `Dr Employee: <name> / Cr
+  Cash·Bank` — clearing what you owe — instead of silently hitting Salary Expense. **Fixes a
+  latent bug** where every employee payout mis-posted to Salary Expense (the routing was never
+  activated). Salary payments — and all historical payouts — are unchanged.
+
+Deterministic; no data migration (the ledger is derived). Past payouts stay as recorded; tag a
+specific old payout as "Reimbursement" via the Finance edit form if you want it to clear.
+
 ## 3.6.13 — Bank reconciliation: smart suggestions for common unmatched rows
 
 When you book an unmatched bank-statement row, the assistant now **auto-suggests the right

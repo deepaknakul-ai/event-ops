@@ -16,7 +16,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
     entity_id: '', amount: '', date: new Date().toISOString().split('T')[0],
-    mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: ''
+    mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: '',
+    payout_type: 'salary'  // employee payout kind: salary | reimbursement | advance_settlement
   });
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 20;
@@ -76,7 +77,8 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
         reference: item.reference,
         remarks: item.remarks,
       project_id: item.project_id || '',
-      party_company_id: item.party_company_id || 'primary'
+      party_company_id: item.party_company_id || 'primary',
+      payout_type: item.payout_type || 'salary'  // legacy payouts default to salary
     });
   };
 
@@ -103,7 +105,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     setEditingId(null);
     setForm({
         entity_id: '', amount: '', date: new Date().toISOString().split('T')[0],
-      mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: ''
+      mode: 'Bank Transfer', reference: '', remarks: '', project_id: '', party_company_id: '', payout_type: 'salary'
     });
   };
 
@@ -172,6 +174,9 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
       amount: parseFloat(form.amount),
       date: form.date,
       mode: form.mode,
+      // Payout kind drives the ledger: reimbursement / advance_settlement debit
+      // the employee's per-employee account; salary debits Salary Expense.
+      payout_type: form.payout_type || 'salary',
       reference: form.reference,
       remarks: form.remarks,
       updated_at: new Date().toISOString()
@@ -468,6 +473,24 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                 </select>
                 {role === 'manager' && <p className="text-[10px] text-amber-600 mt-1">On-site receipts limited to Cash / UPI. Bank Transfer & Cheque must be recorded by Accountant.</p>}
               </div>
+
+              {activeTab === 'emp_out' && (
+                <div>
+                  <label className="text-xs font-bold text-slate-700 uppercase">Payment For</label>
+                  <select className="w-full rounded border p-2 text-black" value={form.payout_type} onChange={e => setForm({...form, payout_type: e.target.value})}>
+                    <option value="salary">Salary / Wages</option>
+                    <option value="reimbursement">Reimbursement (clear expense claim)</option>
+                    <option value="advance">Advance (paid to employee)</option>
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    {form.payout_type === 'salary'
+                      ? 'Books to Salary Expense.'
+                      : form.payout_type === 'reimbursement'
+                        ? 'Clears what this employee is owed (their expense-claim balance).'
+                        : 'Recorded against this employee’s account — they now owe it back.'}
+                  </p>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-bold text-slate-700 uppercase">Reference / Trx ID</label>

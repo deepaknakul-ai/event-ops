@@ -56,7 +56,7 @@ const FIX_HINTS = {
   contra_unresolved: 'The contra account is unresolved (Suspense) — set the correct account.',
   missing_narration: 'Add a short narration for the audit trail.',
   fuel_account_ambiguous: 'Pick Site Power & Fuel (generator/site) or Travelling & Conveyance (vehicle).',
-  employee_expense_ambiguous: 'Set the debit/credit for a reimbursement (Cr Employee Payable), advance (Dr Employee Advances), or plain company expense.',
+  employee_expense_ambiguous: 'Pick the type: reimbursement (Cr the employee account), advance (Dr the employee account), or plain company expense (Cr Cash/Bank).',
 };
 
 const SEVERITY_PENALTY = { blocking: 40, warning: 12, advisory: 3 };

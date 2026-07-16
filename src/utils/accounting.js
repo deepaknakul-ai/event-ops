@@ -103,6 +103,16 @@ const getPartyAccount = (entityName, entityId) => {
 // group by ID even when the display name changes later.
 const getPartyAccountId = (entityId) => (entityId ? `party_${entityId}` : null);
 
+// Per-employee sub-ledger — one net running balance per employee that holds BOTH
+// advances (Dr, they owe us) and reimbursements (Cr, we owe them). Mirrors the
+// Party: convention (dual-use, netted by sign) but under a distinct prefix so
+// employees never leak into client/vendor AR/AP aging or party pickers.
+const getEmployeeAccount = (entityName, entityId) => {
+  const name = entityName || entityId || 'Unknown Employee';
+  return `Employee: ${name}`;
+};
+const getEmployeeAccountId = (entityId) => (entityId ? `emp_${entityId}` : null);
+
 const normalizeMode = (mode) => {
   const raw = String(mode || '').trim().toLowerCase();
   if (raw === 'cash') return 'Cash';
@@ -220,6 +230,8 @@ const guessAccountType = (accountName, coaByName) => {
     // For type guessing, classify as Asset (will show correct based on balance)
     return 'Asset';
   }
+  // Per-employee accounts are dual-use like Party: (net asset or liability by sign).
+  if (accountName.startsWith('Employee:')) return 'Asset';
   if (accountName.startsWith('Accounts Receivable:')) return 'Asset';
   if (accountName.startsWith('Accounts Payable:')) return 'Liability';
   if (accountName.startsWith('Expense:')) return 'Expense';
@@ -329,19 +341,28 @@ const pushDoubleEntry = (rows, common, lines) => {
 
 // M-5: toLedger now accepts partyAccountsById for stable display-name resolution.
 // Groups by accountId (stable) when set, else falls back to accountName string.
-const toLedger = (journalRows, partyAccountsById = {}) => {
+const toLedger = (journalRows, partyAccountsById = {}, employeeAccountsById = {}) => {
   const map = {};
 
   // Build a reverse index: 'Party: <current_name>' → accountId. Also include
   // historical names/aliases if present on the party doc (e.g. previous_names,
   // aliases). Used to backfill accountId on legacy journal rows that were
   // posted before M-5 (or by integrations that only set the name).
+  // The same index also maps 'Employee: <name>' → 'emp_<id>' so a chat leg that
+  // only carries the employee NAME merges into the id-keyed derived employee row.
   const nameToId = {};
   Object.entries(partyAccountsById || {}).forEach(([id, pa]) => {
     if (!pa) return;
     const candidates = [pa.current_name, ...(Array.isArray(pa.previous_names) ? pa.previous_names : []), ...(Array.isArray(pa.aliases) ? pa.aliases : [])];
     candidates.filter(Boolean).forEach((nm) => {
       nameToId[`Party: ${nm}`] = id;
+    });
+  });
+  Object.entries(employeeAccountsById || {}).forEach(([id, ea]) => {
+    if (!ea) return;
+    const candidates = [ea.current_name, ...(Array.isArray(ea.previous_names) ? ea.previous_names : []), ...(Array.isArray(ea.aliases) ? ea.aliases : [])];
+    candidates.filter(Boolean).forEach((nm) => {
+      nameToId[`Employee: ${nm}`] = id;
     });
   });
 
@@ -353,11 +374,14 @@ const toLedger = (journalRows, partyAccountsById = {}) => {
     if (accountName && nameToId[accountName]) return nameToId[accountName];
     return accountName;
   };
-  // If a party_accounts doc exists for this id, show its current name.
+  // If a party_accounts / employee doc exists for this id, show its current name.
   const getDisplay = (accountName, accountId) => {
     const id = accountId || (accountName && nameToId[accountName]);
     if (id && partyAccountsById[id]) {
       return `Party: ${partyAccountsById[id].current_name}`;
+    }
+    if (id && employeeAccountsById[id]) {
+      return `Employee: ${employeeAccountsById[id].current_name}`;
     }
     return accountName;
   };
@@ -420,6 +444,7 @@ export const buildAccountingSnapshot = ({
   payouts = [],
   expenses = [],
   advances = [],
+  employees = [],
   chartOfAccounts = [],
   openingBalances = [],
   manualJournalEntries = [],
@@ -432,6 +457,14 @@ export const buildAccountingSnapshot = ({
   // M-5: map from 'party_{entityId}' → party_accounts doc for display name resolution.
   const partyAccountsById = (partyAccounts || []).reduce((acc, pa) => {
     if (pa.entity_id) acc[`party_${pa.entity_id}`] = pa;
+    return acc;
+  }, {});
+
+  // Per-employee ledger identity: 'emp_{id}' → { current_name } so the derived
+  // employee legs (which carry the id) and chat legs (name only) merge into one
+  // running balance per employee.
+  const employeeAccountsById = (employees || []).reduce((acc, e) => {
+    if (e && e.id) acc[`emp_${e.id}`] = { current_name: e.name, previous_names: e.previous_names, aliases: e.aliases };
     return acc;
   }, {});
 
@@ -899,31 +932,44 @@ export const buildAccountingSnapshot = ({
         [
           {
             debitAccount: `Expense:${row.category || 'General'}`,
-            creditAccount: 'Reimbursement Payable',
+            // We now OWE the employee: credit their per-employee running account.
+            creditAccount: getEmployeeAccount(row.employee_name, row.employee_id),
+            creditAccountId: getEmployeeAccountId(row.employee_id),
             amount: round2(row.amount),
           },
         ]
       );
     });
 
-  // H-6 / H-8 fix: Payouts route by payout_type so reimbursements clear the
-  // Reimbursement Payable created by the expense, advance settlements clear
-  // Employee Advances, and salary still hits Salary Expense.
-  // Mode (Cash/Bank) is honored on the credit leg.
+  // Payouts route by payout_type: a reimbursement or advance-settlement debits
+  // the employee's per-employee account (clearing what we owe / recovering an
+  // advance); salary — and every legacy payout with no payout_type — still hits
+  // Salary Expense. Mode (Cash/Bank) is honored on the credit leg.
   payouts
     .filter((row) => inFY(row.date))
     .forEach((row) => {
       const settlementAccount = pickAccountByMode(row.mode, 'Cash In Hand', 'Bank');
-      let debitAccount = 'Salary Expense';
       const t = String(row.payout_type || '').toLowerCase();
-      if (t === 'reimbursement') debitAccount = 'Reimbursement Payable';
-      else if (t === 'advance_settlement' || t === 'advance') debitAccount = 'Employee Advances';
+      let debitAccount = 'Salary Expense';
+      let debitAccountId = null;
+      let source = 'employee_payout';
+      if (t === 'reimbursement') {
+        debitAccount = getEmployeeAccount(row.employee_name, row.employee_id);
+        debitAccountId = getEmployeeAccountId(row.employee_id);
+        source = 'employee_reimbursement';
+      } else if (t === 'advance_settlement' || t === 'advance') {
+        // Money out to the employee as an advance → they now owe us (Dr), same
+        // account/direction as an advance from the advances collection.
+        debitAccount = getEmployeeAccount(row.employee_name, row.employee_id);
+        debitAccountId = getEmployeeAccountId(row.employee_id);
+        source = 'employee_advance';
+      }
       pushDoubleEntry(
         journal,
         {
           date: row.date,
           fy: getFYFromDate(row.date),
-          source: 'employee_payout',
+          source,
           refNo: row.reference || row.id,
           remarks: row.remarks,
           entityId: row.employee_id,
@@ -932,6 +978,7 @@ export const buildAccountingSnapshot = ({
         [
           {
             debitAccount,
+            debitAccountId,
             creditAccount: settlementAccount,
             amount: round2(row.amount),
           },
@@ -939,7 +986,8 @@ export const buildAccountingSnapshot = ({
       );
     });
 
-  // H-8 fix: Advances honor mode.
+  // H-8 fix: Advances honor mode. Net model — the advance debits the employee's
+  // per-employee account (they now owe us), same account reimbursements credit.
   advances
     .filter((row) => inFY(row.date))
     .forEach((row) => {
@@ -957,7 +1005,8 @@ export const buildAccountingSnapshot = ({
         },
         [
           {
-            debitAccount: 'Employee Advances',
+            debitAccount: getEmployeeAccount(row.employee_name, row.employee_id),
+            debitAccountId: getEmployeeAccountId(row.employee_id),
             creditAccount: settlementAccount,
             amount: round2(row.amount),
           },
@@ -1071,7 +1120,7 @@ export const buildAccountingSnapshot = ({
     return (a.date || '').localeCompare(b.date || '');
   });
 
-  const ledger = toLedger(journal, partyAccountsById);  // M-5: pass id map for stable grouping
+  const ledger = toLedger(journal, partyAccountsById, employeeAccountsById);  // M-5: pass id maps for stable grouping
 
   const trialRows = ledger.map((row) => ({
     account: row.account,
@@ -1108,7 +1157,18 @@ export const buildAccountingSnapshot = ({
   const receivableTotal = round2(
     partyLedgerRows.reduce((sum, row) => sum + (row.balance > 0 ? row.balance : 0), 0)
   );
-  const advanceAsset = round2(Math.max(getLedgerBalance(ledger, 'Employee Advances'), 0));
+  // Per-employee accounts net by sign like party accounts: a Dr balance is an
+  // advance we can recover (asset), a Cr balance is a reimbursement we owe
+  // (liability). The legacy exact-name `Employee Advances` line is kept for any
+  // opening-balance / manual-journal rows still posted to it.
+  const employeeLedgerRows = ledger.filter((row) => row.account.startsWith('Employee:'));
+  const employeeReceivable = round2(
+    employeeLedgerRows.reduce((sum, row) => sum + (row.balance > 0 ? row.balance : 0), 0)
+  );
+  const employeePayable = round2(
+    employeeLedgerRows.reduce((sum, row) => sum + (row.balance < 0 ? Math.abs(row.balance) : 0), 0)
+  );
+  const advanceAsset = round2(Math.max(getLedgerBalance(ledger, 'Employee Advances'), 0) + employeeReceivable);
 
   const payableTotal = round2(
     partyLedgerRows.reduce((sum, row) => sum + (row.balance < 0 ? Math.abs(row.balance) : 0), 0)
@@ -1122,7 +1182,7 @@ export const buildAccountingSnapshot = ({
   const gstPayable = round2(Math.max(outputGst - inputGst, 0));
 
   const assetsTotal = round2(cashBalance + receivableTotal + advanceAsset + inputGst);
-  const liabilitiesTotal = round2(payableTotal + gstPayable);
+  const liabilitiesTotal = round2(payableTotal + employeePayable + gstPayable);
   const retainedEarningsLedger = round2(Math.abs(Math.min(getLedgerBalance(ledger, 'Retained Earnings'), 0)));
   const equityTotal = round2(retainedEarningsLedger + netProfit);
 
@@ -1158,6 +1218,7 @@ export const buildAccountingSnapshot = ({
       },
       liabilities: {
         accountsPayable: payableTotal,
+        employeePayable,
         gstPayable,
         total: liabilitiesTotal,
       },

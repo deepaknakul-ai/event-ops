@@ -120,13 +120,14 @@ const Reports = ({
       payouts,
       expenses,
       advances,
+      employees,
       chartOfAccounts,
       openingBalances,
       fiscalYearClosings,
       partyAccounts,  // M-5
       manualJournalEntries: journalEntries,
     });
-  }, [startDate, endDate, clients, projects, taxInvoices, purchaseInvoices, payments, vendorPayments, payouts, expenses, advances, chartOfAccounts, openingBalances, fiscalYearClosings, journalEntries, partyAccounts]);
+  }, [startDate, endDate, clients, projects, taxInvoices, purchaseInvoices, payments, vendorPayments, payouts, expenses, advances, employees, chartOfAccounts, openingBalances, fiscalYearClosings, journalEntries, partyAccounts]);
 
   // M-5: lookup by stable accountId first; fall back to name-based key for legacy rows.
   const getPartyBalanceFromSnapshot = (entityName, entityId) => {

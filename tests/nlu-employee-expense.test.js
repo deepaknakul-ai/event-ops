@@ -7,12 +7,12 @@ import { validateTransaction, canPost, auditFromIssues } from '../src/utils/aiAc
 const CTX = { partyNames: ['Acme Corp', 'SuppliCo'], employeeNames: ['Rahul', 'Raj'], date: '2026-04-25' };
 const hasIssue = (tx, code) => (tx.issues || []).some((i) => i.code === code);
 
-describe('Employee reimbursement (explicit cue → Dr Expense / Cr Employee Payable)', () => {
+describe('Employee reimbursement (explicit cue → Dr Expense / Cr Employee: <name>)', () => {
   it('"reimburse Rahul 2000 for site food" → reimbursement to Rahul, Food Expense', () => {
     const tx = parseMessage('reimburse Rahul 2000 for site food', CTX);
     expect(tx.intent).toBe('reimbursement');
     expect(tx.entries).toHaveLength(1);
-    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Food Expense', creditAccount: 'Employee Payable', amount: 2000 });
+    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Food Expense', creditAccount: 'Employee: Rahul', amount: 2000 });
     expect(tx.party).toMatchObject({ type: 'employee', name: 'Rahul' });
     expect(hasIssue(tx, 'employee_expense_ambiguous')).toBe(false);
     expect(hasIssue(tx, 'fuel_account_ambiguous')).toBe(false);
@@ -21,31 +21,32 @@ describe('Employee reimbursement (explicit cue → Dr Expense / Cr Employee Paya
   it('"paid on behalf of Raj 1500 for printing" → reimbursement to Raj, Printing & Stationery', () => {
     const tx = parseMessage('paid on behalf of Raj 1500 for printing', CTX);
     expect(tx.intent).toBe('reimbursement');
-    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Printing & Stationery', creditAccount: 'Employee Payable', amount: 1500 });
+    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Printing & Stationery', creditAccount: 'Employee: Raj', amount: 1500 });
     expect(tx.party).toMatchObject({ type: 'employee', name: 'Raj' });
   });
 
-  it('carries Employee Payable in accountCreates typed as a Liability', () => {
+  it('carries the per-employee account in accountCreates typed dual-use (Asset/Party)', () => {
     const tx = parseMessage('reimburse Rahul 2000 for taxi', CTX);
-    const ep = (tx.accountCreates || []).find((a) => a.name === 'Employee Payable');
+    const ep = (tx.accountCreates || []).find((a) => a.name === 'Employee: Rahul');
     expect(ep).toBeTruthy();
-    expect(ep.type).toBe('Liability');
-    expect(ep.normalSide).toBe('Cr');
+    expect(ep.type).toBe('Asset');       // dual-use like Party: — nets liability by sign in the ledger
+    expect(ep.subType).toBe('Party');
+    expect(ep.normalSide).toBe('Dr');
   });
 
   it('a reimbursement draft is postable with no expense-credited warning', () => {
-    const tx = validateTransaction(parseMessage('reimburse Rahul 2000 for taxi', CTX), { knownAccounts: ['Food Expense', 'Travelling & Conveyance', 'Employee Payable'] });
+    const tx = validateTransaction(parseMessage('reimburse Rahul 2000 for taxi', CTX), { knownAccounts: ['Food Expense', 'Travelling & Conveyance', 'Employee: Rahul'] });
     expect(canPost(tx)).toBe(true);
     expect(hasIssue(tx, 'expense_credited')).toBe(false);
     expect(hasIssue(tx, 'advance_as_expense')).toBe(false);
   });
 });
 
-describe('Advance (regression — Dr Employee Advances / Cr cash|bank)', () => {
-  it('"advance 5000 to Raj" → Employee Advances / Cash, employee Raj', () => {
+describe('Advance (regression — Dr Employee: <name> / Cr cash|bank)', () => {
+  it('"advance 5000 to Raj" → Employee: Raj / Cash, employee Raj', () => {
     const tx = parseMessage('advance 5000 to Raj', CTX);
     expect(tx.intent).toBe('advance');
-    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Employee Advances', creditAccount: 'Cash', amount: 5000 });
+    expect(tx.entries[0]).toMatchObject({ debitAccount: 'Employee: Raj', creditAccount: 'Cash', amount: 5000 });
     expect(tx.party).toMatchObject({ type: 'employee', name: 'Raj' });
   });
 
