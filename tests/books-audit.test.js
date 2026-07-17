@@ -46,12 +46,19 @@ describe('runBooksAudit', () => {
     expect(dup.refs).toEqual(['JV-1', 'JV-2']);
   });
 
-  it('raises GST/TDS deposit advisories from outstanding balances', () => {
-    const r = runBooksAudit(cleanSnapshot({
+  it('raises GST/TDS deposit advisories once the GSTR-3B due date has passed', () => {
+    const snap = cleanSnapshot({
       balanceSheet: { liabilities: { gstPayable: 3000 } },
       ledger: [{ account: 'TDS Payable', balance: -4000 }],
-    }));
+    });
+    const r = runBooksAudit(snap, { asOn: '2026-07-25' }); // past the 20th
     expect(codes(r)).toEqual(expect.arrayContaining(['gst_outstanding', 'tds_outstanding']));
+  });
+
+  it('suppresses gst_outstanding BEFORE the previous period due date (noise fix)', () => {
+    const snap = cleanSnapshot({ balanceSheet: { liabilities: { gstPayable: 3000 } } });
+    const r = runBooksAudit(snap, { asOn: '2026-07-10' }); // before the 20th
+    expect(codes(r)).not.toContain('gst_outstanding');
   });
 
   it('flags stale 90+ receivables from the ageing analysis', () => {

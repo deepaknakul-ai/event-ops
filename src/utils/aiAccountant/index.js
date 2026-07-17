@@ -25,7 +25,7 @@ export { runOrchestrator, runAuditAgent, auditFromIssues, POLICY_VERSION } from 
 export { analyzePostedEntries, primaryAccount, isFlagged } from './analyst.js';
 export { runBooksAudit } from './booksAudit.js';
 export { buildCloseChecklist, buildComplianceCalendar } from './closeChecklist.js';
-export { proposeDepreciation, DEP_RULES } from './depreciation.js';
+export { proposeDepreciation, collectPriorDepreciation, DEP_RULES } from './depreciation.js';
 export {
   resolveAccount,
   resolveAccountCandidates,

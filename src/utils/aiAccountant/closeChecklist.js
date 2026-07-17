@@ -8,21 +8,24 @@
 import { round2 } from './schema.js';
 
 const isAiEntry = (e) => e?.origin === 'ai_chat' || e?.source === 'chat_entry' || e?.source === 'scheduled_post';
-const monthOf = (iso) => String(iso || '').slice(0, 7);
-const prevMonth = (m) => {
+export const monthOf = (iso) => String(iso || '').slice(0, 7);
+export const prevMonth = (m) => {
   const [y, mm] = String(m).split('-').map(Number);
   return mm === 1 ? `${y - 1}-12` : `${y}-${String(mm - 1).padStart(2, '0')}`;
 };
 // Statutory due date = <day> of the month AFTER the period (timezone-safe string math).
-const dueDate = (period, day) => {
+export const dueDate = (period, day) => {
   const [y, mm] = String(period).split('-').map(Number);
   const ny = mm === 12 ? y + 1 : y;
   const nm = mm === 12 ? 1 : mm + 1;
   return `${ny}-${String(nm).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 };
 
-/** Upcoming GST/TDS deadlines for the current + previous period, from real activity. */
-export function buildComplianceCalendar({ entries = [], salesBook = [], today } = {}) {
+/** Upcoming GST/TDS deadlines for the current + previous period, from real
+ *  activity. Pass `salesMonths` (a Set of 'YYYY-MM' with sales, derived from the
+ *  UNfiltered invoice list) so an FY-filtered salesBook can't drop the previous
+ *  month's GSTR deadlines across an FY boundary (B9). */
+export function buildComplianceCalendar({ entries = [], salesBook = [], salesMonths: salesMonthsIn, today } = {}) {
   const t = today || new Date().toISOString().slice(0, 10);
   const months = [prevMonth(monthOf(t)), monthOf(t)];
 
@@ -32,7 +35,9 @@ export function buildComplianceCalendar({ entries = [], salesBook = [], today } 
     const m = monthOf(e.date);
     if (m) tdsByMonth[m] = (tdsByMonth[m] || 0) + (Number(l.amount) || 0);
   }));
-  const salesMonths = new Set(salesBook.map((r) => monthOf(r.date)).filter(Boolean));
+  const salesMonths = salesMonthsIn instanceof Set
+    ? salesMonthsIn
+    : new Set(salesBook.map((r) => monthOf(r.date)).filter(Boolean));
 
   const cal = [];
   months.forEach((m) => {
@@ -52,7 +57,7 @@ export function buildComplianceCalendar({ entries = [], salesBook = [], today } 
  * Close-readiness checklist. `audit` = runBooksAudit output (already computed).
  * @returns {{ ready:boolean, items:Array<{id,label,status:'ok'|'warn'|'block'|'manual',detail,hint?}>, calendar:Array }}
  */
-export function buildCloseChecklist({ audit, drafts = [], entries = [], salesBook = [], today } = {}) {
+export function buildCloseChecklist({ audit, drafts = [], entries = [], salesBook = [], salesMonths, today } = {}) {
   const findings = (audit && audit.findings) || [];
   const byCode = (code) => findings.filter((f) => f.code === code);
   const blocking = findings.filter((f) => f.severity === 'blocking');
@@ -119,6 +124,6 @@ export function buildCloseChecklist({ audit, drafts = [], entries = [], salesBoo
   ];
 
   const ready = !items.some((i) => i.status === 'block');
-  const calendar = buildComplianceCalendar({ entries, salesBook, today });
+  const calendar = buildComplianceCalendar({ entries, salesBook, salesMonths, today });
   return { ready, items, calendar };
 }

@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { round2 } from './schema.js';
 import { analyzePostedEntries } from './analyst.js';
+import { monthOf, prevMonth, dueDate } from './closeChecklist.js';
 
 const SEVERITY_PENALTY = { blocking: 40, warning: 12, advisory: 3 };
 const isAiEntry = (e) => e?.origin === 'ai_chat' || e?.source === 'chat_entry' || e?.source === 'scheduled_post';
@@ -68,15 +69,19 @@ export function runBooksAudit(snapshot = {}, ctx = {}) {
     bySig.get(sig).push(e.voucher_no || e.id);
   });
   [...bySig.values()].filter((g) => g.length > 1).forEach((g) => findings.push(finding('warning', 'duplicate_voucher',
-    `${g.length} identical entries posted (same date, accounts and amount): ${g.slice(0, 4).join(', ')}${g.length > 4 ? '…' : ''}.`,
-    { fix: 'Confirm this is not a double entry; reverse the extra voucher if it is.', refs: g })));
+    `${g.length} possibly duplicate entries (same day, accounts and amount): ${g.slice(0, 4).join(', ')}${g.length > 4 ? '…' : ''}.`,
+    { fix: 'Two identical same-day transactions can be legitimate — verify before reversing.', refs: g })));
 
-  // 5. GST payable outstanding — file/deposit reminder. Advisory.
+  // 5. GST payable outstanding — file/deposit reminder. Advisory. Only raised
+  // once the PREVIOUS period's GSTR-3B due date (20th of this month) has passed;
+  // before that a GST payable balance is perfectly normal (B8 noise fix).
   const gstPayable = round2(bs.liabilities?.gstPayable || 0);
-  if (gstPayable > 1) {
+  const asOn = ctx.asOn || new Date().toISOString().slice(0, 10);
+  const prevPeriodDue = dueDate(prevMonth(monthOf(asOn)), 20);
+  if (gstPayable > 1 && asOn > prevPeriodDue) {
     findings.push(finding('advisory', 'gst_outstanding',
-      `GST payable of ${gstPayable} is outstanding — confirm the return is filed and the tax deposited.`,
-      { fix: 'File GSTR-3B and deposit by the 20th of next month.' }));
+      `GST payable of ${gstPayable} is outstanding past the ${prevPeriodDue} GSTR-3B due date — confirm the return is filed and the tax deposited.`,
+      { fix: 'File GSTR-3B and deposit; the calendar on Year Close shows the periods.' }));
   }
 
   // 6. TDS payable outstanding — deposit reminder. Advisory.
@@ -112,11 +117,12 @@ export function runBooksAudit(snapshot = {}, ctx = {}) {
       { fix: 'Review them in Accounts → AI Entries and mark reviewed.' }));
   }
 
-  // 11. Unposted drafts sitting in the queue. Advisory.
+  // 11. Unposted drafts sitting in the queue. Advisory (count only — drafts do
+  // not affect the books until posted).
   if (drafts.length) {
     findings.push(finding('advisory', 'unposted_drafts',
-      `${drafts.length} draft${drafts.length === 1 ? '' : 's'} not yet posted.`,
-      { fix: 'Post or discard them so the books are complete.' }));
+      `${drafts.length} draft${drafts.length === 1 ? '' : 's'} pending — drafts don't affect the books until posted.`,
+      { fix: 'Post or discard them before closing the period.' }));
   }
 
   // 12. Entries dated inside a closed financial year. Warning.

@@ -50,7 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccountCandidates, pnlAnswer, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, runOrchestrator, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccountCandidates, pnlAnswer, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, runOrchestrator, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation, collectPriorDepreciation } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
@@ -393,14 +393,30 @@ const Accounting = ({
   // Close-readiness checklist + GST/TDS compliance calendar (Phase 4). Advisory
   // only — the terminal action remains the human-driven closeFinancialYear.
   const closeChecklist = useMemo(
-    () => buildCloseChecklist({ audit: booksAudit, drafts: journalDrafts, entries: manualJournalEntries, salesBook: snapshot.salesBook, today: new Date().toISOString().slice(0, 10) }),
-    [booksAudit, journalDrafts, manualJournalEntries, snapshot.salesBook]
+    () => buildCloseChecklist({
+      audit: booksAudit,
+      drafts: journalDrafts,
+      entries: manualJournalEntries,
+      salesBook: snapshot.salesBook,
+      // Sales months from the RAW (unfiltered) invoice list — an FY-scoped
+      // salesBook would drop March's GSTR deadlines every April (B9).
+      salesMonths: new Set((taxInvoices || []).map((r) => String(r.invoice_date || '').slice(0, 7)).filter(Boolean)),
+      today: new Date().toISOString().slice(0, 10),
+    }),
+    [booksAudit, journalDrafts, manualJournalEntries, snapshot.salesBook, taxInvoices]
   );
 
-  // Year-end depreciation proposal (Phase 5) — advisory; parked as a draft on request.
+  // Year-end depreciation proposal (Phase 5) — advisory; parked as a draft on
+  // request. Prior posted/parked schedules feed the same-FY guard + WDV bases.
   const depreciationProposal = useMemo(
-    () => (fyFilter !== 'all' ? proposeDepreciation({ ledger: snapshot.ledger, fy: fyFilter }) : null),
-    [snapshot.ledger, fyFilter]
+    () => (fyFilter !== 'all'
+      ? proposeDepreciation({
+          ledger: snapshot.ledger,
+          fy: fyFilter,
+          prior: collectPriorDepreciation({ entries: manualJournalEntries, drafts: journalDrafts }),
+        })
+      : null),
+    [snapshot.ledger, fyFilter, manualJournalEntries, journalDrafts]
   );
 
   // Orchestrator verdict per parked draft (advisory chip — first live wiring of
@@ -1252,6 +1268,9 @@ const Accounting = ({
       linked_project_name: linkedProjectName,
       // TDS section (192/194C/194J/194I/194H/194A…) for the monthly TDS summary
       tds_section: parsed?.meta?.tdsSection || null,
+      // Full parsed meta (depreciation schedules, projections…) — consumed by
+      // collectPriorDepreciation and future analysts. Additive, schemaless.
+      ai_meta: parsed?.meta || null,
       attachments: parsed.attachments || [],
       created_by: user?.uid || '',
       created_at: new Date().toISOString(),
@@ -1292,6 +1311,7 @@ const Accounting = ({
       raw_prompt: parsed.rawPrompt || '',
       ai_issues: parsed.issues || [],
       ai_party_alias: parsed?.meta?.partyAlias || null,
+      ai_meta: parsed?.meta || null,
       source: 'chat_park',
       status: 'draft',
       requires_approval: requiresApproval,
@@ -1362,7 +1382,7 @@ const Accounting = ({
       party: { name: draft.party_name, type: draft.party_type },
       intent: draft.intent,
       accountCreates: draft.account_creates || [],
-      meta: { projectTag: draft.project_tag, partyAlias: draft.ai_party_alias || null },
+      meta: { ...(draft.ai_meta || {}), projectTag: draft.project_tag, partyAlias: draft.ai_party_alias || null },
       rawPrompt: draft.raw_prompt || '',
       issues: draft.ai_issues || [],
       attachments: draft.attachments || [],
@@ -4374,13 +4394,25 @@ const Accounting = ({
             )}
           </div>
 
+          {/* Depreciation — already provided for this FY (same-FY double-post guard) */}
+          {depreciationProposal && depreciationProposal.alreadyProvided && (
+            <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+              ✓ Depreciation for FY {fyFilter} already {depreciationProposal.alreadyProvided.status === 'draft' ? 'parked as a draft' : 'provided'} — {formatCurrency(depreciationProposal.alreadyProvided.total)}
+              {depreciationProposal.alreadyProvided.date ? ` on ${depreciationProposal.alreadyProvided.date}` : ''}
+              {depreciationProposal.alreadyProvided.status === 'draft' ? '. Post it from the Drafts panel.' : ` (${depreciationProposal.alreadyProvided.voucher_no}).`}
+            </div>
+          )}
+
           {/* Depreciation proposal (advisory — parks a draft, human posts) */}
           {depreciationProposal && depreciationProposal.total > 0 && (
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-sm font-bold text-slate-700">Depreciation for FY {fyFilter} — proposed {formatCurrency(depreciationProposal.total)}</div>
-                  <div className="text-xs text-slate-500">WDV block rates on your fixed-asset balances. Review the schedule, then park it as a draft — posting stays with you.</div>
+                  <div className="text-xs text-slate-500">WDV block rates on the written-down value of your fixed assets (cost − prior schedules). Review, then park as a draft — posting stays with you.</div>
+                  {depreciationProposal.unapportionedNote && (
+                    <div className="mt-1 text-[11px] text-amber-600">{depreciationProposal.unapportionedNote}</div>
+                  )}
                 </div>
                 {canEditFinance && (
                   <button

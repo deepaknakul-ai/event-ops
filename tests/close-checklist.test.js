@@ -57,6 +57,18 @@ describe('buildComplianceCalendar', () => {
     expect(cal.find((c) => c.kind === 'gstr3b')).toMatchObject({ due: '2026-07-20', overdue: false });
   });
 
+  it('salesMonths (unfiltered) preserves prev-month GSTR deadlines across an FY boundary (B9)', () => {
+    // April 5, new-FY filter: an FY-scoped salesBook no longer contains March —
+    // the explicit salesMonths set (from raw invoices) must keep the deadline.
+    const cal = buildComplianceCalendar({
+      salesBook: [],                                     // FY-filtered: March gone
+      salesMonths: new Set(['2026-03']),                 // raw invoice months
+      today: '2026-04-05',
+    });
+    expect(cal.find((c) => c.kind === 'gstr1')).toMatchObject({ period: '2026-03', due: '2026-04-11' });
+    expect(cal.find((c) => c.kind === 'gstr3b')).toMatchObject({ period: '2026-03', due: '2026-04-20' });
+  });
+
   it('handles the December → January rollover and empty input', () => {
     const cal = buildComplianceCalendar({
       entries: [{ date: '2026-12-20', entries: [{ debitAccount: 'X', creditAccount: 'TDS Payable', amount: 1000 }] }],
