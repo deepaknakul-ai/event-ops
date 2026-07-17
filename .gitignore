@@ -44,4 +44,4 @@ database-debug.log
 .tmp.driveupload/
 
 # Local Anthropic key for functions/llm-eval.cjs (never commit)
-functions/.eval-key
+functions/.eval-key*
