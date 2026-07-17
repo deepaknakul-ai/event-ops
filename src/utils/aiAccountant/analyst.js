@@ -17,7 +17,7 @@ import { normalizeAliasKey } from './party.js';
 // validateTransaction issue.level → the audit severity taxonomy (mirrors
 // orchestrator.js; re-declared to keep this module dependency-light).
 const SEVERITY_BY_LEVEL = { error: 'blocking', warning: 'warning', info: 'advisory' };
-const CONTROL_RE = /^cash\b|^bank\b|^party:/i;
+const CONTROL_RE = /^cash\b|^bank\b|^party:|^employee:/i;
 
 /** The audit findings for an entry: the trace's if present, else derived from ai_issues. */
 function findingsOf(entry) {

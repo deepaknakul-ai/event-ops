@@ -50,7 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccountCandidates, pnlAnswer, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
@@ -934,10 +934,11 @@ const Accounting = ({
       addToast('Access denied. Only admin/manager can delete journal entries.', 'error');
       return;
     }
-    // M-6: posted manual JVs are reversed, not deleted, to preserve the audit
-    // trail. Only drafts (or non-manual generated entries) may be hard-deleted.
-    if (entry?.source === 'manual_journal' && entry?.status !== 'draft') {
-      addToast('Posted journal entries cannot be deleted. Use "Reverse" to issue a reversal voucher.', 'error');
+    // M-6 (widened): ANY posted voucher — manual, CN/DN, TDS, chat, reco — is
+    // reversed, not deleted, to preserve the audit trail. Admin keeps a typed-
+    // confirm hard delete for genuine mistakes (rules enforce admin-only anyway).
+    if (entry?.status !== 'draft' && role !== 'admin') {
+      addToast('Posted vouchers cannot be deleted. Use "Reverse" to issue a reversal voucher.', 'error');
       return;
     }
     setDeleteModal({ isOpen: true, entry });
@@ -952,7 +953,7 @@ const Accounting = ({
       addToast('Nothing to reverse on this voucher.', 'error');
       return;
     }
-    if (entry.reversed) {
+    if (entry.reversed || entry.reversed_by) {
       addToast('This voucher has already been reversed.', 'info');
       return;
     }
@@ -988,15 +989,18 @@ const Accounting = ({
         entries: reversedEntries,
         currency: entry.currency || 'INR',
         fx_rate_to_inr: entry.fx_rate_to_inr || 1,
+        is_reversal: true,
         reverses_voucher_id: entry.id,
         reverses_voucher_no: entry.voucher_no || '',
         created_by: user?.uid || '',
         created_at: new Date().toISOString(),
       };
       const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
-      // Mark original as reversed so the UI hides the button + audit links the pair.
+      // Mark original as reversed so the UI hides the button + audit links the
+      // pair. Writes BOTH flag families so the chat path sees it too (B6 fix).
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', entry.id), {
         reversed: true,
+        reversed_by: voucherNo,
         reversed_by_voucher_id: ref.id,
         reversed_by_voucher_no: voucherNo,
         reversed_at: new Date().toISOString(),
@@ -1940,7 +1944,7 @@ const Accounting = ({
       `JV-${(e.voucher_no || '').toString().padStart(4, '0')}` === voucher
     );
     if (!original) throw new Error(`Voucher ${voucher} not found.`);
-    if (original.reversed_by || original.is_reversal) throw new Error(`Voucher ${voucher} is already reversed.`);
+    if (original.reversed || original.reversed_by || original.is_reversal) throw new Error(`Voucher ${voucher} is already reversed.`);
 
     const dateStr = parsed.date || new Date().toISOString().slice(0, 10);
     const fy = getFYFromDate(dateStr);
@@ -1978,12 +1982,13 @@ const Accounting = ({
       created_at: new Date().toISOString(),
     };
     const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
-    // Mark original as reversed (metadata only — does not delete it).
+    // Mark original as reversed (metadata only — does not delete it). Writes
+    // BOTH flag families so the button path sees it too (B6 fix).
     if (original.id) {
       try {
         await updateDoc(
           doc(db, 'artifacts', appId, 'public', 'data', 'journal_entries', original.id),
-          { reversed_by: voucherNo, reversed_at: new Date().toISOString() },
+          { reversed: true, reversed_by: voucherNo, reversed_by_voucher_id: ref.id, reversed_by_voucher_no: voucherNo, reversed_at: new Date().toISOString() },
         );
       } catch { /* best-effort */ }
     }
@@ -2032,10 +2037,15 @@ const Accounting = ({
     // ── Show / ledger-on-demand / party balance / liabilities (read-only) ──
     if (qt === 'party_balance' || qt === 'account_ledger') {
       const subject = parsed?.meta?.subject || '';
-      const account = resolveAccount(subject, snapshot.ledger);
-      if (!account) {
+      const candidates = resolveAccountCandidates(subject, snapshot.ledger);
+      if (candidates.length === 0) {
         return { message: `I couldn't find an account or party matching "${subject || 'that'}". Try the exact name — e.g. "show Acme Corp ledger".` };
       }
+      if (candidates.length > 1) {
+        const opts = candidates.slice(0, 5).map((a) => a.replace(/^(Party:|Employee:)\s*/, '')).join(' · ');
+        return { message: `"${subject}" matches more than one account — did you mean: ${opts}? Say e.g. "show ${candidates[0].replace(/^(Party:|Employee:)\s*/, '')} ledger".` };
+      }
+      const account = candidates[0];
       if (qt === 'account_ledger') {
         const ans = accountLedgerAnswer(snapshot.ledger, account, formatCurrency);
         const wantsPrint = /\b(print|download|pdf|export|save|email)\b/i.test(parsed?.rawPrompt || '');
@@ -2062,24 +2072,26 @@ const Accounting = ({
       return { message: tdsLiabilityAnswer(snapshot.ledger, formatCurrency).message };
     }
 
+    // Statement answers read the fyFilter-scoped snapshot, NOT the chat period —
+    // the scope suffix says so instead of echoing a period we didn't apply.
+    const scopeLabel = fyFilter === 'all' ? 'all-periods figures' : `full FY ${fyFilter} figures`;
     if (qt === 'cash_balance' || qt === 'bank_balance') {
       const want = qt === 'cash_balance' ? /^Cash($|:)/i : /^Bank($|:)/i;
       const rows = (snapshot.ledger || []).filter((r) => want.test(r.account));
       const bal = rows.reduce((s, r) => s + (r.balance || 0), 0);
-      return { message: `${qt === 'cash_balance' ? 'Cash' : 'Bank'} balance: ${formatCurrency(bal)}.` };
+      return { message: `${qt === 'cash_balance' ? 'Cash' : 'Bank'} balance: ${formatCurrency(bal)} (as of today).` };
     }
     if (qt === 'pnl') {
-      const pl = snapshot.profitAndLoss || {};
-      return { message: `P&L — Revenue: ${formatCurrency(pl.revenue || 0)} · Expenses: ${formatCurrency(pl.expenses || 0)} · Net: ${formatCurrency(pl.netProfit || 0)} (${periodLabel}).` };
+      return { message: `${pnlAnswer(snapshot.profitAndLoss, formatCurrency).message} (${scopeLabel}).` };
     }
     if (qt === 'balance_sheet') {
       const bs = snapshot.balanceSheet || {};
-      return { message: `Balance Sheet — Assets: ${formatCurrency(bs.assets?.total || 0)} · Liabilities: ${formatCurrency(bs.liabilities?.total || 0)} · Equity: ${formatCurrency(bs.equity?.total || 0)}.` };
+      return { message: `Balance Sheet — Assets: ${formatCurrency(bs.assets?.total || 0)} · Liabilities: ${formatCurrency(bs.liabilities?.total || 0)} · Equity: ${formatCurrency(bs.equity?.total || 0)} (${scopeLabel}).` };
     }
     if (qt === 'trial_balance') {
       const dr = (snapshot.ledger || []).reduce((s, r) => s + Math.max(r.balance || 0, 0), 0);
       const cr = (snapshot.ledger || []).reduce((s, r) => s + Math.max(-(r.balance || 0), 0), 0);
-      return { message: `Trial balance — Debits: ${formatCurrency(dr)} · Credits: ${formatCurrency(cr)}.` };
+      return { message: `Trial balance — Debits: ${formatCurrency(dr)} · Credits: ${formatCurrency(cr)} (${scopeLabel}).` };
     }
     if (qt === 'expenses') {
       const rows = (manualJournalEntries || []).filter((e) => inPeriod(e.date));
@@ -4167,7 +4179,8 @@ const Accounting = ({
                         {canEditFinance && (
                           <td className="px-3 py-2 text-center">
                             <div className="inline-flex items-center gap-1">
-                              {row.source === 'manual_journal' && !row.reversed && row.status !== 'draft' && (
+                              {row.status !== 'draft' && !row.reversed && !row.reversed_by && !row.is_reversal
+                                && row.source !== 'fy_closing' && !/reversal/i.test(row.source || '') && (
                                 <button
                                   onClick={() => handleReverseJournalEntry(row)}
                                   className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-amber-700 hover:bg-amber-50 transition"
@@ -4177,8 +4190,8 @@ const Accounting = ({
                                   Reverse
                                 </button>
                               )}
-                              {row.reversed && (
-                                <span className="text-[10px] text-slate-500" title={`Reversed by ${row.reversed_by_voucher_no || ''}`}>Reversed</span>
+                              {(row.reversed || row.reversed_by) && (
+                                <span className="text-[10px] text-slate-500" title={`Reversed by ${row.reversed_by_voucher_no || row.reversed_by || ''}`}>Reversed</span>
                               )}
                               <button
                                 onClick={() => handleDeleteJournalEntry(row)}

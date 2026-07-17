@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  resolveAccount, buildRunningLedger, partyBalanceAnswer, accountLedgerAnswer,
+  resolveAccount, resolveAccountCandidates, buildRunningLedger, partyBalanceAnswer, accountLedgerAnswer,
   outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, buildBooksDigest,
 } from '../src/utils/aiAccountant/queries.js';
 import { parseMessage } from '../src/utils/aiAccountant/nlu.js';
@@ -28,6 +28,25 @@ describe('resolveAccount', () => {
     expect(resolveAccount('acme', ledger)).toBe('Party: Acme Corp');
     expect(resolveAccount('rahul', ledger)).toBe('Employee: Rahul');
     expect(resolveAccount('nobody', ledger)).toBe(null);
+  });
+});
+
+describe('resolveAccountCandidates (A5 — deterministic, no over-matching)', () => {
+  it('returns multiple candidates on ambiguity instead of guessing', () => {
+    const l = [...ledger, { account: 'Party: Acme Industries', balance: 100, entries: [] }];
+    const c = resolveAccountCandidates('acme', l);
+    expect(c.length).toBe(2);
+    expect(c).toContain('Party: Acme Corp');
+    expect(c).toContain('Party: Acme Industries');
+  });
+  it('subjects shorter than 3 chars only match exactly', () => {
+    expect(resolveAccountCandidates('za', ledger)).toEqual([]); // no fuzzy on 2 chars
+    const withShort = [...ledger, { account: 'Party: ZA', balance: 1, entries: [] }];
+    expect(resolveAccountCandidates('za', withShort)).toEqual(['Party: ZA']); // exact still fine
+  });
+  it('prefers the shortest name deterministically ("cash" → Cash over Cash In Hand)', () => {
+    const l = [{ account: 'Cash In Hand', balance: 1, entries: [] }, { account: 'Cash', balance: 1, entries: [] }];
+    expect(resolveAccount('cash', l)).toBe('Cash');
   });
 });
 

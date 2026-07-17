@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { X, Sparkles, Send, Check, Edit3, RotateCcw, AlertTriangle, Info, Mic, MicOff, HelpCircle, BookmarkPlus } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { formatCurrency } from '../utils/helpers';
-import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, auditFromIssues, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
+import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, auditFromIssues, computeTdsYtdForParty, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
 import { aiAvailable, aiExtractEntry } from '../utils/aiParse';
 
 // Web Speech API (prefix-agnostic). Returns null when unsupported.
@@ -330,13 +330,16 @@ const VirtualAccountant = ({
   const buildValidatorCtx = useCallback((raw) => {
     const partyName = String(raw?.party?.name || '').toLowerCase();
     const partyGstin = partyName ? (partyGstins[partyName] || '') : '';
+    // Real YTD payments to this party this FY (basis for the section-wise annual
+    // TDS threshold, e.g. 194C's ₹1L aggregate). Best-effort from posted entries.
+    const fy = typeof getFY === 'function' ? getFY(raw?.date || new Date().toISOString().slice(0, 10)) : '';
     return {
       ...validatorCtx,
       partyGstin,
       tdsSection: raw?.meta?.tdsSection || undefined,
-      tdsYtdAmount: 0,
+      tdsYtdAmount: computeTdsYtdForParty(recentJournalEntries, raw?.party?.name || '', fy),
     };
-  }, [validatorCtx, partyGstins]);
+  }, [validatorCtx, partyGstins, recentJournalEntries, getFY]);
 
   // Multi-turn session memory: remember the last party / mode / project so
   // follow-ups like "…and 5k cab for the same job" or "paid them 10k more" inherit context.
@@ -664,8 +667,9 @@ const VirtualAccountant = ({
     if (!onPostEntry) return;
     const msg = messages.find(m => m.id === messageId);
     if (!msg || msg.status !== 'pending') return;
-    // Re-run validator on the (possibly user-edited) entry before posting.
-    const rechecked = validateTransaction({ ...msg.parsed, type: msg.parsed.intent || msg.parsed.type }, validatorCtx);
+    // Re-run validator on the (possibly user-edited) entry before posting —
+    // with the FULL compliance ctx (GSTIN/TDS), same as the preview (A8 fix).
+    const rechecked = validateTransaction({ ...msg.parsed, type: msg.parsed.intent || msg.parsed.type }, buildValidatorCtx(msg.parsed));
     if (!canPost(rechecked)) {
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, parsed: rechecked } : m));
       addMessage({ role: 'assistant', type: 'text', content: 'Cannot post yet — please fix the errors highlighted on the entry.' });
@@ -693,7 +697,7 @@ const VirtualAccountant = ({
     if (!onParkEntry) return;
     const msg = messages.find((m) => m.id === messageId);
     if (!msg || msg.status !== 'pending') return;
-    const rechecked = validateTransaction({ ...msg.parsed, type: msg.parsed.intent || msg.parsed.type }, validatorCtx);
+    const rechecked = validateTransaction({ ...msg.parsed, type: msg.parsed.intent || msg.parsed.type }, buildValidatorCtx(msg.parsed));
     setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, status: 'posting', parsed: rechecked } : m));
     try {
       await onParkEntry(rechecked);

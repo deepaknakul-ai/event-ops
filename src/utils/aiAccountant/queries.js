@@ -13,22 +13,58 @@ const stripPrefix = (account) => String(account || '').replace(SUBLEDGER_RE, '')
 const isSubledger = (account) => /^(Party:|Employee:)/.test(String(account || ''));
 
 /**
- * Resolve a free-text subject ("acme", "rahul", "sales revenue") to a real ledger
- * account name. Tries exact account → exact name-part → contains. Returns null if
- * nothing plausible matches (caller says "I couldn't find an account named X").
+ * Resolve a free-text subject to ledger account CANDIDATES, deterministically:
+ * exact account → exact name-part → (len>=3 only) startsWith → includes, with
+ * sub-ledgers (Party:/Employee:) preferred, then shortest name, then locale order.
+ * Subjects shorter than 3 chars only match exactly (stops "bs"/"sa" grabbing a
+ * random party). Callers treat 1 candidate as a hit, >1 as "did you mean…".
+ */
+export function resolveAccountCandidates(subject, ledger) {
+  const s = String(subject || '').trim().toLowerCase();
+  if (!s) return [];
+  const accounts = (ledger || []).map((r) => r.account).filter(Boolean);
+  const byExact = accounts.filter((a) => a.toLowerCase() === s);
+  if (byExact.length) return byExact;
+  const byName = accounts.filter((a) => stripPrefix(a).toLowerCase() === s);
+  if (byName.length) return byName;
+  if (s.length < 3) return [];
+  const rank = (a) => {
+    const name = stripPrefix(a).toLowerCase();
+    if (name.startsWith(s)) return 0;
+    if (name.includes(s)) return 1;
+    if (a.toLowerCase().includes(s)) return 2;
+    return 9;
+  };
+  return accounts
+    .filter((a) => rank(a) < 9)
+    .sort((a, b) =>
+      rank(a) - rank(b)
+      || (isSubledger(b) ? 1 : 0) - (isSubledger(a) ? 1 : 0)
+      || a.length - b.length
+      || a.localeCompare(b));
+}
+
+/**
+ * Back-compat single-account resolver: the best candidate (or null). Ambiguity
+ * handling belongs to callers via resolveAccountCandidates.
  */
 export function resolveAccount(subject, ledger) {
-  const s = String(subject || '').trim().toLowerCase();
-  if (!s) return null;
-  const accounts = (ledger || []).map((r) => r.account).filter(Boolean);
-  const byExact = accounts.find((a) => a.toLowerCase() === s);
-  if (byExact) return byExact;
-  const byName = accounts.find((a) => stripPrefix(a).toLowerCase() === s);
-  if (byName) return byName;
-  // Prefer a sub-ledger (party/employee) contains-match, then any account.
-  const byNameContains = accounts.find((a) => isSubledger(a) && stripPrefix(a).toLowerCase().includes(s));
-  if (byNameContains) return byNameContains;
-  return accounts.find((a) => a.toLowerCase().includes(s)) || null;
+  const c = resolveAccountCandidates(subject, ledger);
+  return c.length ? c[0] : null;
+}
+
+/** P&L chat answer. `pnl` = snapshot.profitAndLoss (which has NO `expenses` key —
+ *  total expenses = COGS + operating expenses). */
+export function pnlAnswer(pnl = {}, fmt = String) {
+  const revenue = round2(pnl.revenue || 0);
+  const expenses = round2((pnl.costOfGoodsSold || 0) + (pnl.operatingExpenses || 0));
+  const netProfit = round2(pnl.netProfit || 0);
+  return {
+    revenue,
+    expenses,
+    netProfit,
+    message: `P&L — Revenue: ${fmt(revenue)} · Expenses: ${fmt(expenses)} · Net: ${fmt(netProfit)}`,
+  };
 }
 
 /** A single account's entries with a running balance (sorted by date). */

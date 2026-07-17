@@ -28,6 +28,8 @@ export { buildCloseChecklist, buildComplianceCalendar } from './closeChecklist.j
 export { proposeDepreciation, DEP_RULES } from './depreciation.js';
 export {
   resolveAccount,
+  resolveAccountCandidates,
+  pnlAnswer,
   buildRunningLedger,
   partyBalanceAnswer,
   accountLedgerAnswer,
@@ -47,6 +49,7 @@ export {
   validateGSTIN,
   TDS_THRESHOLDS,
   checkTDSApplicability,
+  computeTdsYtdForParty,
   detectDuplicateVoucher,
   suggestRoundOff,
   checkCashCap,

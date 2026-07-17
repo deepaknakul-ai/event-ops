@@ -439,7 +439,9 @@ function detectQuery(text) {
   }
   else if (/\bcash\s+balance|how\s+much.*cash\b/.test(lower))      queryType = 'cash_balance';
   else if (/\bbank\s+balance|how\s+much.*bank\b/.test(lower))      queryType = 'bank_balance';
-  else if (/\bbalance\s*sheet\b|\bbs\b/.test(lower))               queryType = 'balance_sheet';
+  // Bare "bs" only counts as balance-sheet when the text is not asking for a
+  // ledger/statement (else "show BS Traders ledger" would misroute here).
+  else if (/\bbalance\s*sheet\b/.test(lower) || (/\bb\/?s\b/.test(lower) && !/\b(ledger|statement|khata)\b/.test(lower))) queryType = 'balance_sheet';
   else if (/\btrial\s*balance\b|\btb\b/.test(lower))               queryType = 'trial_balance';
   // On-demand ledger / party-balance / liabilities (before the generic P&L/expense fallbacks)
   else if (/\b(ledger|statement|khata)\b/.test(lower))            queryType = 'account_ledger';

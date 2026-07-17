@@ -73,6 +73,27 @@ export function checkTDSApplicability({ amount, section, ytdAmount = 0 }) {
   return { applies: false, section, rate: cfg.rate, reason: 'below_threshold' };
 }
 
+/**
+ * YTD PAYMENTS booked against a party this FY — the base checkTDSApplicability's
+ * annual threshold compares against (194C annual cap is an aggregate of PAYMENTS,
+ * not of TDS deducted). Sums posted journal entries carrying the denormalised
+ * `party_name`. Known under-counts (documented, advisory-only so a low figure
+ * merely delays the warning): purchases/payouts booked outside journal_entries,
+ * and manual JVs saved without a party_name.
+ * @param {Array<{fy?:string, party_name?:string, entries?:any[]}>} entries
+ * @param {string} partyName
+ * @param {string} fy
+ */
+export function computeTdsYtdForParty(entries = [], partyName = '', fy = '') {
+  const p = String(partyName || '').trim().toLowerCase();
+  if (!p || !fy) return 0;
+  return round2((entries || []).reduce((sum, e) => {
+    if (!e || e.fy !== fy) return sum;
+    if (String(e.party_name || '').trim().toLowerCase() !== p) return sum;
+    return sum + totalOf(e.entries || []);
+  }, 0));
+}
+
 // ── Duplicate voucher (different from validator's 60-sec window) ────────────
 /**
  * A stricter duplicate check: same date + same entry signature = duplicate,
