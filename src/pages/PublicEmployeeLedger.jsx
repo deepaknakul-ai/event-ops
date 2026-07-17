@@ -62,11 +62,17 @@ const PublicEmployeeLedger = () => {
 
     const raw = [];
 
-    // Add payouts (salary/cash disbursements)
+    // Add payouts (salary/cash disbursements) — badge each by its kind (C1).
+    const payoutKind = (p) => (
+      p.payout_type === 'reimbursement' ? 'Reimbursement'
+        : (p.payout_type === 'advance' || p.payout_type === 'advance_settlement') ? 'Advance'
+          : p.payout_type === 'salary' ? 'Salary' : 'Payout'
+    );
     payouts.forEach(p => raw.push({
       date: p.date,
       desc: `Payout: ${p.mode || 'Cash'}${p.reference ? ' - ' + p.reference : ''}`,
       type: 'payout',
+      kind: payoutKind(p),
       amount: parseFloat(p.amount || 0),
       remarks: p.remarks || ''
     }));
@@ -126,6 +132,7 @@ const PublicEmployeeLedger = () => {
           Date: row.date,
           Description: row.desc,
           type: row.type,
+          kind: row.kind || (row.type === 'advance' ? 'Advance' : ''),
           Amount: row.amount,
           RunningTotal: runningTotal,
           remarks: row.remarks
@@ -197,7 +204,7 @@ const PublicEmployeeLedger = () => {
     pdfDoc.setFontSize(9);
     pdfDoc.text(`Payouts: ${currentSummary.payouts.toFixed(2)}`, 18, startY + 8);
     pdfDoc.text(`Advances: ${currentSummary.advances.toFixed(2)}`, 80, startY + 8);
-    pdfDoc.text(`Total Received: ${currentSummary.total.toFixed(2)}`, 140, startY + 8);
+    pdfDoc.text(`Payments Received (incl. salary): ${currentSummary.total.toFixed(2)}`, 140, startY + 8);
     startY += 24;
 
     const headers = ['Date', 'Description', 'Type', 'Amount', 'Running Total'];
@@ -316,7 +323,7 @@ const PublicEmployeeLedger = () => {
                 <IndianRupee size={20} className="text-indigo-600" />
               </div>
               <div>
-                <div className="text-xs text-slate-400 uppercase tracking-wide">Total Received</div>
+                <div className="text-xs text-slate-400 uppercase tracking-wide">Payments Received (incl. salary)</div>
                 <div className="text-lg font-bold text-indigo-700">{formatCurrency(currentSummary.total)}</div>
               </div>
             </div>
@@ -378,9 +385,12 @@ const PublicEmployeeLedger = () => {
                       <td className="p-3 text-slate-700">{row.Description}</td>
                       <td className="p-3 text-center">
                         <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                          row.type === 'payout' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'
+                          row.kind === 'Salary' ? 'bg-emerald-100 text-emerald-700'
+                          : row.kind === 'Reimbursement' ? 'bg-blue-100 text-blue-700'
+                          : row.kind === 'Advance' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-slate-100 text-slate-600'
                         }`}>
-                          {row.type === 'payout' ? 'Payout' : 'Advance'}
+                          {row.kind || (row.type === 'payout' ? 'Payout' : 'Advance')}
                         </span>
                       </td>
                       <td className="p-3 text-right font-medium text-emerald-700">{formatCurrency(row.Amount)}</td>

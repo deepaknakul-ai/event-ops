@@ -27,6 +27,7 @@ export const buildAiContext = (ctx = {}) => {
     partyGstins: ctx.partyGstins && typeof ctx.partyGstins === 'object' ? ctx.partyGstins : {},
     accountNames: cap(ctx.allAccounts, 200),
     projectNames: cap(ctx.projectNames, 100),
+    employeeNames: cap(ctx.employeeNames, 200),
     orgGstin: typeof ctx.orgGstin === 'string' ? ctx.orgGstin : '',
     todayISO,
     fy,
@@ -91,6 +92,38 @@ export const hydrateLlmTransaction = (txn, ctx = {}) => {
         creditAccount: String(l.creditAccount || '').toLowerCase() === oldAcc ? `Party: ${target}` : l.creditAccount,
       }));
       out.party.name = target;
+    }
+  }
+
+  // ── Employee grounding (A3) — the per-employee mirror of the party block ──
+  // Employee parties ground against ctx.employeeNames (never the client list);
+  // matched names snap the "Employee: <name>" legs to the canonical casing, and
+  // a flat "Employee Advances" leg is rewritten to the per-employee account so
+  // the LLM path lands in the SAME sub-ledger as the rules engine.
+  const employeeNames = Array.isArray(ctx.employeeNames) ? ctx.employeeNames : [];
+  if (name && out.party.type === 'employee' && employeeNames.length) {
+    const empExact = employeeNames.find((p) => String(p).toLowerCase() === name.toLowerCase());
+    let empTarget = empExact || '';
+    if (!empTarget) {
+      const cand = findPartyCandidates(name, employeeNames);
+      const only = cand.length === 1 ? cand[0] : null;
+      if (only && (only.source === 'exact' || (only.coverage ?? 0) >= 1)) empTarget = only.name;
+    }
+    if (empTarget) {
+      const oldEmpAcc = `employee: ${name.toLowerCase()}`;
+      out.entries = out.entries.map((l) => {
+        const rewrite = (acc) => {
+          const low = String(acc || '').toLowerCase();
+          if (low === oldEmpAcc) return `Employee: ${empTarget}`;
+          if (low === 'employee advances' || low === 'employee payable') return `Employee: ${empTarget}`;
+          return acc;
+        };
+        return { ...l, debitAccount: rewrite(l.debitAccount), creditAccount: rewrite(l.creditAccount) };
+      });
+      if (empTarget !== name || out.entries.some((l) => String(l.debitAccount).startsWith('Employee: ') || String(l.creditAccount).startsWith('Employee: '))) {
+        if (empTarget !== name) out.issues.push({ level: 'info', code: 'llm_employee_snapped', message: `Interpreted "${name}" as employee "${empTarget}".` });
+      }
+      out.party.name = empTarget;
     }
   }
 

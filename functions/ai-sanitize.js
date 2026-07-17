@@ -12,6 +12,7 @@
 const BOOKING_INTENTS = [
   'receipt', 'payment', 'invoice', 'purchase', 'salary', 'expense',
   'bank_deposit', 'bank_withdrawal', 'tds', 'credit_note', 'debit_note', 'advance',
+  'reimbursement',
 ];
 
 // JSON Schema for structured outputs (output_config.format). Constraints per
@@ -77,9 +78,10 @@ const STATIC_SYSTEM_PROMPT = [
   '- Each entries[] line is a self-balancing pair: {debitAccount, creditAccount, amount>0}. Never repeat the same account on both sides of a line.',
   '- Debit what comes in / expenses / assets; credit what goes out / income / liabilities.',
   '- Party receivable/payable accounts are named "Party: <Name>". Employee accounts are named "Employee: <Name>".',
+  '- When a specific EMPLOYEE is named (see the known-employees list), always use their per-employee account "Employee: <Name>" — never the flat "Employee Advances" or "Employee Payable" control accounts.',
   '- Prefer account names EXACTLY as given in the provided account list. Only introduce a new account name when nothing in the list fits.',
   '- Settlement adjusting a prior advance: ONLY when the message explicitly says a larger bill is being settled AND a prior advance/part-payment is applied, emit multiple lines whose debits total the FULL bill — one line crediting the advance account for the advance, one crediting Cash/Bank for the amount actually paid now. If no prior advance is mentioned, book only the amount paid (do NOT invent an advance leg).',
-  '  Example: "36000 ka bill, 6000 advance pehle diya tha, baaki 30000 pay kiya" -> payment with lines [{Dr Party: X, Cr Employee Advances, 6000}, {Dr Party: X, Cr Bank, 30000}] (debits total 36000).',
+  '  Example: "36000 ka bill, 6000 advance pehle Raju ko diya tha, baaki 30000 pay kiya" -> payment with lines [{Dr Party: X, Cr Employee: Raju, 6000}, {Dr Party: X, Cr Bank, 30000}] (debits total 36000).',
   '',
   '## Intent definitions (choose exactly one)',
   '- receipt: money received from a client (Dr Cash/Bank, Cr Party: X)',
@@ -93,7 +95,8 @@ const STATIC_SYSTEM_PROMPT = [
   '- tds: TDS deducted by or against a party (Dr TDS Receivable / Cr TDS Payable as appropriate)',
   '- credit_note: credit note issued to a client (reverses income [+ GST output])',
   '- debit_note: debit note issued to a vendor (reverses purchase [+ GST input])',
-  '- advance: advance given to or received from a party/employee',
+  '- advance: advance given to or received from a party/employee (Dr "Employee: <Name>" when a named employee, Cr Cash/Bank)',
+  '- reimbursement: paying back / owing an employee for out-of-pocket spend (spend leg: Dr expense account, Cr "Employee: <Name>"; settlement leg: Dr "Employee: <Name>", Cr Cash/Bank)',
   '',
   '## GST (Indian Goods & Services Tax)',
   '- Standard rates: 0%, 5%, 12%, 18% (default for AV rental), 28%.',
@@ -171,6 +174,7 @@ function capContext(context) {
     partyGstins,
     accountNames: capList(c.accountNames, 200, 60),
     projectNames: capList(c.projectNames, 100, 80),
+    employeeNames: capList(c.employeeNames, 200, 80),
     orgGstin: typeof c.orgGstin === 'string' ? c.orgGstin.slice(0, 20) : '',
     todayISO: validISODate(c.todayISO) ? c.todayISO : new Date().toISOString().slice(0, 10),
     fy: typeof c.fy === 'string' ? c.fy.slice(0, 10) : '',
@@ -188,6 +192,7 @@ function buildVolatileContext(context) {
     `Party GSTINs (JSON object, lowercase name -> GSTIN): ${JSON.stringify(c.partyGstins)}`,
     `Chart of accounts (JSON array; prefer these exact names): ${JSON.stringify(c.accountNames)}`,
     `Projects (JSON array): ${JSON.stringify(c.projectNames)}`,
+    `Known employees (JSON array; their accounts are "Employee: <Name>"): ${JSON.stringify(c.employeeNames)}`,
   ].join('\n');
 }
 

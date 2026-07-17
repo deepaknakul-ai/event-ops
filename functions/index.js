@@ -63,14 +63,19 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Mirrors the client's generateJournalVoucherNumber (src/utils/accounting.js)
+// byte-for-byte — ONE shared counter doc + format so cron-posted and UI-posted
+// vouchers share a sequence (previously two independent counters could collide
+// on numbering; grey-area B10). Historical 'JV/FY/0001' vouchers stay as-is.
 async function nextVoucherNo(appId, fy) {
-  const counterRef = db.doc(`artifacts/${appId}/public/data/counters/vouchers_${fy}`);
+  const counterKey = `je_${fy.replace('-', '_')}`;
+  const counterRef = db.doc(`artifacts/${appId}/public/data/counters/accounting_vouchers`);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(counterRef);
-    const current = snap.exists ? Number(snap.data().value || 0) : 0;
+    const current = snap.exists ? parseInt(snap.data()[counterKey] || 0, 10) : 0;
     const next = current + 1;
-    tx.set(counterRef, { value: next, fy }, { merge: true });
-    return `JV/${fy}/${String(next).padStart(4, '0')}`;
+    tx.set(counterRef, { [counterKey]: next }, { merge: true });
+    return `JV-${String(next).padStart(4, '0')}-${fy}`;
   });
 }
 
@@ -109,6 +114,16 @@ async function processAppDrafts(appId, today) {
     .where('schedule_post_on', '<=', today)
     .get();
   if (due.empty) return { posted: 0, failed: 0, skipped: 0 };
+  // FY-lock (grey-area C5): the UI enforces locked_fys on every post, but this
+  // cron previously bypassed it — a scheduled draft dated into a locked FY
+  // would post anyway. One settings read per app run.
+  let lockedFYs = [];
+  try {
+    const org = await db.doc(`artifacts/${appId}/public/data/settings/organization`).get();
+    lockedFYs = org.exists && Array.isArray(org.data().locked_fys) ? org.data().locked_fys : [];
+  } catch (err) {
+    logger.warn(`[${appId}] Could not read locked_fys — proceeding without lock check`, err);
+  }
   let posted = 0;
   let failed = 0;
   let skipped = 0;
@@ -117,6 +132,15 @@ async function processAppDrafts(appId, today) {
     if (draft.requires_approval && draft.approval_status !== 'approved') {
       skipped += 1;
       logger.info(`[${appId}] Draft ${docSnap.id} skipped — pending approval`);
+      continue;
+    }
+    const draftFY = fyOf(draft.date || today);
+    if (lockedFYs.includes(draftFY)) {
+      skipped += 1;
+      // Unschedule + stamp the reason so it surfaces in the Drafts panel
+      // instead of silently retrying every night.
+      await docSnap.ref.update({ schedule_post_on: null, schedule_error: 'fy_locked', schedule_error_at: new Date().toISOString() }).catch(() => {});
+      logger.warn(`[${appId}] Draft ${docSnap.id} skipped — FY ${draftFY} is locked`);
       continue;
     }
     try {
@@ -147,6 +171,7 @@ async function processAppDrafts(appId, today) {
         ai_model: draft.ai_model || 'rule-v1',
         ai_prompt: draft.raw_prompt || draft.ai_prompt || '',
         ai_issues: (draft.ai_issues || []).filter((i) => i && i.level !== 'error'),
+        ai_meta: draft.ai_meta || null,
         party_name: draft.party_name || null,
         party_type: draft.party_type || null,
         linked_party_id: draft.linked_party_id || null,
@@ -1584,7 +1609,9 @@ exports.getEmployeeStatement = onCall(
     const pickStatementRow = (d) => {
       const r = d.data();
       const out = { id: d.id };
-      for (const k of ['amount', 'date', 'mode', 'reference', 'remarks']) {
+      // payout_type added (C1): the statement page badges Salary / Reimbursement /
+      // Advance so employees can tell payment kinds apart.
+      for (const k of ['amount', 'date', 'mode', 'reference', 'remarks', 'payout_type']) {
         if (r[k] !== undefined) out[k] = r[k];
       }
       return out;
