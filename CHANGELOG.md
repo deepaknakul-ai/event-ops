@@ -4,6 +4,24 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.19 — Full Accountant, Phase 5: Integrity gap-fillers
+
+The final phase of the Full Accountant roadmap — closing the paths the audit engine couldn't vouch for:
+
+- **One validated posting path** — the Manual Posting, Credit/Debit Note, and TDS Entry forms
+  now run the **same validator the AI chat uses** before posting: closed-FY, duplicate,
+  sign-convention, GST-math and account checks. Errors block the post; warnings are surfaced
+  as a note but don't stop a deliberate action. (TDS validates *before* consuming a voucher number.)
+- **Depreciation proposer** — Year Close now shows a **proposed depreciation schedule** (WDV
+  block rates on your fixed-asset balances: computers/software 40%, plant/AV 15%, furniture 10%,
+  vehicles 15%, building 10%) with a one-click **Park as draft** — you review and post; nothing
+  is booked automatically.
+- **Account Heads management** — each account can now be **deactivated/reactivated** and its
+  Type / Sub-type / Normal side edited inline. Names stay immutable (the ledger groups by name).
+
+Deferred by design: vendor-payment (AP) due-date reminders — payables visibility already exists
+via Ageing, the Audit tab and the close checklist; a true due-date model is a future slice.
+
 ## 3.6.18 — Full Accountant, Phase 4: Proactive close + compliance calendar
 
 The accountant now **owns the close**. Accounts → Year Close gains:

@@ -50,7 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
@@ -397,6 +397,12 @@ const Accounting = ({
     [booksAudit, journalDrafts, manualJournalEntries, snapshot.salesBook]
   );
 
+  // Year-end depreciation proposal (Phase 5) — advisory; parked as a draft on request.
+  const depreciationProposal = useMemo(
+    () => (fyFilter !== 'all' ? proposeDepreciation({ ledger: snapshot.ledger, fy: fyFilter }) : null),
+    [snapshot.ledger, fyFilter]
+  );
+
   // ── Credit/Debit Note CRUD ──
   const cnDnInitialForm = { type: 'credit_note', date: new Date().toISOString().slice(0, 10), party_name: '', original_invoice: '', taxable: '', gst: '', reason: '' };
 
@@ -449,6 +455,11 @@ const Accounting = ({
         if (gst > 0) entries.push({ debitAccount: partyAccount, creditAccount: 'Input GST Credit', amount: gst });
       }
       const narration = `${isCN ? 'Credit Note' : 'Debit Note'}: ${cnDnForm.reason || ''} | Ref: ${cnDnForm.original_invoice || 'N/A'} | Party: ${cnDnForm.party_name}`;
+
+      // One validated path (edit skips the duplicate check — it would match itself).
+      const check = validateManualEntry(isCN ? 'credit_note' : 'debit_note', cnDnForm.date, narration, entries, { partyName: cnDnForm.party_name, includeRecent: !cnDnEditingId });
+      if (check.errors.length) { setIsSaving(false); return addToast(`Blocked: ${check.errors[0].message}`, 'error'); }
+      if (check.warnings.length) addToast(check.warnings.map((w) => w.message).join(' · '), 'info');
 
       if (cnDnEditingId) {
         const existing = manualJournalEntries.find((r) => r.id === cnDnEditingId);
@@ -505,12 +516,16 @@ const Accounting = ({
     if (!assertFYNotLocked(tdsForm.date, lockedFYs)) return;
     try {
       setIsSaving(true);
-      const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: tdsForm.date });
       const partyAccount = `Party: ${tdsForm.party_name}`;
       const isRec = tdsForm.type === 'tds_receivable';
       const entries = isRec
         ? [{ debitAccount: 'TDS Receivable', creditAccount: partyAccount, amount: tdsAmt }]
         : [{ debitAccount: partyAccount, creditAccount: 'TDS Payable', amount: tdsAmt }];
+      // One validated path — checked BEFORE a voucher number is consumed.
+      const check = validateManualEntry('tds', tdsForm.date, `TDS u/s ${tdsForm.section}`, entries, { partyName: tdsForm.party_name });
+      if (check.errors.length) { setIsSaving(false); return addToast(`Blocked: ${check.errors[0].message}`, 'error'); }
+      if (check.warnings.length) addToast(check.warnings.map((w) => w.message).join(' · '), 'info');
+      const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: tdsForm.date });
       const payload = { voucher_no: voucherNo, fy: getFYFromDate(tdsForm.date), date: tdsForm.date, narration: `TDS u/s ${tdsForm.section} @ ${tdsForm.rate}% | ${isRec ? 'Deducted by' : 'Deducted on'} ${tdsForm.party_name} | Base: ${formatCurrency(parseFloat(tdsForm.base_amount || 0))} | ${tdsForm.remarks || ''}`, source: 'tds_entry', status: 'posted', entries, created_by: user?.uid || '', created_at: new Date().toISOString() };
       const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
       logAction('journal_entries', 'create', ref.id, payload, `TDS ${voucherNo}`);
@@ -522,6 +537,26 @@ const Accounting = ({
 
   // ── Drill-down: click party name → open ledger ──
   const drillToLedger = (account) => { setSelectedLedger(account); setActiveTab('ledger'); };
+
+  // ── One validated posting path (Phase 5) ──
+  // Every manual form runs the SAME validator the AI chat and bank-reco use.
+  // Errors block the post; warnings are surfaced but don't stop a deliberate
+  // human action. `includeRecent:false` on edits (the entry would match itself
+  // in the duplicate check).
+  const validateManualEntry = (intent, date, narration, entries, { partyName = '', includeRecent = true } = {}) => {
+    const validated = validateTransaction(
+      { intent, date, narration, entries, party: { type: 'unknown', name: partyName } },
+      {
+        knownAccounts: allAccounts,
+        closedFYs: closedFYsList,
+        getFY: getFYFromDate,
+        recentJournalEntries: includeRecent ? manualJournalEntries : [],
+      }
+    );
+    const errors = (validated.issues || []).filter((i) => i.level === 'error');
+    const warnings = (validated.issues || []).filter((i) => i.level === 'warning');
+    return { errors, warnings, postable: canPost(validated) };
+  };
 
   // Real party balances for the "Money In / Out" overview cards.
   // Includes EVERY journal posting that hits a party account — invoiced sales,
@@ -740,6 +775,36 @@ const Accounting = ({
     setIsSaving(false);
   };
 
+  // ── COA management (Phase 5): deactivate/reactivate + classification edit.
+  // The NAME stays immutable — the derived ledger groups non-party accounts by
+  // name, so renaming would orphan history.
+  const [coaEditId, setCoaEditId] = useState(null);
+  const [coaEditForm, setCoaEditForm] = useState({ type: 'Asset', subType: '', normalSide: 'Dr' });
+  const toggleCoaActive = async (row) => {
+    if (!canEditFinance) return addToast('Access denied.', 'error');
+    if (!row.id && !row.code) return;
+    const nowActive = row.isActive === false; // toggling
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts', row.id || row.code), {
+        isActive: nowActive, updated_by: user?.uid || '', updated_at: new Date().toISOString(),
+      });
+      logAction('chart_of_accounts', 'update', row.id || row.code, { isActive: nowActive }, `${nowActive ? 'Reactivated' : 'Deactivated'} account ${row.name}`);
+      addToast(`${row.name} ${nowActive ? 'reactivated' : 'deactivated'}`, 'success');
+    } catch (err) { console.error(err); addToast('Failed to update account', 'error'); }
+  };
+  const saveCoaEdit = async (row) => {
+    if (!canEditFinance) return addToast('Access denied.', 'error');
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'chart_of_accounts', row.id || row.code), {
+        type: coaEditForm.type, subType: coaEditForm.subType, normalSide: coaEditForm.normalSide,
+        updated_by: user?.uid || '', updated_at: new Date().toISOString(),
+      });
+      logAction('chart_of_accounts', 'update', row.id || row.code, coaEditForm, `COA edit ${row.name}`);
+      addToast(`${row.name} updated`, 'success');
+      setCoaEditId(null);
+    } catch (err) { console.error(err); addToast('Failed to update account', 'error'); }
+  };
+
   const seedDefaultCoa = async () => {
     if (!canEditFinance) return addToast('Access denied.', 'error');
     try {
@@ -772,6 +837,17 @@ const Accounting = ({
     }
     if (journalForm.debitAccount === journalForm.creditAccount) return addToast('Debit and credit account cannot be same.', 'error');
     if (!assertFYNotLocked(journalForm.date, lockedFYs)) return;
+
+    // One validated path: same checks as the AI chat (closed FY, duplicates,
+    // sign conventions, GST math…). Errors block; warnings inform.
+    {
+      const fxAmt = amount * (Number(journalForm.fx_rate_to_inr) || 1);
+      const check = validateManualEntry('manual_journal', journalForm.date, journalForm.narration || '', [
+        { debitAccount: journalForm.debitAccount, creditAccount: journalForm.creditAccount, amount: fxAmt },
+      ]);
+      if (check.errors.length) return addToast(`Blocked: ${check.errors[0].message}`, 'error');
+      if (check.warnings.length) addToast(check.warnings.map((w) => w.message).join(' · '), 'info');
+    }
 
     try {
       setIsSaving(true);
@@ -3949,6 +4025,8 @@ const Accounting = ({
                     <th className="px-3 py-2 text-left">Sub Type</th>
                     <th className="px-3 py-2 text-left">Normal</th>
                     <th className="px-3 py-2 text-left">Source</th>
+                    <th className="px-3 py-2 text-left">Active</th>
+                    {canEditFinance && <th className="px-3 py-2 text-center">Actions</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -3956,13 +4034,53 @@ const Accounting = ({
                     .slice()
                     .sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
                     .map((row) => (
-                      <tr key={row.id || row.code}>
+                      <tr key={row.id || row.code} className={row.isActive === false ? 'opacity-50' : ''}>
                         <td className="px-3 py-2 font-mono">{row.code}</td>
                         <td className="px-3 py-2">{row.name}</td>
-                        <td className="px-3 py-2">{row.type}</td>
-                        <td className="px-3 py-2">{row.subType || '-'}</td>
-                        <td className="px-3 py-2">{row.normalSide || '-'}</td>
+                        {coaEditId === (row.id || row.code) ? (
+                          <>
+                            <td className="px-3 py-1">
+                              <select className="rounded border border-indigo-300 px-1 py-1 text-xs text-black" value={coaEditForm.type} onChange={(e) => setCoaEditForm((f) => ({ ...f, type: e.target.value }))}>
+                                {ACCOUNT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                              </select>
+                            </td>
+                            <td className="px-3 py-1">
+                              <input className="w-28 rounded border border-indigo-300 px-1 py-1 text-xs text-black" value={coaEditForm.subType} onChange={(e) => setCoaEditForm((f) => ({ ...f, subType: e.target.value }))} />
+                            </td>
+                            <td className="px-3 py-1">
+                              <select className="rounded border border-indigo-300 px-1 py-1 text-xs text-black" value={coaEditForm.normalSide} onChange={(e) => setCoaEditForm((f) => ({ ...f, normalSide: e.target.value }))}>
+                                <option value="Dr">Dr</option><option value="Cr">Cr</option>
+                              </select>
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="px-3 py-2">{row.type}</td>
+                            <td className="px-3 py-2">{row.subType || '-'}</td>
+                            <td className="px-3 py-2">{row.normalSide || '-'}</td>
+                          </>
+                        )}
                         <td className="px-3 py-2 text-xs">{row.isSystem ? 'System' : 'Manual'}</td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className={`rounded px-1.5 py-0.5 font-semibold ${row.isActive === false ? 'bg-slate-200 text-slate-500' : 'bg-green-100 text-green-700'}`}>{row.isActive === false ? 'Inactive' : 'Active'}</span>
+                        </td>
+                        {canEditFinance && (
+                          <td className="px-3 py-2 text-center text-xs">
+                            {coaEditId === (row.id || row.code) ? (
+                              <>
+                                <button onClick={() => saveCoaEdit(row)} className="mr-1 rounded bg-indigo-600 px-2 py-0.5 font-semibold text-white hover:bg-indigo-700">Save</button>
+                                <button onClick={() => setCoaEditId(null)} className="rounded border border-slate-300 px-2 py-0.5 font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
+                              </>
+                            ) : (
+                              <>
+                                <button onClick={() => { setCoaEditId(row.id || row.code); setCoaEditForm({ type: row.type || 'Asset', subType: row.subType || '', normalSide: row.normalSide || 'Dr' }); }} className="mr-1 rounded border border-slate-300 px-2 py-0.5 font-semibold text-slate-600 hover:bg-slate-50">Edit</button>
+                                <button onClick={() => toggleCoaActive(row)} className={`rounded border px-2 py-0.5 font-semibold ${row.isActive === false ? 'border-green-300 text-green-700 hover:bg-green-50' : 'border-amber-300 text-amber-700 hover:bg-amber-50'}`}>
+                                  {row.isActive === false ? 'Reactivate' : 'Deactivate'}
+                                </button>
+                              </>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     ))}
                 </tbody>
@@ -4205,6 +4323,41 @@ const Accounting = ({
               </div>
             )}
           </div>
+
+          {/* Depreciation proposal (advisory — parks a draft, human posts) */}
+          {depreciationProposal && depreciationProposal.total > 0 && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-bold text-slate-700">Depreciation for FY {fyFilter} — proposed {formatCurrency(depreciationProposal.total)}</div>
+                  <div className="text-xs text-slate-500">WDV block rates on your fixed-asset balances. Review the schedule, then park it as a draft — posting stays with you.</div>
+                </div>
+                {canEditFinance && (
+                  <button
+                    onClick={() => handleChatParkEntry(depreciationProposal.parsed)}
+                    className="shrink-0 rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+                  >
+                    Park as draft
+                  </button>
+                )}
+              </div>
+              <table className="mt-2 w-full text-xs">
+                <thead className="text-left uppercase text-slate-400">
+                  <tr><th className="py-1">Asset class</th><th className="py-1 text-right">Balance</th><th className="py-1 text-right">Rate</th><th className="py-1 text-right">Depreciation</th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {depreciationProposal.proposals.map((p) => (
+                    <tr key={p.account}>
+                      <td className="py-1 text-slate-700">{p.account}{p.note && <span className="block text-[10px] text-amber-600">{p.note}</span>}</td>
+                      <td className="py-1 text-right font-mono">{formatCurrency(p.base)}</td>
+                      <td className="py-1 text-right">{p.rate}%</td>
+                      <td className="py-1 text-right font-mono font-semibold">{formatCurrency(p.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="text-sm text-slate-600">Close selected FY and auto-roll opening balances to next FY.</div>
