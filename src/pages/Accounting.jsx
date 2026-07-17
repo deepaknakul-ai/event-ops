@@ -316,6 +316,20 @@ const Accounting = ({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [chartOfAccounts, snapshot.ledger]);
 
+  // Deactivated COA accounts (B4). Hidden from posting PICKERS when they carry
+  // no balance; accounts with history stay listable (ledger views need them)
+  // but the validator warns on new postings to them.
+  const inactiveAccounts = useMemo(
+    () => new Set(chartOfAccounts.filter((row) => row.isActive === false).map((row) => row.name)),
+    [chartOfAccounts]
+  );
+  const pickerAccounts = useMemo(() => {
+    if (!inactiveAccounts.size) return allAccounts;
+    const balances = {};
+    snapshot.ledger.forEach((row) => { balances[row.account] = row.balance || 0; });
+    return allAccounts.filter((name) => !inactiveAccounts.has(name) || Math.abs(balances[name] || 0) > 0.005);
+  }, [allAccounts, inactiveAccounts, snapshot.ledger]);
+
   // Attachments lookup keyed by voucher_no for quick per-row chip rendering.
   const attachmentsByVoucher = useMemo(() => {
     const m = {};
@@ -593,6 +607,7 @@ const Accounting = ({
       { intent, date, narration, entries, party: { type: 'unknown', name: partyName } },
       {
         knownAccounts: allAccounts,
+        inactiveAccounts,
         closedFYs: closedFYsList,
         getFY: getFYFromDate,
         recentJournalEntries: includeRecent ? manualJournalEntries : [],
@@ -4165,11 +4180,11 @@ const Accounting = ({
             <input type="date" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={journalForm.date} onChange={(e) => setJournalForm((f) => ({ ...f, date: e.target.value }))} />
             <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={journalForm.debitAccount} onChange={(e) => setJournalForm((f) => ({ ...f, debitAccount: e.target.value }))}>
               <option value="">Debit Account</option>
-              {allAccounts.map((row) => <option key={`dr-${row}`} value={row}>{row}</option>)}
+              {pickerAccounts.map((row) => <option key={`dr-${row}`} value={row}>{row}</option>)}
             </select>
             <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={journalForm.creditAccount} onChange={(e) => setJournalForm((f) => ({ ...f, creditAccount: e.target.value }))}>
               <option value="">Credit Account</option>
-              {allAccounts.map((row) => <option key={`cr-${row}`} value={row}>{row}</option>)}
+              {pickerAccounts.map((row) => <option key={`cr-${row}`} value={row}>{row}</option>)}
             </select>
             <input type="number" min="0" step="0.01" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" placeholder="Amount" value={journalForm.amount} onChange={(e) => setJournalForm((f) => ({ ...f, amount: e.target.value }))} />
             <input className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-4" placeholder="Narration" value={journalForm.narration} onChange={(e) => setJournalForm((f) => ({ ...f, narration: e.target.value }))} />
@@ -4314,7 +4329,7 @@ const Accounting = ({
             <input type="date" className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={openingForm.date} onChange={(e) => setOpeningForm((f) => ({ ...f, date: e.target.value }))} />
             <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black sm:col-span-2" value={openingForm.account_name} onChange={(e) => setOpeningForm((f) => ({ ...f, account_name: e.target.value }))}>
               <option value="">Account</option>
-              {allAccounts.map((row) => <option key={`ob-${row}`} value={row}>{row}</option>)}
+              {pickerAccounts.map((row) => <option key={`ob-${row}`} value={row}>{row}</option>)}
             </select>
             <select className="rounded border border-slate-300 px-2 py-2 text-sm text-black" value={openingForm.side} onChange={(e) => setOpeningForm((f) => ({ ...f, side: e.target.value }))}>
               <option value="Dr">Dr</option>
@@ -5255,7 +5270,7 @@ const Accounting = ({
                     onChange={(e) => updateDraftLine(idx, 'debitAccount', e.target.value)}
                   >
                     <option value="">Debit Account</option>
-                    {allAccounts.map((a) => <option key={`ded-${idx}-${a}`} value={a}>{a}</option>)}
+                    {pickerAccounts.map((a) => <option key={`ded-${idx}-${a}`} value={a}>{a}</option>)}
                   </select>
                   <select
                     className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
@@ -5263,7 +5278,7 @@ const Accounting = ({
                     onChange={(e) => updateDraftLine(idx, 'creditAccount', e.target.value)}
                   >
                     <option value="">Credit Account</option>
-                    {allAccounts.map((a) => <option key={`dec-${idx}-${a}`} value={a}>{a}</option>)}
+                    {pickerAccounts.map((a) => <option key={`dec-${idx}-${a}`} value={a}>{a}</option>)}
                   </select>
                   <input
                     type="number"
@@ -5405,7 +5420,7 @@ const Accounting = ({
                     onChange={(e) => updateTemplateLine(idx, 'debitAccount', e.target.value)}
                   >
                     <option value="">Debit Account</option>
-                    {allAccounts.map((a) => <option key={`ted-${idx}-${a}`} value={a}>{a}</option>)}
+                    {pickerAccounts.map((a) => <option key={`ted-${idx}-${a}`} value={a}>{a}</option>)}
                   </select>
                   <select
                     className="col-span-4 rounded border border-slate-300 px-2 py-1.5 text-xs"
@@ -5413,7 +5428,7 @@ const Accounting = ({
                     onChange={(e) => updateTemplateLine(idx, 'creditAccount', e.target.value)}
                   >
                     <option value="">Credit Account</option>
-                    {allAccounts.map((a) => <option key={`tec-${idx}-${a}`} value={a}>{a}</option>)}
+                    {pickerAccounts.map((a) => <option key={`tec-${idx}-${a}`} value={a}>{a}</option>)}
                   </select>
                   <input
                     type="text"

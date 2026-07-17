@@ -78,7 +78,10 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
         remarks: item.remarks,
       project_id: item.project_id || '',
       party_company_id: item.party_company_id || 'primary',
-      payout_type: item.payout_type || 'salary'  // legacy payouts default to salary
+      // Untyped legacy payouts keep '' so saving FORCES an explicit choice —
+      // silently stamping 'salary' could reclass a reimbursement into Salary
+      // Expense without the user noticing (grey-area B5).
+      payout_type: item.payout_type || ''
     });
   };
 
@@ -165,6 +168,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
   const handleEmpPayout = async () => {
     if (!can(role, 'finance', 'create')) return notify('Access denied: only Admin and Accountant can record payouts.', 'error');
     if (!form.entity_id || !form.amount) return notify("Select Employee and Amount", 'error');
+    if (editingId && !form.payout_type) return notify('Select what this payment was for (Salary / Reimbursement / Advance) — it decides how the books record it.', 'error');
     if (isFYLocked(form.date)) return notify(`FY ${getFYFromDate(form.date)} is locked. You cannot add or edit transactions in a locked financial year.`, 'error');
     const emp = employees.find(e => e.id === form.entity_id);
 
@@ -478,6 +482,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                 <div>
                   <label className="text-xs font-bold text-slate-700 uppercase">Payment For</label>
                   <select className="w-full rounded border p-2 text-black" value={form.payout_type} onChange={e => setForm({...form, payout_type: e.target.value})}>
+                    {form.payout_type === '' && <option value="" disabled>Select type… (this decides how it books)</option>}
                     <option value="salary">Salary / Wages</option>
                     <option value="reimbursement">Reimbursement (clear expense claim)</option>
                     <option value="advance">Advance (paid to employee)</option>
@@ -631,6 +636,19 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                            ? (item.project_id === 'general' || !item.project_id ? 'General Account' : projects.find(p=>p.id===item.project_id)?.project_name)
                            : item.mode
                          }
+                         {activeTab === 'emp_out' && (
+                           <span className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                             item.payout_type === 'reimbursement' ? 'bg-blue-100 text-blue-700'
+                             : (item.payout_type === 'advance' || item.payout_type === 'advance_settlement') ? 'bg-amber-100 text-amber-700'
+                             : item.payout_type === 'salary' ? 'bg-emerald-100 text-emerald-700'
+                             : 'bg-amber-50 text-amber-600 border border-amber-200'
+                           }`}>
+                             {item.payout_type === 'reimbursement' ? 'Reimbursement'
+                               : (item.payout_type === 'advance' || item.payout_type === 'advance_settlement') ? 'Advance'
+                               : item.payout_type === 'salary' ? 'Salary'
+                               : 'salary (assumed)'}
+                           </span>
+                         )}
                        </td>
                        <td className="p-3 text-slate-500 text-xs">{item.reference || '-'}</td>
                        <td className={`p-3 text-right font-bold ${activeTab === 'client_in' ? 'text-green-600' : activeTab === 'vendor_out' ? 'text-orange-600' : 'text-red-600'}`}>

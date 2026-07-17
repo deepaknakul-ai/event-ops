@@ -14,6 +14,7 @@ import { formatCurrency, generateSecureToken } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { STATUS_COLORS, EXPENSE_CATS } from '../utils/constants';
 import { can } from '../utils/permissions';
+import { buildExpenseMaster } from '../utils/expenseMaster';
 
 // Small reusable component to show proof badge/link
 const ProofBadge = ({ proof_url }) => {
@@ -637,31 +638,14 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
   }), [trackerExpenses]);
 
   // ─── Expense Master: per-employee summary (unapproved / approved / payments / balance)
-  // Mirrors the single-employee empDashKpis math, aggregated across everyone in one pass.
-  // Balance = total payments received (advances + payouts) − approved expenses.
-  const expenseMaster = useMemo(() => {
-    const expByEmp = {};
-    expenses.forEach(e => {
-      const k = String(e.employee_id);
-      if (!expByEmp[k]) expByEmp[k] = { approved: 0, unapproved: 0 };
-      const amt = parseFloat(e.amount || 0);
-      if (e.status === 'Approved') expByEmp[k].approved += amt;
-      else if (!isExpenseExcludedStatus(e.status)) expByEmp[k].unapproved += amt; // Pending + Clarification
-    });
-    const sumBy = (arr) => arr.reduce((m, x) => { const k = String(x.employee_id); m[k] = (m[k] || 0) + parseFloat(x.amount || 0); return m; }, {});
-    const advByEmp = sumBy(advances);
-    const payByEmp = sumBy(payouts);
-    return employees
-      .map(emp => {
-        const k = String(emp.id);
-        const approved = expByEmp[k]?.approved || 0;
-        const unapproved = expByEmp[k]?.unapproved || 0;
-        const payments = (advByEmp[k] || 0) + (payByEmp[k] || 0);
-        return { id: emp.id, name: emp.name || '—', status: emp.status || '', approved, unapproved, payments, balance: payments - approved };
-      })
-      .filter(r => r.approved || r.unapproved || r.payments) // only employees with activity
-      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  }, [expenses, advances, payouts, employees]);
+  // Pure reducer in src/utils/expenseMaster.js (grey-area B3): "Payments" now
+  // counts only advances + reimbursement/advance payouts — the same movements
+  // that hit the per-employee ledger account — so Balance ties to the books.
+  // Salary (and legacy untyped payouts) shows in its own column.
+  const expenseMaster = useMemo(
+    () => buildExpenseMaster({ expenses, advances, payouts, employees }),
+    [expenses, advances, payouts, employees]
+  );
 
   const expenseMasterFiltered = useMemo(
     () => expenseMaster.filter(r => r.name.toLowerCase().includes(masterSearch.toLowerCase())),
@@ -670,8 +654,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
 
   const expenseMasterTotals = useMemo(() => expenseMasterFiltered.reduce((t, r) => ({
     unapproved: t.unapproved + r.unapproved, approved: t.approved + r.approved,
-    payments: t.payments + r.payments, balance: t.balance + r.balance,
-  }), { unapproved: 0, approved: 0, payments: 0, balance: 0 }), [expenseMasterFiltered]);
+    payments: t.payments + r.payments, salaryPaid: t.salaryPaid + (r.salaryPaid || 0), balance: t.balance + r.balance,
+  }), { unapproved: 0, approved: 0, payments: 0, salaryPaid: 0, balance: 0 }), [expenseMasterFiltered]);
 
   // ─── Employee Dashboard computations ────────────────────────────────────────
   const empDashEmployee = useMemo(() => employees.find(e => e.id === empDashId), [employees, empDashId]);
@@ -782,7 +766,8 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                     <th className="p-3">Employee</th>
                     <th className="p-3 text-right">Unapproved</th>
                     <th className="p-3 text-right">Approved</th>
-                    <th className="p-3 text-right">Total Payment</th>
+                    <th className="p-3 text-right" title="Advances + reimbursement payments — the movements that settle expense claims">Adv + Reimb Paid</th>
+                    <th className="p-3 text-right" title="Salary/wages payouts (and older untyped payouts) — not counted against expense claims">Salary Paid</th>
                     <th className="p-3 text-right">Balance</th>
                   </tr>
                 </thead>
@@ -796,6 +781,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                       <td className="p-3 text-right text-amber-700">{r.unapproved ? formatCurrency(r.unapproved) : '—'}</td>
                       <td className="p-3 text-right text-slate-800">{r.approved ? formatCurrency(r.approved) : '—'}</td>
                       <td className="p-3 text-right text-slate-800">{r.payments ? formatCurrency(r.payments) : '—'}</td>
+                      <td className="p-3 text-right text-slate-500">{r.salaryPaid ? formatCurrency(r.salaryPaid) : '—'}</td>
                       <td className={`p-3 text-right font-semibold ${r.balance < 0 ? 'text-red-600' : 'text-green-700'}`}>
                         {formatCurrency(Math.abs(r.balance))}
                         <span className="ml-1 text-[10px] font-normal text-slate-400">{r.balance < 0 ? 'payable' : 'held'}</span>
@@ -803,7 +789,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                     </tr>
                   ))}
                   {expenseMasterFiltered.length === 0 && (
-                    <tr><td colSpan={5} className="p-8 text-center text-slate-400">No employees with expense or payment activity.</td></tr>
+                    <tr><td colSpan={6} className="p-8 text-center text-slate-400">No employees with expense or payment activity.</td></tr>
                   )}
                 </tbody>
                 {expenseMasterFiltered.length > 0 && (
@@ -813,6 +799,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                       <td className="p-3 text-right text-amber-700">{formatCurrency(expenseMasterTotals.unapproved)}</td>
                       <td className="p-3 text-right">{formatCurrency(expenseMasterTotals.approved)}</td>
                       <td className="p-3 text-right">{formatCurrency(expenseMasterTotals.payments)}</td>
+                      <td className="p-3 text-right text-slate-500">{formatCurrency(expenseMasterTotals.salaryPaid)}</td>
                       <td className={`p-3 text-right ${expenseMasterTotals.balance < 0 ? 'text-red-600' : 'text-green-700'}`}>{formatCurrency(Math.abs(expenseMasterTotals.balance))}</td>
                     </tr>
                   </tfoot>

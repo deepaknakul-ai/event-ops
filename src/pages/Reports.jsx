@@ -582,8 +582,18 @@ const Reports = ({
           date: a.date, desc: `Advance: ${a.remarks || '-'}`, project: '-', debit: parseFloat(a.amount), credit: 0, type: 'advance'
       }));
 
+      // Payouts labelled by kind. Salary (and legacy untyped) payouts are shown
+      // for completeness but do NOT settle expense claims — the books route them
+      // to Salary Expense, not the employee's account (grey-area C2).
+      const isClaimSettling = (p) => ['reimbursement', 'advance', 'advance_settlement'].includes(String(p.payout_type || '').toLowerCase());
       const payoutRows = empPayouts.map(p => ({
-          date: p.date, desc: `Payout: ${p.mode} - ${p.reference || '-'}`, project: '-', debit: parseFloat(p.amount), credit: 0, type: 'payout'
+          date: p.date,
+          desc: `Payout (${isClaimSettling(p) ? (String(p.payout_type).toLowerCase() === 'reimbursement' ? 'reimbursement' : 'advance') : (p.payout_type === 'salary' ? 'salary' : 'salary, assumed')}): ${p.mode} - ${p.reference || '-'}`,
+          project: '-',
+          debit: isClaimSettling(p) ? parseFloat(p.amount) : 0,
+          credit: 0,
+          salaryInfo: isClaimSettling(p) ? 0 : parseFloat(p.amount),
+          type: 'payout'
       }));
 
       const approvedExpenses = empExpensesAll.filter(e => e.status === 'Approved');
@@ -640,7 +650,9 @@ const Reports = ({
         balance += (row.credit - row.debit);
         return {
           Date: row.date,
-          Description: row.desc,
+          // Salary payouts show their amount in the description but do not move
+          // the claim balance (they book to Salary Expense, not this account).
+          Description: row.salaryInfo ? `${row.desc} — ${row.salaryInfo.toFixed(2)} (salary, not counted against claims)` : row.desc,
           Project: row.project,
           'Expense (Cr)': row.credit,
           'Payment (Dr)': row.debit,

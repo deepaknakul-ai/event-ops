@@ -90,6 +90,19 @@ export function validateTransaction(tx, ctx = {}) {
     });
   }
 
+  // ── 5b. Deactivated accounts → warning (B4: isActive must mean something) ──
+  if (ctx.inactiveAccounts instanceof Set && ctx.inactiveAccounts.size) {
+    const flagged = new Set();
+    (tx.entries || []).forEach((line) => {
+      [line.debitAccount, line.creditAccount].forEach((name) => {
+        if (name && ctx.inactiveAccounts.has(name) && !flagged.has(name)) {
+          flagged.add(name);
+          issues.push({ level: 'warning', code: 'account_inactive', message: `"${name}" is marked inactive in the chart of accounts — reactivate it or pick another account.` });
+        }
+      });
+    });
+  }
+
   // ── 6. Unresolved party → warning ─────────────────────────────────────────
   if (tx.party && tx.party.type === 'unknown') {
     issues.push({ level: 'warning', code: 'unknown_party', message: 'Party is not linked to any client/vendor/employee record.' });
