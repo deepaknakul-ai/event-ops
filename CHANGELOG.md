@@ -4,6 +4,38 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.20 — Grey-area hardening: 28 audit findings fixed across 7 waves
+
+A full adversarial audit of the AI accounting system, then fixes for everything found:
+
+- **Right answers**: the chat P&L no longer reports "Expenses: ₹0"; "show BS Traders
+  ledger" no longer returns the balance sheet; ambiguous names ask "did you mean…";
+  statement answers say exactly which period they cover.
+- **Questions reach the right brain**: "are we profitable?" and other free-form questions
+  now go to the read-only Q&A (deterministic or AI) — never to the entry extractor. Parked
+  drafts get an orchestrator audit chip.
+- **A balance sheet that ties**: every account (fixed assets, accumulated depreciation,
+  loans, capital, drawings, TDS both sides, Suspense, second cash/bank accounts, opening
+  equity, P&L closing) now classifies into a visible line — A = L + E holds by construction,
+  and closed years no longer double-count profit.
+- **Depreciation can't double-post**: same-FY proposals are blocked once posted or parked;
+  multi-year bases are true WDV (cost − prior schedules); unexplained history is flagged
+  honestly.
+- **One meaning of "employee payments"**: Expense Master, Reports and the payout list all
+  now separate claim-settling payments (advances + reimbursements) from salary — matching
+  the ledger. Editing an untyped payout forces an explicit type. Deactivated account heads
+  disappear from posting pickers and warn if used.
+- **LLM parity**: the AI extractor learns the per-employee accounts (reimbursement intent,
+  employee roster in context, flat-account rewrite) so both paths book identically; the
+  ask-anything agent gains an eval (incl. injection resistance). *(functions deploy)*
+- **Server-side controls**: locked financial years are now enforced in Firestore rules —
+  binding admin too — and by the nightly scheduler; system account heads can't be renamed,
+  retyped or deleted; cron and UI vouchers share one numbering series. *(rules + functions
+  deploys)*
+
+Double-reversal is no longer possible; posted vouchers can't be hard-deleted by non-admins.
+658 app tests + 179 emulator rules tests pass.
+
 ## 3.6.19 — Full Accountant, Phase 5: Integrity gap-fillers
 
 The final phase of the Full Accountant roadmap — closing the paths the audit engine couldn't vouch for:
