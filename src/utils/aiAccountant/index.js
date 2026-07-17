@@ -24,6 +24,7 @@ export { validateTransaction, canPost, canDispatch, issueSummary } from './valid
 export { runOrchestrator, runAuditAgent, auditFromIssues, POLICY_VERSION } from './orchestrator.js';
 export { analyzePostedEntries, primaryAccount, isFlagged } from './analyst.js';
 export { runBooksAudit } from './booksAudit.js';
+export { buildCloseChecklist, buildComplianceCalendar } from './closeChecklist.js';
 export {
   resolveAccount,
   buildRunningLedger,

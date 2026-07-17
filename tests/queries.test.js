@@ -129,6 +129,11 @@ describe('detectQuery classification (via parseMessage)', () => {
     expect(q('audit my books').meta.queryType).toBe('audit');
     expect(q('run a health check').meta.queryType).toBe('audit');
   });
+  it('classifies close-readiness questions → close_readiness', () => {
+    expect(q('am I ready to close the year').meta.queryType).toBe('close_readiness');
+    expect(q('show close checklist').meta.queryType).toBe('close_readiness');
+    expect(q('month end status').meta.queryType).toBe('close_readiness');
+  });
   it('keeps existing statement queries intact', () => {
     expect(q('show me the balance sheet').meta.queryType).toBe('balance_sheet');
     expect(q('what is the trial balance').meta.queryType).toBe('trial_balance');

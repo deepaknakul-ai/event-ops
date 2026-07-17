@@ -50,7 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccount, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
@@ -388,6 +388,13 @@ const Accounting = ({
   const booksAudit = useMemo(
     () => runBooksAudit(snapshot, { entries: manualJournalEntries, drafts: journalDrafts, ageing: ageingData, closedFYs: closedFYsList }),
     [snapshot, manualJournalEntries, journalDrafts, ageingData, closedFYsList]
+  );
+
+  // Close-readiness checklist + GST/TDS compliance calendar (Phase 4). Advisory
+  // only — the terminal action remains the human-driven closeFinancialYear.
+  const closeChecklist = useMemo(
+    () => buildCloseChecklist({ audit: booksAudit, drafts: journalDrafts, entries: manualJournalEntries, salesBook: snapshot.salesBook, today: new Date().toISOString().slice(0, 10) }),
+    [booksAudit, journalDrafts, manualJournalEntries, snapshot.salesBook]
   );
 
   // ── Credit/Debit Note CRUD ──
@@ -1917,6 +1924,24 @@ const Accounting = ({
 
     const inPeriod = (d) => (!from || d >= from) && (!to || d <= to);
     const periodLabel = prettyPeriod(period, from, to);
+
+    if (qt === 'close_readiness') {
+      const c = closeChecklist;
+      const blockers = c.items.filter((i) => i.status === 'block');
+      const warns = c.items.filter((i) => i.status === 'warn');
+      const overdue = c.calendar.filter((x) => x.overdue);
+      const nextDue = c.calendar.find((x) => !x.overdue);
+      const lines = [
+        c.ready
+          ? `✓ You can close — no blockers${warns.length ? `, but ${warns.length} warning${warns.length === 1 ? '' : 's'} worth clearing first` : ''}.`
+          : `✕ Not ready to close — ${blockers.length} blocker${blockers.length === 1 ? '' : 's'}: ${blockers.map((b) => b.label).join('; ')}.`,
+        ...warns.slice(0, 4).map((w) => `• ${w.label}: ${w.detail}`),
+        overdue.length ? `⚠ Overdue: ${overdue.map((o) => o.label).join('; ')}.` : '',
+        nextDue ? `Next deadline: ${nextDue.label} — due ${nextDue.due}.` : '',
+        'Full checklist: Accounts → Year Close.',
+      ].filter(Boolean);
+      return { message: lines.join('\n') };
+    }
 
     if (qt === 'audit') {
       const a = booksAudit;
@@ -4149,6 +4174,38 @@ const Accounting = ({
 
       {activeTab === 'close' && (
         <div className="space-y-3">
+          {/* Close-readiness checklist (advisory — nothing is changed automatically) */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className={`mb-3 rounded-lg border px-3 py-2 text-sm font-semibold ${closeChecklist.ready ? 'border-green-200 bg-green-50 text-green-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+              {closeChecklist.ready ? '✓ Ready to close — no blockers (review warnings below).' : '✕ Not ready to close — fix the blockers first.'}
+            </div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {closeChecklist.items.map((i) => (
+                <div key={i.id} className="flex items-start gap-2 rounded-lg border border-slate-100 bg-slate-50/60 px-2.5 py-1.5">
+                  <span className={`mt-0.5 shrink-0 text-sm ${i.status === 'ok' ? 'text-green-600' : i.status === 'block' ? 'text-red-600' : i.status === 'warn' ? 'text-amber-600' : 'text-slate-400'}`}>
+                    {i.status === 'ok' ? '✓' : i.status === 'block' ? '✕' : i.status === 'warn' ? '!' : '○'}
+                  </span>
+                  <div>
+                    <div className="text-xs font-semibold text-slate-700">{i.label}</div>
+                    <div className="text-[11px] text-slate-500">{i.detail}{i.status !== 'ok' && i.hint ? ` — ${i.hint}` : ''}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {closeChecklist.calendar.length > 0 && (
+              <div className="mt-3 border-t border-slate-100 pt-2">
+                <div className="mb-1 text-xs font-bold uppercase tracking-wide text-slate-500">Compliance calendar</div>
+                <div className="flex flex-wrap gap-2">
+                  {closeChecklist.calendar.map((c, i) => (
+                    <span key={i} className={`rounded-full border px-2 py-1 text-[11px] font-semibold ${c.overdue ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                      {c.overdue ? '⚠ ' : ''}{c.label}{c.amount ? ` (${formatCurrency(c.amount)})` : ''} · due {c.due}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="text-sm text-slate-600">Close selected FY and auto-roll opening balances to next FY.</div>
             <div className="mt-2 text-sm">Current FY: <span className="font-semibold">{fyFilter === 'all' ? 'Select FY' : fyFilter}</span></div>

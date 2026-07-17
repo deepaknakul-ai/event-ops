@@ -4,6 +4,21 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.18 — Full Accountant, Phase 4: Proactive close + compliance calendar
+
+The accountant now **owns the close**. Accounts → Year Close gains:
+
+- **Close-readiness checklist** — a ready/not-ready verdict with itemised checks: trial balance
+  balanced, no blocking audit findings, warnings resolved, drafts cleared, AI entries reviewed,
+  GST filed & paid, TDS deposited, bank reconciled. Blockers stop a close; warnings advise.
+- **Compliance calendar** — live GST/TDS statutory deadlines computed from your actual activity:
+  TDS deposit (7th), GSTR-1 (11th), GSTR-3B (20th) for the current and previous period, with
+  amounts and **overdue** flags.
+- **Ask in chat** — *"am I ready to close the year?"*, *"month end status"*, *"close checklist"*
+  → the verdict, open warnings, overdue items, and the next deadline.
+
+Advisory only — closing remains the existing human-driven action; nothing changes automatically.
+
 ## 3.6.17 — Full Accountant, Phase 3: Ask-anything (AI Q&A over your books)
 
 The assistant can now answer **free-form questions** about your books, not just the fixed menu.
