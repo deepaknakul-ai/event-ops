@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { X, Sparkles, Send, Check, Edit3, RotateCcw, AlertTriangle, Info, Mic, MicOff, HelpCircle, BookmarkPlus } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { formatCurrency } from '../utils/helpers';
-import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, auditFromIssues, computeTdsYtdForParty, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
+import { parseMessage, validateTransaction, canPost, canDispatch, issueSummary, auditFromIssues, computeTdsYtdForParty, looksLikeQuestion, buildQueryFallback, learnFromEntries, NEW_PARTY_PREFIX, normalizeAliasKey, pickPartyOption } from '../utils/aiAccountant';
 import { aiAvailable, aiExtractEntry } from '../utils/aiParse';
 
 // Web Speech API (prefix-agnostic). Returns null when unsupported.
@@ -473,6 +473,13 @@ const VirtualAccountant = ({
 
     const raw = parseMessage(text, augCtx);
     if (!raw) {
+      // Dead-end triage (A2 fix): a QUESTION goes to the read-only query path
+      // (deterministic menu → ask-anything Q&A), never the ENTRY extractor —
+      // "are we profitable?" must not come back as a bogus booking preview.
+      if (onQuery && looksLikeQuestion(text)) {
+        void handleControl('query', buildQueryFallback(text));
+        return;
+      }
       // Rule engine dead-end → LLM escalation (when enabled + online).
       if (aiUsable()) {
         await escalateToAi(text);

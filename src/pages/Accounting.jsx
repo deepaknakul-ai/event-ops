@@ -50,7 +50,7 @@ import VirtualAccountant from '../components/VirtualAccountant';
 import RecurringEntries from './RecurringEntries';
 import BankReconciliation from './BankReconciliation';
 import { extractVariables, applyVariables } from '../utils/aiAccountant/template-vars';
-import { auditFromIssues, POLICY_VERSION, resolveAccountCandidates, pnlAnswer, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
+import { auditFromIssues, POLICY_VERSION, resolveAccountCandidates, pnlAnswer, partyBalanceAnswer, accountLedgerAnswer, outstandingAnswer, gstLiabilityAnswer, tdsLiabilityAnswer, runBooksAudit, runOrchestrator, buildBooksDigest, buildCloseChecklist, validateTransaction, canPost, proposeDepreciation } from '../utils/aiAccountant';
 import { generatePnlPdf, generateBalanceSheetPdf, generateTrialBalancePdf, generateLedgerPdf, generateAuditPdf } from '../utils/pdf/statementsPdf';
 import { aiAvailable, aiAnswerQuery } from '../utils/aiParse';
 import AiInsightsPanel from '../components/accounting/AiInsightsPanel';
@@ -402,6 +402,35 @@ const Accounting = ({
     () => (fyFilter !== 'all' ? proposeDepreciation({ ledger: snapshot.ledger, fy: fyFilter }) : null),
     [snapshot.ledger, fyFilter]
   );
+
+  // Orchestrator verdict per parked draft (advisory chip — first live wiring of
+  // the Phase-1 multi-agent orchestrator; nothing auto-posts).
+  const draftAudits = useMemo(() => {
+    if (!journalDrafts.length) return {};
+    const octx = { knownAccounts: allAccounts, closedFYs: closedFYsList, getFY: getFYFromDate, recentJournalEntries: manualJournalEntries };
+    const out = {};
+    journalDrafts.forEach((d) => {
+      const txn = {
+        intent: d.intent || 'manual_journal',
+        date: d.date,
+        narration: d.narration || '',
+        entries: d.entries || [],
+        party: { type: d.party_type || 'unknown', name: d.party_name || '' },
+        confidence: 1,
+        issues: [],
+      };
+      try {
+        const r = runOrchestrator({ text: d.raw_prompt || '', drafts: [txn], ctx: octx });
+        const a = r.trace.audits[0];
+        out[d.id] = {
+          status: r.approved.length ? 'approved' : 'flagged',
+          score: a?.auditScore ?? 0,
+          top: ((a?.findings || []).find((f) => f.severity !== 'advisory') || (a?.findings || [])[0])?.message || '',
+        };
+      } catch { /* advisory only — never block the panel */ }
+    });
+    return out;
+  }, [journalDrafts, allAccounts, closedFYsList, manualJournalEntries]);
 
   // ── Credit/Debit Note CRUD ──
   const cnDnInitialForm = { type: 'credit_note', date: new Date().toISOString().slice(0, 10), party_name: '', original_invoice: '', taxable: '', gst: '', reason: '' };
@@ -3437,6 +3466,14 @@ const Accounting = ({
                               {d.schedule_post_on && (
                                 <div className={`text-[10px] font-semibold mt-0.5 ${d.schedule_post_on <= new Date().toISOString().slice(0,10) ? 'text-red-600' : 'text-indigo-600'}`}>
                                   ⏱ Auto-post on {d.schedule_post_on}
+                                </div>
+                              )}
+                              {draftAudits[d.id] && (
+                                <div
+                                  className={`text-[10px] font-semibold mt-0.5 ${draftAudits[d.id].status === 'approved' ? 'text-green-600' : 'text-amber-600'}`}
+                                  title={draftAudits[d.id].top || 'Orchestrator audit verdict'}
+                                >
+                                  {draftAudits[d.id].status === 'approved' ? '✓ audit ok' : `⚠ review (${draftAudits[d.id].score}/100)`}
                                 </div>
                               )}
                             </td>

@@ -403,20 +403,9 @@ function detectReversal(text) {
   return { ok: true, voucher };
 }
 
-/** @param {string} text */
-function detectQuery(text) {
-  let score = 0;
-  for (const { re, weight } of QUERY_KEYWORDS) {
-    if (re.test(text)) score += weight;
-  }
-  // Boost when a concrete period is mentioned — short phrases like
-  // "expenses this month" or "revenue vs expenses last fy" should qualify
-  // even without an explicit verb like "show" or "how much".
-  if (/\b(today|yesterday|this|last|previous|current|q[1-4])\s*(week|month|year|fy|quarter)?\b/i.test(text)
-      || /\b(fy|quarter|q[1-4])\b/i.test(text)) {
-    score += 8;
-  }
-  if (score < 15) return null;
+/** Shared query classifier (no score gate) — used by detectQuery and the
+ *  question-fallback path. @param {string} text */
+function classifyQuery(text) {
   const lower = text.toLowerCase();
   // ── Compound / compare detection ───────────────────────────────────────
   // "revenue vs expenses", "revenue and expenses", "income vs spending"
@@ -437,8 +426,8 @@ function detectQuery(text) {
     queryType = 'compare';
     series = ['revenue', 'expenses'];
   }
-  else if (/\bcash\s+balance|how\s+much.*cash\b/.test(lower))      queryType = 'cash_balance';
-  else if (/\bbank\s+balance|how\s+much.*bank\b/.test(lower))      queryType = 'bank_balance';
+  else if (/\bcash\s+balance|how\s+much.*cash\b|what.?s\s+(?:my|the|our)\s+cash\b/.test(lower)) queryType = 'cash_balance';
+  else if (/\bbank\s+balance|how\s+much.*bank\b|what.?s\s+(?:my|the|our)\s+bank\b/.test(lower)) queryType = 'bank_balance';
   // Bare "bs" only counts as balance-sheet when the text is not asking for a
   // ledger/statement (else "show BS Traders ledger" would misroute here).
   else if (/\bbalance\s*sheet\b/.test(lower) || (/\bb\/?s\b/.test(lower) && !/\b(ledger|statement|khata)\b/.test(lower))) queryType = 'balance_sheet';
@@ -465,7 +454,62 @@ function detectQuery(text) {
     const q = lower.match(/\bq([1-4])\b/);
     period = `quarter_${q[1]}`;
   }
-  return { queryType, period, score, series, subject };
+  return { queryType, period, series, subject };
+}
+
+/** @param {string} text */
+function detectQuery(text) {
+  let score = 0;
+  for (const { re, weight } of QUERY_KEYWORDS) {
+    if (re.test(text)) score += weight;
+  }
+  // Boost when a concrete period is mentioned — short phrases like
+  // "expenses this month" or "revenue vs expenses last fy" should qualify
+  // even without an explicit verb like "show" or "how much".
+  if (/\b(today|yesterday|this|last|previous|current|q[1-4])\s*(week|month|year|fy|quarter)?\b/i.test(text)
+      || /\b(fy|quarter|q[1-4])\b/i.test(text)) {
+    score += 8;
+  }
+  if (score < 15) return null;
+  return { ...classifyQuery(text), score };
+}
+
+/**
+ * Does this text read like a QUESTION about the books (vs a booking statement)?
+ * Used on the rules-parse dead-end so questions route to the read-only Q&A
+ * instead of the LLM ENTRY extractor. English + Hinglish interrogatives.
+ * @param {string} text
+ */
+export function looksLikeQuestion(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return /^\s*(what|whats|what's|why|how|when|which|who|whose|where|is|are|am|was|were|do|does|did|can|could|should|kya|kitna|kitni|kaun|kab|kaise|batao)\b/i.test(t)
+    || /\?\s*$/.test(t);
+}
+
+/**
+ * Build a canonical query Transaction WITHOUT the keyword-score gate — for
+ * question-shaped text the booking parser could not handle. Mirrors the query
+ * shape parseMessage produces; low confidence marks it as a fallback route.
+ * @param {string} text
+ */
+export function buildQueryFallback(text) {
+  const trimmed = String(text || '').trim();
+  const q = classifyQuery(trimmed);
+  return {
+    intent: 'query',
+    date: today(),
+    narration: `Query: ${q.queryType} (${q.period})`,
+    entries: [],
+    party: { type: 'internal', name: '' },
+    mode: 'Cash',
+    accountCreates: [],
+    issues: [],
+    confidence: 0.3,
+    rawPrompt: trimmed,
+    model: 'rule-v1',
+    meta: { queryType: q.queryType, period: q.period, series: q.series, subject: q.subject },
+  };
 }
 
 // ── Party candidate resolution (for clarify flow) ───────────────────────────

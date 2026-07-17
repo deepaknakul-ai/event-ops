@@ -1,5 +1,5 @@
 // Barrel for the AI Accountant utils.
-export { parseMessage, classifyIntent, guessExpenseAccount, guessAssetAccount, findPartyCandidates, NEW_PARTY_PREFIX } from './nlu.js';
+export { parseMessage, classifyIntent, guessExpenseAccount, guessAssetAccount, findPartyCandidates, looksLikeQuestion, buildQueryFallback, NEW_PARTY_PREFIX } from './nlu.js';
 export { extractAmount, extractAmountExpression, extractAmountSmart, detectPaymentMode } from './amount.js';
 export { extractParty, resolveParty, nameSegments, segmentCoverage, normalizeAliasKey, pickPartyOption } from './party.js';
 export { parseDate, stripDate } from './dates.js';
