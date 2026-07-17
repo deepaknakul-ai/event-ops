@@ -4,6 +4,13 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.21 — Hinglish questions + AI Accountant guide
+
+Mid-sentence Hinglish question words ("acme ka balance kya hai", "gst ka kitna banta
+hai") are now recognised as questions and answered from your books instead of being
+treated as entries. New docs: AI_ACCOUNTANT_GUIDE (features + commands) and
+AI_ACCOUNTANT_UAT (six-persona live test plan).
+
 ## 3.6.20 — Grey-area hardening: 28 audit findings fixed across 7 waves
 
 A full adversarial audit of the AI accounting system, then fixes for everything found:
