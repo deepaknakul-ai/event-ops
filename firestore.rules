@@ -72,6 +72,22 @@ service cloud.firestore {
       return isAdmin(appId) || isAccountant(appId);
     }
 
+    // ── FY lock (grey-area B7) ───────────────────────────────────────────────
+    // locked_fys lives on settings/organization (Admin Tools → FY Lock). The
+    // lock binds EVERYONE incl. admin — to change history, first unlock the FY
+    // (an admin-only, audit-logged settings write). exists()+get() on the same
+    // doc costs a single read; scoped to journal_entries writes only.
+    function lockedFys(appId) {
+      return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/organization)
+        ? get(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/organization).data.get('locked_fys', [])
+        : [];
+    }
+    // A journal write is allowed only when NEITHER the new nor the old fy is locked.
+    function jeFyUnlocked(appId) {
+      return !(request.resource.data.get('fy', '') in lockedFys(appId))
+        && (resource == null || !(resource.data.get('fy', '') in lockedFys(appId)));
+    }
+
     // ── Default deny for anything outside /artifacts ─────────────────────────
     match /{document=**} {
       allow read, write: if false;
@@ -168,7 +184,7 @@ service cloud.firestore {
       // Append-only (audit_logs, inventory_movements): blocked here; handled below.
       // Everything else: any role-bearing user (admin/manager/tech/accountant/user).
       allow create, update: if (
-        // ai_usage: budget/rate-limit counters written ONLY by the aiExtractEntry
+        // ai_usage: budget/rate-limit counters written ONLY by the AI Cloud Functions (aiExtractEntry / aiAnswerQuery / aiExtractStatement / aiExtractInvoice)
         // Cloud Function (Admin SDK) — client writes would let users forge/reset
         // the monthly AI budget meter.
         // settings (Phase-2 AI round fix): settings was excluded from the wildcard
@@ -213,10 +229,15 @@ service cloud.firestore {
       ) ? (
           // Review-only metadata update on an AI journal entry — allow any finance
           // role (incl. accountant) to flag it reviewed without unlocking financials.
+          // (Deliberately exempt from the FY lock below: review stamps on old
+          // entries are metadata-only and desirable even after locking.)
           (collection == 'journal_entries' && resource != null
             && hasAnyRole(appId, ['admin', 'accountant', 'manager'])
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['ai_reviewed', 'ai_reviewed_by', 'ai_reviewed_by_name', 'ai_reviewed_at']))
+          // FY lock (grey-area B7): journal entries dated in a locked FY are
+          // frozen for EVERYONE incl. admin — unlock the FY in Admin Tools first.
+          || ((collection != 'journal_entries' || jeFyUnlocked(appId)) &&
           // Managers may WRITE only the transactional collections they legitimately
           // use (payments receipt, own-client tax invoices, vendor payments). The
           // pure accounting ledgers (journal/chart/opening/fiscal/recurring/reconcile/
@@ -226,7 +247,7 @@ service cloud.firestore {
           // admin/accountant-only, and the client-upsert side-write (upsertPartyAccount)
           // does a getDoc first that a manager cannot pass, so managers never wrote it
           // in practice — this closes the unbounded cross-party tamper hole.
-          || (((collection in ['payments', 'tax_invoices', 'vendor_payments'])
+          (((collection in ['payments', 'tax_invoices', 'vendor_payments'])
                  ? isFinanceWriter(appId) : seesAllParties(appId)) && (
             collection != 'journal_drafts'
             || isAdmin(appId)
@@ -285,7 +306,16 @@ service cloud.firestore {
             // their own uid. Blocks crafting a receipt against another manager's
             // client. onPaymentWritten re-stamps this from the client server-side.
             && request.resource.data.get('client_owner_id', '') == userEmpId()
-          )))
+          ))
+          // ── chart_of_accounts isSystem guard (grey-area C4) ────────────────
+          // System-seeded account heads keep their identity: name/type/normal
+          // side/isSystem are immutable (isActive + subType/code edits stay open
+          // for the deactivation feature).
+          && (collection != 'chart_of_accounts' || resource == null
+              || resource.data.get('isSystem', false) != true
+              || !request.resource.data.diff(resource.data).affectedKeys()
+                   .hasAny(['name', 'type', 'normalSide', 'isSystem']))
+          ))
         ) : isRoleUser(appId);  // DEFAULT: any recognised role; closes anonymous write
 
       // Deletes:
@@ -306,10 +336,17 @@ service cloud.firestore {
         // of settings docs must go through the admin-only settings stanza.
         collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings']
       ) ? false
+        // journal_entries: admin-only AND never inside a locked FY (B7) — a
+        // hard delete in a locked year would silently rewrite closed books.
+        : (collection == 'journal_entries')
+          ? (isAdmin(appId) && !(resource.data.get('fy', '') in lockedFys(appId)))
+        // chart_of_accounts: admin-only AND never a system-seeded head (C4).
+        : (collection == 'chart_of_accounts')
+          ? (isAdmin(appId) && resource.data.get('isSystem', false) != true)
         : (
-        collection in ['journal_entries', 'reconcile_matches',
+        collection in ['reconcile_matches',
                        'recurring_rules', 'fiscal_year_closings',
-                       'opening_balances', 'chart_of_accounts']
+                       'opening_balances']
       ) ? isAdmin(appId)
         : (collection in ['payroll', 'employee_pay', 'payouts', 'advances', 'party_accounts',
                           'purchase_invoices', 'reconcile_sessions',
@@ -404,7 +441,7 @@ service cloud.firestore {
     // Write: admin only.
     match /artifacts/{appId}/public/data/settings/{docId} {
       // settings/ai holds the LLM API key — NEVER client-readable, not even by
-      // admin (the aiExtractEntry Cloud Function reads it via Admin SDK, which
+      // admin (the AI Cloud Functions read it via Admin SDK, which
       // bypasses rules). AdminTools writes it blind and displays state from the
       // non-secret sibling settings/ai_public instead.
       allow read: if docId == 'ai'
@@ -417,7 +454,7 @@ service cloud.firestore {
 
     // ── AI usage metering (Phase-2 AI assistant) ──────────────────────────────
     // Monthly token counters (usage_{YYYY-MM}) and per-user rate-limit windows
-    // (rl_{uid}), written ONLY by the aiExtractEntry Cloud Function via the
+    // (rl_{uid} / rl_qa_{uid} / rl_stmt_{uid} / rl_inv_{uid}), written ONLY by the AI Cloud Functions via the
     // Admin SDK. Excluded from the broad wildcard (read AND write) above so
     // clients can never forge or reset the AI budget. Admin/Accountant read the
     // usage meter in Admin Tools.

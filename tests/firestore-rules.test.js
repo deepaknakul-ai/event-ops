@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, afterAll, beforeEach, describe, test } from 'vitest';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, deleteDoc, getDocs, query, where, collection } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, getDocs, query, where, collection } from 'firebase/firestore';
 
 const HAS_EMULATOR = !!(globalThis.process?.env?.FIRESTORE_EMULATOR_HOST);
 const APP = 'TERMS 1.0.0';
@@ -725,6 +725,69 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
     test('admin CAN still write settings docs (stanza remains authoritative)', async () => {
       await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'chat')), { presence_enabled: false }, { merge: true }));
       await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'organization')), { name: 'TERMS' }, { merge: true }));
+    });
+  });
+
+  describe('journal_entries FY lock — server-enforced, binds admin (grey-area B7)', () => {
+    const seedLock = () => testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, path('settings', 'organization')), { name: 'TERMS', locked_fys: ['2024-25'] });
+      await setDoc(doc(db, path('journal_entries', 'je_locked')), { fy: '2024-25', date: '2024-06-01', narration: 'old', entries: [] });
+      await setDoc(doc(db, path('journal_entries', 'je_open')), { fy: '2026-27', date: '2026-06-01', narration: 'new', entries: [], origin: 'ai_chat' });
+    });
+
+    test('admin CANNOT create a journal entry dated in a locked FY', async () => {
+      await seedLock();
+      await assertFails(setDoc(doc(asUser('admin1'), path('journal_entries', 'je_bad')), { fy: '2024-25', date: '2024-06-15', entries: [] }));
+    });
+    test('admin CAN create in an open FY (lock does not over-block)', async () => {
+      await seedLock();
+      await assertSucceeds(setDoc(doc(asUser('admin1'), path('journal_entries', 'je_ok')), { fy: '2026-27', date: '2026-06-15', entries: [] }));
+    });
+    test('accountant CANNOT update a locked-FY entry, nor move an entry INTO a locked FY', async () => {
+      await seedLock();
+      await assertFails(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_locked')), { fy: '2024-25', narration: 'tampered' }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_open')), { fy: '2024-25' }, { merge: true }));
+    });
+    test('ai_reviewed-only diff stays allowed EVEN on a locked-FY entry (metadata exemption)', async () => {
+      await seedLock();
+      await assertSucceeds(updateDoc(doc(asUser('acct1'), path('journal_entries', 'je_locked')), {
+        ai_reviewed: true, ai_reviewed_by: 'acct1', ai_reviewed_by_name: 'Acct', ai_reviewed_at: '2026-07-17T00:00:00Z',
+      }));
+    });
+    test('admin CANNOT hard-delete a locked-FY entry; open-FY delete still works', async () => {
+      await seedLock();
+      await assertFails(deleteDoc(doc(asUser('admin1'), path('journal_entries', 'je_locked'))));
+      await assertSucceeds(deleteDoc(doc(asUser('admin1'), path('journal_entries', 'je_open'))));
+    });
+    test('no lock configured → journal writes unaffected (legacy safety)', async () => {
+      await assertSucceeds(setDoc(doc(asUser('acct1'), path('journal_entries', 'je_nolock')), { fy: '2026-27', date: '2026-06-15', entries: [] }));
+    });
+  });
+
+  describe('chart_of_accounts isSystem guard (grey-area C4)', () => {
+    const seedCoa = () => testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, path('chart_of_accounts', 'sys1')), { code: '1000', name: 'Cash In Hand', type: 'Asset', normalSide: 'Dr', isSystem: true, isActive: true });
+      await setDoc(doc(db, path('chart_of_accounts', 'man1')), { code: '9001', name: 'Custom Head', type: 'Expense', normalSide: 'Dr', isSystem: false, isActive: true });
+    });
+
+    test('accountant CANNOT retype/rename/de-flag a SYSTEM account', async () => {
+      await seedCoa();
+      await assertFails(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'sys1')), { type: 'Equity' }));
+      await assertFails(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'sys1')), { name: 'Slush Fund' }));
+      await assertFails(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'sys1')), { isSystem: false }));
+    });
+    test('accountant CAN toggle isActive / edit subType on a SYSTEM account (deactivation feature)', async () => {
+      await seedCoa();
+      await assertSucceeds(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'sys1')), { isActive: false, updated_by: 'acct1' }));
+      await assertSucceeds(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'sys1')), { subType: 'Petty Cash' }));
+    });
+    test('manual accounts stay fully editable; system heads cannot be deleted even by admin', async () => {
+      await seedCoa();
+      await assertSucceeds(updateDoc(doc(asUser('acct1'), path('chart_of_accounts', 'man1')), { type: 'Asset', name: 'Renamed Head' }));
+      await assertFails(deleteDoc(doc(asUser('admin1'), path('chart_of_accounts', 'sys1'))));
+      await assertSucceeds(deleteDoc(doc(asUser('admin1'), path('chart_of_accounts', 'man1'))));
     });
   });
 });
