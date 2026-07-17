@@ -241,6 +241,8 @@ const guessAccountType = (accountName, coaByName) => {
   if (accountName.includes('GST Payable')) return 'Liability';
   if (accountName.includes('GST Credit')) return 'Asset';
   if (accountName.includes('Advance')) return 'Asset';
+  // "Bank Charges" / fee accounts are expenses — check BEFORE the cash/bank rule.
+  if (/charge/i.test(accountName)) return 'Expense';
   if (accountName.includes('Cash') || accountName.includes('Bank')) return 'Asset';
 
   return 'Equity';
@@ -426,13 +428,6 @@ export const getLedgerBalance = (ledgerRows, accountName) => {
   const row = (ledgerRows || []).find((item) => item.account === accountName);
   return row ? row.balance : 0;
 };
-
-// Sum the balances of every ledger account whose name matches a pattern.
-// Used so the GST summary rolls up both the legacy single control accounts
-// ("Output GST Payable" / "Input GST Credit") AND the split CGST/SGST/IGST
-// sub-accounts the AI Accountant may post to.
-const sumLedgerBalanceByPattern = (ledgerRows, re) =>
-  ledgerRows.reduce((sum, item) => (re.test(item.account) ? sum + (item.balance || 0) : sum), 0);
 
 export const buildAccountingSnapshot = ({
   clients = [],
@@ -1150,41 +1145,86 @@ export const buildAccountingSnapshot = ({
   const grossProfit = round2(totalSalesTaxable - totalPurchaseTaxable);
   const netProfit = round2(grossProfit - totalOperatingExpenses);
 
-  const cashBalance = round2(getLedgerBalance(ledger, 'Cash In Hand') + getLedgerBalance(ledger, 'Bank'));
+  // ── Balance sheet BY CONSTRUCTION (grey-area B2) ────────────────────────────
+  // Every non-P&L ledger row is classified into exactly one named line; totals
+  // are sums of those lines, so for a balanced trial balance A = L + E is an
+  // algebraic identity. Lines can be negative (contra accounts, Dr liabilities).
+  // Nothing is dropped: unmatched rows land in visible "other*" lines.
+  const A = (line, value) => ({ bucket: 'assets', line, value });
+  const L = (line, value) => ({ bucket: 'liabilities', line, value });
+  const E = (line, value) => ({ bucket: 'equity', line, value });
+  const classifyBsRow = (row) => {
+    const name = row.account || '';
+    const bal = row.balance || 0; // Dr positive
+    // Dual-use sub-ledgers split by sign (a Cr party = payable, Dr = receivable).
+    if (name.startsWith('Party:')) return bal >= 0 ? A('accountsReceivable', bal) : L('accountsPayable', -bal);
+    if (name.startsWith('Employee:') || name === 'Employee Advances' || name === 'Employee Payable') {
+      return bal >= 0 ? A('employeeAdvances', bal) : L('employeePayable', -bal);
+    }
+    if (/suspense|unresolved/i.test(name)) return bal >= 0 ? A('suspense', bal) : L('suspense', -bal);
+    // Tax families before generic typing.
+    if (/input\s+(c|s|i)?gst|gst\s+credit/i.test(name)) return A('inputGstCredit', bal);
+    if (/output\s+(c|s|i)?gst|gst\s+payable/i.test(name)) return L('gstPayableGross', -bal);
+    if (/^tds\s+receivable$/i.test(name)) return A('tdsReceivable', bal);
+    if (/^tds\s+payable$/i.test(name)) return L('tdsPayable', -bal);
+    if (/accumulated\s+depreciation/i.test(name)) return A('accumulatedDepreciation', bal); // contra → negative
+    if (/loan|borrow|overdraft/i.test(name)) return L('loans', -bal);
+    const type = guessAccountType(name, coaByName);
+    if (type === 'Income' || type === 'Expense') return { bucket: 'pl', line: 'pl', value: bal };
+    // Fixed assets / prepaid rescue — these names guess-fall to Equity when no
+    // COA doc exists, so classify them by name BEFORE the bucket-by-type step.
+    if (/prepaid/i.test(name)) return A('prepaid', bal);
+    if (coaByName[name]?.subType === 'Fixed Asset'
+      || /computer|av\s+equipment|plant|machiner|furniture|fixture|vehicle|land|building|^software$|fixed\s+asset/i.test(name)) return A('fixedAssets', bal);
+    if (type === 'Asset') {
+      if (/cash|bank/i.test(name) && !/charge|fee/i.test(name)) return A('cashAndBank', bal);
+      return A('otherAssets', bal);
+    }
+    if (type === 'Liability') {
+      if (/outstanding/i.test(name)) return L('outstandingExpenses', -bal);
+      return L('otherLiabilities', -bal);
+    }
+    // Equity (incl. the guessAccountType fallback — visible, never dropped).
+    if (/drawing/i.test(name)) return E('drawings', -bal);
+    if (/\bcapital\b/i.test(name)) return E('capital', -bal);
+    if (/opening\s+balance\s+equity/i.test(name)) return E('openingBalanceEquity', -bal);
+    // P&L Closing carries a Dr balance after year-close — a NEGATIVE equity line
+    // that offsets the transferred retained earnings (kills the closed-FY
+    // profit double-count).
+    if (/profit\s+and\s+loss\s+closing/i.test(name)) return E('plClosing', -bal);
+    if (/retained\s+earnings/i.test(name)) return E('retainedEarnings', -bal);
+    return E('otherEquity', -bal);
+  };
 
-  // Party accounts can be assets (Dr balance) or liabilities (Cr balance)
-  const partyLedgerRows = ledger.filter((row) => row.account.startsWith('Party:'));
-  const receivableTotal = round2(
-    partyLedgerRows.reduce((sum, row) => sum + (row.balance > 0 ? row.balance : 0), 0)
-  );
-  // Per-employee accounts net by sign like party accounts: a Dr balance is an
-  // advance we can recover (asset), a Cr balance is a reimbursement we owe
-  // (liability). The legacy exact-name `Employee Advances` line is kept for any
-  // opening-balance / manual-journal rows still posted to it.
-  const employeeLedgerRows = ledger.filter((row) => row.account.startsWith('Employee:'));
-  const employeeReceivable = round2(
-    employeeLedgerRows.reduce((sum, row) => sum + (row.balance > 0 ? row.balance : 0), 0)
-  );
-  const employeePayable = round2(
-    employeeLedgerRows.reduce((sum, row) => sum + (row.balance < 0 ? Math.abs(row.balance) : 0), 0)
-  );
-  const advanceAsset = round2(Math.max(getLedgerBalance(ledger, 'Employee Advances'), 0) + employeeReceivable);
+  const bs = {
+    assets: { cashAndBank: 0, accountsReceivable: 0, employeeAdvances: 0, inputGstCredit: 0, tdsReceivable: 0, prepaid: 0, fixedAssets: 0, accumulatedDepreciation: 0, suspense: 0, otherAssets: 0 },
+    liabilities: { accountsPayable: 0, employeePayable: 0, gstPayableGross: 0, tdsPayable: 0, loans: 0, outstandingExpenses: 0, suspense: 0, otherLiabilities: 0 },
+    equity: { capital: 0, drawings: 0, openingBalanceEquity: 0, plClosing: 0, retainedEarnings: 0, otherEquity: 0 },
+  };
+  let plRowsNet = 0; // income − expenses from the ACTUAL signed P&L balances
+  ledger.forEach((row) => {
+    const c = classifyBsRow(row);
+    if (c.bucket === 'pl') plRowsNet += -c.value;
+    else bs[c.bucket][c.line] += c.value;
+  });
+  Object.keys(bs).forEach((b) => Object.keys(bs[b]).forEach((k) => { bs[b][k] = round2(bs[b][k]); }));
+  // The presented P&L clamps abnormal-sign rows; park the residue in otherEquity
+  // so the identity survives (currentYearProfit + residue = actual P&L net).
+  bs.equity.otherEquity = round2(bs.equity.otherEquity + (round2(plRowsNet) - netProfit));
 
-  const payableTotal = round2(
-    partyLedgerRows.reduce((sum, row) => sum + (row.balance < 0 ? Math.abs(row.balance) : 0), 0)
-  );
+  const cashBalance = bs.assets.cashAndBank;
+  const receivableTotal = bs.assets.accountsReceivable;
+  const advanceAsset = bs.assets.employeeAdvances;
+  const inputGst = bs.assets.inputGstCredit;
+  const payableTotal = bs.liabilities.accountsPayable;
+  const employeePayable = bs.liabilities.employeePayable;
+  // Legacy net-GST figure kept for the chat answer / digest compat.
+  const gstPayable = round2(Math.max(bs.liabilities.gstPayableGross - inputGst, 0));
+  const retainedEarningsLedger = bs.equity.retainedEarnings;
 
-  // Roll up the whole output/input GST family (legacy single control accounts
-  // + any Output/Input CGST/SGST/IGST split accounts) so chat-posted split
-  // entries are not under-counted in the balance sheet.
-  const outputGst = round2(Math.abs(Math.min(sumLedgerBalanceByPattern(ledger, /output\s+(c|s|i)?gst|gst\s+payable/i), 0)));
-  const inputGst = round2(Math.max(sumLedgerBalanceByPattern(ledger, /input\s+(c|s|i)?gst|gst\s+credit/i), 0));
-  const gstPayable = round2(Math.max(outputGst - inputGst, 0));
-
-  const assetsTotal = round2(cashBalance + receivableTotal + advanceAsset + inputGst);
-  const liabilitiesTotal = round2(payableTotal + employeePayable + gstPayable);
-  const retainedEarningsLedger = round2(Math.abs(Math.min(getLedgerBalance(ledger, 'Retained Earnings'), 0)));
-  const equityTotal = round2(retainedEarningsLedger + netProfit);
+  const assetsTotal = round2(Object.values(bs.assets).reduce((s, v) => s + v, 0));
+  const liabilitiesTotal = round2(Object.values(bs.liabilities).reduce((s, v) => s + v, 0));
+  const equityTotal = round2(Object.values(bs.equity).reduce((s, v) => s + v, 0) + netProfit);
 
   return {
     clients,
@@ -1210,6 +1250,7 @@ export const buildAccountingSnapshot = ({
     },
     balanceSheet: {
       assets: {
+        ...bs.assets,
         cashAndBank: cashBalance,
         accountsReceivable: receivableTotal,
         employeeAdvances: advanceAsset,
@@ -1217,17 +1258,21 @@ export const buildAccountingSnapshot = ({
         total: assetsTotal,
       },
       liabilities: {
+        ...bs.liabilities,
         accountsPayable: payableTotal,
         employeePayable,
-        gstPayable,
+        gstPayable, // legacy NET figure (output − input, floored) for answers/digest
         total: liabilitiesTotal,
       },
       equity: {
+        ...bs.equity,
         retainedEarnings: retainedEarningsLedger,
         currentYearProfit: netProfit,
         total: equityTotal,
       },
       totalLiabilitiesAndEquity: round2(liabilitiesTotal + equityTotal),
+      // Tripwire: ≈0 whenever the trial balance is balanced (A = L + E identity).
+      unclassifiedDifference: round2(assetsTotal - liabilitiesTotal - equityTotal),
     },
   };
 };

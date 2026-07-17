@@ -4524,41 +4524,76 @@ const Accounting = ({
             </button>
           </div>
           <div className="grid gap-3 lg:grid-cols-3">
-            <div className="rounded-xl border-2 border-green-200 bg-white p-4">
-              <div className="mb-3 text-sm font-bold text-green-700">🏦 What You Own (Assets)</div>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-slate-600">Cash & Bank Balance</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.cashAndBank)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">Money Owed by Clients</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.accountsReceivable)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">Advances to Staff</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.employeeAdvances)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">GST Refund Due</span><span className="font-semibold text-green-800">{formatCurrency(snapshot.balanceSheet.assets.inputGstCredit)}</span></div>
-              </div>
-              <div className="mt-3 border-t border-green-200 pt-2 flex justify-between text-sm font-bold text-green-800">
-                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.assets.total)}</span>
-              </div>
-            </div>
-
-            <div className="rounded-xl border-2 border-rose-200 bg-white p-4">
-              <div className="mb-3 text-sm font-bold text-rose-700">📋 What You Owe (Liabilities)</div>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-slate-600">Vendor Bills Pending</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.accountsPayable)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">Owed to Employees</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.employeePayable || 0)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">GST Due to Govt</span><span className="font-semibold text-rose-800">{formatCurrency(snapshot.balanceSheet.liabilities.gstPayable)}</span></div>
-              </div>
-              <div className="mt-3 border-t border-rose-200 pt-2 flex justify-between text-sm font-bold text-rose-800">
-                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.liabilities.total)}</span>
-              </div>
-            </div>
-
-            <div className="rounded-xl border-2 border-indigo-200 bg-white p-4">
-              <div className="mb-3 text-sm font-bold text-indigo-700">💎 Business Net Worth (Equity)</div>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-slate-600">Previous Years' Profits</span><span className="font-semibold text-indigo-800">{formatCurrency(snapshot.balanceSheet.equity.retainedEarnings)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-600">This Year's Profit</span><span className="font-semibold text-indigo-800">{formatCurrency(snapshot.balanceSheet.equity.currentYearProfit || 0)}</span></div>
-              </div>
-              <div className="mt-3 border-t border-indigo-200 pt-2 flex justify-between text-sm font-bold text-indigo-800">
-                <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.equity.total)}</span>
-              </div>
-            </div>
+            {(() => {
+              const bsA = snapshot.balanceSheet.assets;
+              const bsL = snapshot.balanceSheet.liabilities;
+              const bsE = snapshot.balanceSheet.equity;
+              // [label, value, alwaysShow?] — optional lines hide when zero.
+              const assetLines = [
+                ['Cash & Bank Balance', bsA.cashAndBank, true],
+                ['Money Owed by Clients', bsA.accountsReceivable, true],
+                ['Advances to Staff', bsA.employeeAdvances, true],
+                ['GST Refund Due', bsA.inputGstCredit, true],
+                ['TDS Receivable', bsA.tdsReceivable],
+                ['Prepaid Expenses', bsA.prepaid],
+                ['Fixed Assets', bsA.fixedAssets],
+                ['(Accumulated Depreciation)', bsA.accumulatedDepreciation],
+                ['Suspense (Dr)', bsA.suspense],
+                ['Other Assets', bsA.otherAssets],
+              ];
+              const liabilityLines = [
+                ['Vendor Bills Pending', bsL.accountsPayable, true],
+                ['Owed to Employees', bsL.employeePayable, true],
+                ['GST Payable (gross)', bsL.gstPayableGross, true],
+                ['TDS Payable', bsL.tdsPayable],
+                ['Loans & Borrowings', bsL.loans],
+                ['Outstanding Expenses', bsL.outstandingExpenses],
+                ['Suspense (Cr)', bsL.suspense],
+                ['Other Liabilities', bsL.otherLiabilities],
+              ];
+              const equityLines = [
+                ['Capital Introduced', bsE.capital],
+                ['(Drawings)', bsE.drawings],
+                ['Opening Balance Equity', bsE.openingBalanceEquity],
+                ['Previous Years\' Profits', bsE.retainedEarnings, true],
+                ['(P&L Closing Transfer)', bsE.plClosing],
+                ['This Year\'s Profit', bsE.currentYearProfit, true],
+                ['Other / Unclassified', bsE.otherEquity],
+              ];
+              const renderLines = (lines, tone) => lines
+                .filter(([, v, always]) => always || Math.abs(v || 0) > 0.005)
+                .map(([label, v]) => (
+                  <div key={label} className="flex justify-between">
+                    <span className="text-slate-600">{label}</span>
+                    <span className={`font-semibold ${tone}`}>{formatCurrency(v || 0)}</span>
+                  </div>
+                ));
+              return (
+                <>
+                  <div className="rounded-xl border-2 border-green-200 bg-white p-4">
+                    <div className="mb-3 text-sm font-bold text-green-700">🏦 What You Own (Assets)</div>
+                    <div className="space-y-2 text-sm">{renderLines(assetLines, 'text-green-800')}</div>
+                    <div className="mt-3 border-t border-green-200 pt-2 flex justify-between text-sm font-bold text-green-800">
+                      <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.assets.total)}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border-2 border-rose-200 bg-white p-4">
+                    <div className="mb-3 text-sm font-bold text-rose-700">📋 What You Owe (Liabilities)</div>
+                    <div className="space-y-2 text-sm">{renderLines(liabilityLines, 'text-rose-800')}</div>
+                    <div className="mt-3 border-t border-rose-200 pt-2 flex justify-between text-sm font-bold text-rose-800">
+                      <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.liabilities.total)}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border-2 border-indigo-200 bg-white p-4">
+                    <div className="mb-3 text-sm font-bold text-indigo-700">💎 Business Net Worth (Equity)</div>
+                    <div className="space-y-2 text-sm">{renderLines(equityLines, 'text-indigo-800')}</div>
+                    <div className="mt-3 border-t border-indigo-200 pt-2 flex justify-between text-sm font-bold text-indigo-800">
+                      <span>Total</span><span>{formatCurrency(snapshot.balanceSheet.equity.total)}</span>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
           <div className={`rounded-xl border-2 p-4 text-center ${
             Math.abs(snapshot.balanceSheet.assets.total - snapshot.balanceSheet.totalLiabilitiesAndEquity) < 1

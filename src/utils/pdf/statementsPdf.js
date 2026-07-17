@@ -49,28 +49,45 @@ export function generatePnlPdf(pnl = {}, meta = {}) {
   doc.save(`PnL_${meta.fyLabel || 'all'}.pdf`);
 }
 
-/** Balance Sheet. `bs` = snapshot.balanceSheet. */
+/** Balance Sheet. `bs` = snapshot.balanceSheet (classification-driven lines). */
 export function generateBalanceSheetPdf(bs = {}, meta = {}) {
   const a = bs.assets || {}; const l = bs.liabilities || {}; const e = bs.equity || {};
   const doc = new jsPDF();
   const y = header(doc, 'Balance Sheet', meta);
+  const opt = (label, v) => (Math.abs(v || 0) > 0.005 ? [[label, num(v)]] : []);
   const rows = [
     Object.assign(['ASSETS', ''], { _bold: true }),
     ['Cash & Bank', num(a.cashAndBank)],
     ['Accounts Receivable', num(a.accountsReceivable)],
     ['Employee Advances', num(a.employeeAdvances)],
     ['Input GST Credit', num(a.inputGstCredit)],
+    ...opt('TDS Receivable', a.tdsReceivable),
+    ...opt('Prepaid Expenses', a.prepaid),
+    ...opt('Fixed Assets', a.fixedAssets),
+    ...opt('(Accumulated Depreciation)', a.accumulatedDepreciation),
+    ...opt('Suspense (Dr)', a.suspense),
+    ...opt('Other Assets', a.otherAssets),
     Object.assign(['Total Assets', num(a.total)], { _bold: true }),
     ['', ''],
     Object.assign(['LIABILITIES', ''], { _bold: true }),
     ['Accounts Payable', num(l.accountsPayable)],
     ['Employee Payable', num(l.employeePayable)],
-    ['GST Payable', num(l.gstPayable)],
+    ['GST Payable (gross)', num(l.gstPayableGross)],
+    ...opt('TDS Payable', l.tdsPayable),
+    ...opt('Loans & Borrowings', l.loans),
+    ...opt('Outstanding Expenses', l.outstandingExpenses),
+    ...opt('Suspense (Cr)', l.suspense),
+    ...opt('Other Liabilities', l.otherLiabilities),
     Object.assign(['Total Liabilities', num(l.total)], { _bold: true }),
     ['', ''],
     Object.assign(['EQUITY', ''], { _bold: true }),
+    ...opt('Capital Introduced', e.capital),
+    ...opt('(Drawings)', e.drawings),
+    ...opt('Opening Balance Equity', e.openingBalanceEquity),
     ['Retained Earnings', num(e.retainedEarnings)],
+    ...opt('(P&L Closing Transfer)', e.plClosing),
     ['Current Year Profit', num(e.currentYearProfit)],
+    ...opt('Other / Unclassified', e.otherEquity),
     Object.assign(['Total Equity', num(e.total)], { _bold: true }),
     ['', ''],
     Object.assign(['Liabilities + Equity', num(bs.totalLiabilitiesAndEquity)], { _bold: true }),

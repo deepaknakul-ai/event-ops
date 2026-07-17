@@ -54,7 +54,8 @@ export function runBooksAudit(snapshot = {}, ctx = {}) {
       { fix: 'Open the ledger and move each Suspense entry to its real account.', refs: [r.account] })));
 
   // 3. Negative cash / bank (a Cr balance on cash is impossible). Warning.
-  ledger.filter((r) => /^(cash|bank)\b/i.test(r.account) && (r.balance || 0) < -0.5)
+  // Excludes expense accounts that merely start with the word ("Bank Charges").
+  ledger.filter((r) => /^(cash|bank)\b/i.test(r.account) && !/charge|fee|loan/i.test(r.account) && (r.balance || 0) < -0.5)
     .forEach((r) => findings.push(finding('warning', 'negative_cash',
       `${r.account} shows a negative (Cr) balance of ${round2(Math.abs(r.balance))} — cash/bank can't go below zero.`,
       { fix: 'A payment was likely booked before its receipt, or an account is mis-mapped.', refs: [r.account] })));

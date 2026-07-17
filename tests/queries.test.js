@@ -83,10 +83,12 @@ describe('buildRunningLedger + accountLedgerAnswer', () => {
 });
 
 describe('outstanding / GST / TDS answers', () => {
-  it('totals receivables and payables across party + employee sub-ledgers', () => {
+  it('keeps party AR/AP separate from employee balances (B11)', () => {
     const r = outstandingAnswer(ledger, 'both', fmt);
-    expect(r.totalReceivable).toBe(5000);      // Acme
-    expect(r.totalPayable).toBe(3500);         // Zenith 2000 + Rahul 1500
+    expect(r.totalReceivable).toBe(5000);      // Acme (Party: only)
+    expect(r.totalPayable).toBe(2000);         // Zenith only — staff NOT lumped in
+    expect(r.employeePayable).toBe(1500);      // Rahul reported separately
+    expect(r.message).toMatch(/owed to staff/i);
   });
   it('gstLiabilityAnswer reports net GST payable', () => {
     expect(gstLiabilityAnswer(balanceSheet, fmt).gstPayable).toBe(3000);

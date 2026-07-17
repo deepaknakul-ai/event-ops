@@ -123,23 +123,31 @@ export function accountLedgerAnswer(ledger, account, fmt = String) {
   };
 }
 
-/** Top outstanding receivables / payables from the party & employee sub-ledgers. */
+/** Top outstanding receivables / payables. Client/vendor (Party:) AR/AP stays
+ *  separate from employee balances — employees are reported as their own line
+ *  (mirrors the balance sheet, which never lumps staff into AR/AP). */
 export function outstandingAnswer(ledger, kind, fmt = String, topN = 8) {
-  const rows = (ledger || []).filter((r) => isSubledger(r.account) && Math.abs(r.balance || 0) > 0.5);
+  const rows = (ledger || []).filter((r) => /^Party:/.test(r.account) && Math.abs(r.balance || 0) > 0.5);
+  const empRows = (ledger || []).filter((r) => /^Employee:/.test(r.account) && Math.abs(r.balance || 0) > 0.5);
   const receivables = rows.filter((r) => r.balance > 0).sort((a, b) => b.balance - a.balance);
   const payables = rows.filter((r) => r.balance < 0).sort((a, b) => a.balance - b.balance);
   const totalRecv = round2(receivables.reduce((s, r) => s + r.balance, 0));
   const totalPay = round2(payables.reduce((s, r) => s + Math.abs(r.balance), 0));
+  const empAdvances = round2(empRows.reduce((s, r) => s + Math.max(r.balance, 0), 0));
+  const empOwed = round2(empRows.reduce((s, r) => s + Math.max(-r.balance, 0), 0));
+  const empNote = (empAdvances > 0.5 || empOwed > 0.5)
+    ? ` Employees: advances recoverable ${fmt(empAdvances)} · owed to staff ${fmt(empOwed)}.`
+    : '';
   const list = (arr, fn) => arr.slice(0, topN).map((r) => `${stripPrefix(r.account)}: ${fmt(fn(r.balance))}`).join(' · ');
   let message;
   if (kind === 'payable') {
-    message = payables.length ? `You owe ${fmt(totalPay)} across ${payables.length} parties. Top: ${list(payables, Math.abs)}.` : 'You have no outstanding payables.';
+    message = (payables.length ? `You owe ${fmt(totalPay)} across ${payables.length} parties. Top: ${list(payables, Math.abs)}.` : 'You have no outstanding payables.') + empNote;
   } else if (kind === 'receivable') {
-    message = receivables.length ? `${fmt(totalRecv)} is receivable across ${receivables.length} parties. Top: ${list(receivables, (x) => x)}.` : 'Nothing is currently receivable.';
+    message = (receivables.length ? `${fmt(totalRecv)} is receivable across ${receivables.length} parties. Top: ${list(receivables, (x) => x)}.` : 'Nothing is currently receivable.') + empNote;
   } else {
-    message = `Receivable ${fmt(totalRecv)} · Payable ${fmt(totalPay)}. Net ${fmt(round2(totalRecv - totalPay))}.`;
+    message = `Receivable ${fmt(totalRecv)} · Payable ${fmt(totalPay)}. Net ${fmt(round2(totalRecv - totalPay))}.${empNote}`;
   }
-  return { totalReceivable: totalRecv, totalPayable: totalPay, receivables, payables, message };
+  return { totalReceivable: totalRecv, totalPayable: totalPay, receivables, payables, employeeAdvances: empAdvances, employeePayable: empOwed, message };
 }
 
 /** GST payable this period (output − input credit) from the balance sheet rollup. */
@@ -166,9 +174,12 @@ export function gstLiabilityAnswer(balanceSheet, fmt = String) {
  */
 export function buildBooksDigest(snapshot = {}, extras = {}) {
   const ledger = Array.isArray(snapshot.ledger) ? snapshot.ledger : [];
-  const bal = (re) => ledger.filter((r) => re.test(r.account)).reduce((s, r) => s + (r.balance || 0), 0);
+  // Cash/bank sums exclude expense accounts that merely CONTAIN the word
+  // ("Bank Charges" must not pollute the bank figure).
+  const bal = (re) => ledger.filter((r) => re.test(r.account) && !/charge|fee|loan/i.test(r.account)).reduce((s, r) => s + (r.balance || 0), 0);
   const nonZero = ledger.filter((r) => Math.abs(r.balance || 0) > 0.5);
-  const parties = nonZero.filter((r) => isSubledger(r.account));
+  const parties = nonZero.filter((r) => /^Party:/.test(r.account));
+  const empRows = nonZero.filter((r) => /^Employee:/.test(r.account));
   const tb = snapshot.trialBalance || {};
   const tdsRow = ledger.find((r) => r.account === 'TDS Payable');
   return {
@@ -182,6 +193,8 @@ export function buildBooksDigest(snapshot = {}, extras = {}) {
     accounts: nonZero.slice(0, 250).map((r) => ({ a: r.account, bal: round2(r.balance) })),
     receivables: parties.filter((r) => r.balance > 0).sort((a, b) => b.balance - a.balance).slice(0, 40).map((r) => ({ name: stripPrefix(r.account), bal: round2(r.balance) })),
     payables: parties.filter((r) => r.balance < 0).sort((a, b) => a.balance - b.balance).slice(0, 40).map((r) => ({ name: stripPrefix(r.account), bal: round2(Math.abs(r.balance)) })),
+    employee_receivables: empRows.filter((r) => r.balance > 0).sort((a, b) => b.balance - a.balance).slice(0, 20).map((r) => ({ name: stripPrefix(r.account), bal: round2(r.balance) })),
+    employee_payables: empRows.filter((r) => r.balance < 0).sort((a, b) => a.balance - b.balance).slice(0, 20).map((r) => ({ name: stripPrefix(r.account), bal: round2(Math.abs(r.balance)) })),
     gst_payable: round2(snapshot.balanceSheet?.liabilities?.gstPayable || 0),
     tds_payable: tdsRow ? round2(Math.abs(Math.min(tdsRow.balance || 0, 0))) : 0,
     aging: extras.ageing ? {
