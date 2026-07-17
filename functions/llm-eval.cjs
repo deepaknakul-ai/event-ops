@@ -117,6 +117,29 @@ async function runOne(text) {
   return { tx, tokens };
 }
 
+// ── Persona eval — run with EVAL_PERSONAS=1 (extra billed calls) ─────────────
+// The LLM-BOUND utterances from the six Hinglish personas (the deterministic
+// ones are pinned free in tests/persona-hinglish.test.js). Each is a phrase the
+// rules engine dead-ends on, checked against the correct booking.
+const PERSONA_CASES = [
+  // P1 Sharma ji — Hindi-dominant owner
+  { p: 'P1', t: 'ramesh ko 5000 diya',
+    check: (tx) => ({ ok: near(total(tx), 5000) && (hasAcct(tx, 'Employee: Ramesh') || /Party: Ramesh/i.test(JSON.stringify(tx.entries))), why: `total=${total(tx)} (want 5000 to Ramesh — employee or party leg)` }) },
+  { p: 'P1', t: 'acme se 50000 aaye',
+    check: (tx) => ({ ok: tx.intent === 'receipt' && near(total(tx), 50000), why: `intent=${tx.intent} total=${total(tx)} (want receipt 50000)` }) },
+  // P3 Raju — site Hinglish with arithmetic
+  { p: 'P3', t: 'khana khilaya 8 log 800 wala',
+    check: (tx) => ({ ok: near(total(tx), 6400) && hasAcct(tx, 'Food Expense'), why: `total=${total(tx)} (want Food 6400 = 8×800)` }) },
+  // P5 Anwar bhai — Hindi with English nouns
+  { p: 'P5', t: 'sharma traders ko 20000 de diye neft se',
+    check: (tx) => ({ ok: tx.intent === 'payment' && near(total(tx), 20000) && /Bank/i.test(JSON.stringify(tx.entries)), why: `intent=${tx.intent} total=${total(tx)} (want payment 20000 via Bank/NEFT)` }) },
+  { p: 'P5', t: 'anwar bhai ka udhaar chukaya 15000 cash',
+    check: (tx) => ({ ok: near(total(tx), 15000), why: `total=${total(tx)} (want 15000 settlement)` }) },
+  // P6 Deepak — compound
+  { p: 'P6', t: 'zenith events se 40000 aaya, 2000 unhone kaat liya tds ka',
+    check: (tx) => ({ ok: near(total(tx), 40000, 2001) && /TDS Receivable/i.test(JSON.stringify(tx.entries)), why: `total=${total(tx)} (want receipt with a TDS Receivable leg)` }) },
+];
+
 // ── Ask-anything Q&A eval (A9) — run with EVAL_QA=1 (extra billed calls) ─────
 // Mirrors buildBooksDigest's exact shape + the aiAnswerQuery message framing.
 const QA_DIGEST = {
@@ -179,6 +202,26 @@ async function runQa(question) {
     }
   }
 
+  let personaPass = 0;
+  if (process.env.EVAL_PERSONAS === '1') {
+    console.log(`\n${'—'.repeat(70)}\nPERSONA eval (LLM-bound Hinglish utterances)\n${'—'.repeat(70)}`);
+    for (let i = 0; i < PERSONA_CASES.length; i++) {
+      const { p, t, check } = PERSONA_CASES[i];
+      try {
+        const { tx, tokens } = await runOne(t);
+        tokensTotal += tokens;
+        const r = check(tx);
+        if (r.ok) personaPass++; else fails.push({ i: `${p}#${i + 1}`, t, why: r.why });
+        const legs = (tx.entries || []).map((e) => `${e.debitAccount} / ${e.creditAccount} ${e.amount}`).join('  |  ');
+        console.log(`\n${r.ok ? '✅' : '❌'} ${p} "${t}"\n   intent=${tx.intent}  ${legs}`);
+        if (!r.ok) console.log(`   ↳ ${r.why}`);
+      } catch (err) {
+        fails.push({ i: `${p}#${i + 1}`, t, why: `ERROR: ${err.message}` });
+        console.log(`\n❌ ${p} "${t}"\n   ERROR: ${err.message}`);
+      }
+    }
+  }
+
   let qaPass = 0;
   if (process.env.EVAL_QA === '1') {
     console.log(`\n${'—'.repeat(70)}\nASK-ANYTHING Q&A eval (read-only agent)\n${'—'.repeat(70)}`);
@@ -198,8 +241,9 @@ async function runQa(question) {
   }
 
   console.log(`\n${'='.repeat(70)}`);
-  const qaNote = process.env.EVAL_QA === '1' ? `  ·  QA ${qaPass}/${QA_CASES.length}` : '  ·  (set EVAL_QA=1 for the Q&A eval)';
-  console.log(`RESULT: ${pass}/${CASES.length} extraction${qaNote}  ·  ~${tokensTotal.toLocaleString()} tokens  ·  bar = ${Math.ceil(CASES.length * 0.8)}/${CASES.length}`);
+  const qaNote = process.env.EVAL_QA === '1' ? `  ·  QA ${qaPass}/${QA_CASES.length}` : '  ·  (EVAL_QA=1 for Q&A)';
+  const personaNote = process.env.EVAL_PERSONAS === '1' ? `  ·  personas ${personaPass}/${PERSONA_CASES.length}` : '  ·  (EVAL_PERSONAS=1 for personas)';
+  console.log(`RESULT: ${pass}/${CASES.length} extraction${qaNote}${personaNote}  ·  ~${tokensTotal.toLocaleString()} tokens  ·  bar = ${Math.ceil(CASES.length * 0.8)}/${CASES.length}`);
   if (fails.length) { console.log('\nFailures to review:'); fails.forEach((f) => console.log(`  #${f.i} "${f.t}" — ${f.why}`)); }
   process.exit(pass >= Math.ceil(CASES.length * 0.8) ? 0 : 2);
 })();

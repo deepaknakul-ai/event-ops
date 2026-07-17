@@ -484,7 +484,11 @@ export function looksLikeQuestion(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   return /^\s*(what|whats|what's|why|how|when|which|who|whose|where|is|are|am|was|were|do|does|did|can|could|should|kya|kitna|kitni|kaun|kab|kaise|batao)\b/i.test(t)
-    || /\?\s*$/.test(t);
+    || /\?\s*$/.test(t)
+    // Hinglish interrogatives sit MID-sentence ("acme ka balance kya hai",
+    // "gst ka kitna banta hai") — these words never appear in booking phrases,
+    // so anywhere-in-text is a safe question signal.
+    || /\b(kya|kitna|kitni|kaun|kaise|batao|bataye|bata\s*do)\b/i.test(t);
 }
 
 /**
