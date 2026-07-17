@@ -4,6 +4,14 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.22 — Client ledger link: invoice → projects details
+
+On the shared client ledger, every **Inv# chip is now a link** — clicking it opens the
+Invoice Summary with that invoice selected, showing exactly **which projects the invoice
+covers** (with per-project details and the invoice amount vs projects total). The Invoice
+Summary now includes invoices raised through the invoice module (previously it only knew
+projects stamped with an invoice number), so every invoice on the statement is explorable.
+
 ## 3.6.21 — Hinglish questions + AI Accountant guide
 
 Mid-sentence Hinglish question words ("acme ka balance kya hai", "gst ka kitna banta

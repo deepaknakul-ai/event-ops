@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
@@ -349,29 +349,74 @@ const PublicLedger = () => {
     return { allRows: result, fyList: ['ALL', ...sortedFYs] };
   }, [client, projects, payments, vendorPayments, purchaseInvoices, taxInvoices, journalEntries, openingBalance, companyFilterId]);
 
-  // Group client's invoiced projects by invoice_no for the Invoice View panel
+  // Group projects by invoice number for the Invoice View panel, from BOTH
+  // sources: (a) projects stamped with invoice_no, and (b) raised tax invoices
+  // carrying project_ids/project_names — so every invoice on the ledger shows
+  // exactly which projects it covers.
   const invoiceGroups = useMemo(() => {
     if (!client) return [];
-    const invoiced = projects.filter(
-      p => p.client_id === client.id && p.invoice_no && p.invoice_no.trim()
-    );
     const map = {};
-    invoiced.forEach(p => {
-      const key = p.invoice_no.trim();
+    const ensure = (key) => {
       if (!map[key]) {
-        map[key] = {
-          invoice_no: key,
-          invoice_date: p.invoice_date || '',
-          invoice_status: p.invoice_status || 'Not Invoiced',
-          projects: [],
-          total: 0
-        };
+        map[key] = { invoice_no: key, invoice_date: '', invoice_status: 'Not Invoiced', projects: [], nameOnlyProjects: [], billed: null, total: 0 };
       }
-      map[key].projects.push(p);
-      map[key].total += getProjectGrandTotal(p);
-    });
+      return map[key];
+    };
+
+    // (a) project-side stamps
+    projects
+      .filter(p => p.client_id === client.id && p.invoice_no && p.invoice_no.trim())
+      .forEach(p => {
+        const grp = ensure(p.invoice_no.trim());
+        grp.invoice_date = grp.invoice_date || p.invoice_date || '';
+        grp.invoice_status = p.invoice_status || grp.invoice_status;
+        grp.projects.push(p);
+        grp.total += getProjectGrandTotal(p);
+      });
+
+    // (b) raised tax invoices (module-raised, with project linkage)
+    (taxInvoices || [])
+      .filter(inv => inv.status !== 'Cancelled' && inv.invoice_no && String(inv.invoice_no).trim())
+      .forEach(inv => {
+        const grp = ensure(String(inv.invoice_no).trim());
+        grp.invoice_date = inv.invoice_date || grp.invoice_date;
+        grp.invoice_status = 'Invoiced';
+        grp.billed = parseFloat(inv.final_amount != null ? inv.final_amount : (inv.computed_total || 0)) || grp.billed;
+        const pids = Array.isArray(inv.project_ids) && inv.project_ids.length
+          ? inv.project_ids
+          : (inv.project_id ? [inv.project_id] : []);
+        pids.forEach(pid => {
+          if (grp.projects.some(p => p.id === pid)) return;
+          const proj = projects.find(p => p.id === pid);
+          if (proj) {
+            grp.projects.push(proj);
+            grp.total += getProjectGrandTotal(proj);
+          }
+        });
+        // Names the server sent but whose project docs aren't in this payload —
+        // still show them so the invoice → project mapping is complete.
+        const names = Array.isArray(inv.project_names) && inv.project_names.length
+          ? inv.project_names
+          : (inv.project_name ? [inv.project_name] : []);
+        names.forEach(nm => {
+          if (!nm) return;
+          if (grp.projects.some(p => p.project_name === nm)) return;
+          if (!grp.nameOnlyProjects.includes(nm)) grp.nameOnlyProjects.push(nm);
+        });
+      });
+
     return Object.values(map).sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || ''));
-  }, [client, projects]);
+  }, [client, projects, taxInvoices]);
+
+  // "Which projects does this invoice cover?" jump — opens the Invoice Summary
+  // panel with the invoice selected (used by the Inv# chips on ledger rows).
+  const invoicePanelRef = useRef(null);
+  const openInvoiceDetails = (invoiceNo) => {
+    if (!invoiceNo || invoiceNo === '—') return;
+    setInvoiceViewOpen(true);
+    setSelectedInvoiceNo(String(invoiceNo).trim());
+    setTimeout(() => invoicePanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
 
   // Rows visible in the table (filtered by selected FY)
   const visibleRows = useMemo(() => {
@@ -679,7 +724,7 @@ const PublicLedger = () => {
 
         {/* ── Invoice Summary Panel ──────────────────────────────────────── */}
         {invoiceViewOpen && invoiceGroups.length > 0 && (
-          <div className="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
+          <div ref={invoicePanelRef} className="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 bg-indigo-600 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Receipt size={16} className="text-white" />
@@ -719,8 +764,9 @@ const PublicLedger = () => {
                   <div className="flex flex-wrap gap-4 text-sm text-slate-600 pb-2 border-b border-slate-100">
                     <span><span className="font-semibold text-slate-700">Invoice #:</span> {grp.invoice_no}</span>
                     {grp.invoice_date && <span><span className="font-semibold text-slate-700">Date:</span> {new Date(grp.invoice_date).toLocaleDateString('en-IN')}</span>}
-                    <span><span className="font-semibold text-slate-700">Projects:</span> {grp.projects.length}</span>
-                    <span><span className="font-semibold text-slate-700">Total:</span> <span className="text-indigo-700 font-bold">{formatCurrency(grp.total)}</span></span>
+                    <span><span className="font-semibold text-slate-700">Projects:</span> {grp.projects.length + grp.nameOnlyProjects.length}</span>
+                    {grp.billed != null && <span><span className="font-semibold text-slate-700">Invoice Amount:</span> <span className="text-indigo-700 font-bold">{formatCurrency(grp.billed)}</span></span>}
+                    {grp.total > 0 && <span><span className="font-semibold text-slate-700">Projects Total:</span> <span className="text-slate-700 font-bold">{formatCurrency(grp.total)}</span></span>}
                     <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
                       grp.invoice_status === 'Invoiced' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'
                     }`}>{grp.invoice_status}</span>
@@ -744,6 +790,12 @@ const PublicLedger = () => {
                             <ChevronRight size={13} /> Details
                           </button>
                         </div>
+                      </div>
+                    ))}
+                    {grp.nameOnlyProjects.map((nm) => (
+                      <div key={nm} className="flex items-center justify-between gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50">
+                        <div className="font-semibold text-slate-700 truncate">{nm}</div>
+                        <span className="text-[11px] text-slate-400">covered by this invoice</span>
                       </div>
                     ))}
                   </div>
@@ -893,10 +945,10 @@ const PublicLedger = () => {
                               {row.invoice_status}
                             </span>
                             {row.invoice_no && row.invoice_no !== '—' && (
-                              <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded"> Inv# {row.invoice_no}</span>
+                              <button onClick={() => openInvoiceDetails(row.invoice_no)} title="See which projects this invoice covers" className="text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 px-1.5 py-0.5 rounded font-semibold transition-colors">Inv# {row.invoice_no} ↗</button>
                             )}
                             {row.invoice_date && row.invoice_date !== '—' && (
-                              <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded"> {new Date(row.invoice_date).toLocaleDateString('en-IN')}</span>
+                              <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded"> {new Date(row.invoice_date).toLocaleDateString('en-IN')}</span>
                             )}
                           </div>
                         )}
