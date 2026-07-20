@@ -14,7 +14,8 @@ import QRCode from 'qrcode';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import {
   formatCurrency, formatCurrencyPDF, fmtDate,
-  getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord, getProjectGrandTotal, amountToWordsINR, round2
+  getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord, getProjectGrandTotal, amountToWordsINR, round2,
+  isProjectInvoiced
 } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { generateClassicInvoicePDF, generateGSTFormatInvoicePDF } from '../utils/pdf/taxInvoicePdf';
@@ -161,7 +162,7 @@ const TaxInvoices = ({
         // but keep selected projects visible during edit.
         if (selectedSet.has(p.id)) return true;
         const isCompleted = p.status === 'Completed';
-        const notInvoiced = p.invoice_status !== 'Invoiced' && !p.tax_invoice_id;
+        const notInvoiced = !isProjectInvoiced(p.invoice_status) && !p.tax_invoice_id;
         return isCompleted && notInvoiced;
       })
       .filter(p => !projectSearch || p.project_name?.toLowerCase().includes(projectSearch.toLowerCase()))
@@ -228,7 +229,7 @@ const TaxInvoices = ({
   const unbilledProjects = useMemo(() => {
     return projects
       .filter(p => (p.status === 'Completed' || p.status === 'Closed') &&
-                   p.invoice_status !== 'Invoiced' &&
+                   !isProjectInvoiced(p.invoice_status) &&
                    !p.tax_invoice_id)
       // Managers see only their OWN unbilled projects (grand totals are money) —
       // no cross-manager receivables in the Pending Invoices tab.

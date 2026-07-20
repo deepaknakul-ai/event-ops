@@ -1,17 +1,20 @@
 {
   "name": "rental-ops",
   "private": true,
-  "version": "3.6.22",
+  "version": "3.6.23",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:backup": "vite build --mode backup",
     "build:app": "vite build --base=./",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "deploy": "npm run build && firebase deploy --only hosting",
+    "deploy:backup": "npm run build:backup && firebase deploy --project backup --only hosting",
+    "deploy:backup:rules": "firebase deploy --project backup --only firestore:rules,storage",
     "release:patch": "npm version patch -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags",
     "release:minor": "npm version minor -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags",
     "release:major": "npm version major -m \"release: v%s\" && npm run build && firebase deploy --only hosting && git push --follow-tags"

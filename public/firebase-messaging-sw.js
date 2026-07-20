@@ -7,14 +7,29 @@
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
-firebase.initializeApp({
+const primaryFirebaseConfig = {
   apiKey: 'AIzaSyBjd7u6nS7FD2Xr4aRe0WBu7CgAvmeIjcQ',
   authDomain: 'terms-a005e.firebaseapp.com',
   projectId: 'terms-a005e',
   storageBucket: 'terms-a005e.firebasestorage.app',
   messagingSenderId: '269962655904',
   appId: '1:269962655904:web:7a59b171cfd80ac4d6b1c5',
-});
+};
+
+const backupFirebaseConfig = {
+  apiKey: 'AIzaSyBSgK9KkZaREKKwNymsbkDcDiAtUKQW6Hk',
+  authDomain: 'eventops-68df9.firebaseapp.com',
+  projectId: 'eventops-68df9',
+  storageBucket: 'eventops-68df9.firebasestorage.app',
+  messagingSenderId: '467229631920',
+  appId: '1:467229631920:web:98239487708e5f51bde275',
+};
+
+const firebaseConfig = self.location.hostname.includes('eventops-68df9')
+  ? backupFirebaseConfig
+  : primaryFirebaseConfig;
+
+firebase.initializeApp(firebaseConfig);
 
 const messaging = firebase.messaging();
 

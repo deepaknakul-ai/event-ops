@@ -5,7 +5,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   formatCurrencyPDF, getProjectGrandTotal, getEffectivePOCost, fmtDate,
-  getLogHours, getHourlyRateForDate,
+  getLogHours, getHourlyRateForDate, isProjectInvoiced,
 } from "../helpers";
 
 const isExcludedExpense = (s) => s === 'Rejected' || s === 'Disapproved';
@@ -149,7 +149,7 @@ export const generateClientManagementReportPDF = async (ctx) => {
     y = sectionTitle('3. Receivables Aging', y);
     const buckets = { b30: 0, b60: 0, b90: 0, b90p: 0 };
     const now = new Date();
-    clientProjects.filter(p => p.invoice_status === 'Invoiced' || p.status === 'Closed').forEach(p => {
+    clientProjects.filter(p => isProjectInvoiced(p.invoice_status) || p.status === 'Closed').forEach(p => {
       const due = getProjectGrandTotal(p) - (receivedByProject[p.id] || 0);
       if (due <= 0.5) return;
       const base = p.invoice_date ? new Date(p.invoice_date) : new Date(p.end_date || p.start_date || now);
@@ -176,7 +176,7 @@ export const generateClientManagementReportPDF = async (ctx) => {
         const rev = getProjectGrandTotal(p);
         const cost = projectCost(p);
         const m = rev > 0 ? ((rev - cost) / rev * 100).toFixed(0) + '%' : '—';
-        const billed = (p.invoice_status === 'Invoiced' || p.status === 'Closed') ? rev : 0;
+        const billed = (isProjectInvoiced(p.invoice_status) || p.status === 'Closed') ? rev : 0;
         const recv = receivedByProject[p.id] || 0;
         const out = billed - recv;
         return [p.project_name || '—', p.status || '—', `${fmtDate(p.start_date)}`, formatCurrencyPDF(rev), m, formatCurrencyPDF(out > 0.5 ? out : 0)];

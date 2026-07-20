@@ -6,7 +6,7 @@
 // `pendingAction` descriptors the UI executes after user confirmation and
 // RBAC checks.
 
-import { getProjectGrandTotal, getEffectivePOCost } from '../helpers';
+import { getProjectGrandTotal, getEffectivePOCost, isProjectInvoiced } from '../helpers';
 
 // Fallback to stored totals when items/logistics are not present in memory
 // (e.g. legacy or import-sourced projects). getProjectGrandTotal does the
@@ -186,7 +186,7 @@ function projectsOverdue(ctx) {
   };
 }
 function projectsUnbilled(ctx) {
-  const rows = (ctx.projects || []).filter((p) => p.status === 'Completed' && p.invoice_status !== 'Invoiced');
+  const rows = (ctx.projects || []).filter((p) => p.status === 'Completed' && !isProjectInvoiced(p.invoice_status));
   return {
     type: 'list',
     title: `Completed projects awaiting invoice (${rows.length})`,
@@ -264,7 +264,7 @@ function clientLedger(ctx, clientName) {
   const invoicedProjects = (ctx.projects || []).filter((p) => (
     p.client_id === client.id
     && ['Completed', 'Closed'].includes(p.status)
-    && p.invoice_status === 'Invoiced'
+    && isProjectInvoiced(p.invoice_status)
     && !taxInvoiceProjectIds.has(p.id)
   ));
 
@@ -272,7 +272,7 @@ function clientLedger(ctx, clientName) {
   const unbilled = (ctx.projects || []).filter((p) => (
     p.client_id === client.id
     && ['Completed', 'Closed'].includes(p.status)
-    && p.invoice_status !== 'Invoiced'
+    && !isProjectInvoiced(p.invoice_status)
     && !taxInvoiceProjectIds.has(p.id)
   ));
 
@@ -357,7 +357,7 @@ function clientOutstanding(ctx) {
   // Project-level invoiced (legacy) — only when not already in tax_invoices.
   (ctx.projects || []).forEach((p) => {
     if (!['Completed', 'Closed'].includes(p.status)) return;
-    if (p.invoice_status !== 'Invoiced') return;
+    if (!isProjectInvoiced(p.invoice_status)) return;
     if (taxInvoiceProjectIds.has(p.id)) return;
     const key = p.client_id || 'unknown';
     const cur = agg.get(key) || { id: key, name: p.client_name || '—', invoiced: 0, unbilled: 0, received: 0 };
@@ -369,7 +369,7 @@ function clientOutstanding(ctx) {
   // receivables reflect what the client will owe once invoices are raised.
   (ctx.projects || []).forEach((p) => {
     if (!['Completed', 'Closed'].includes(p.status)) return;
-    if (p.invoice_status === 'Invoiced') return;
+    if (isProjectInvoiced(p.invoice_status)) return;
     if (taxInvoiceProjectIds.has(p.id)) return;
     const key = p.client_id || 'unknown';
     const cur = agg.get(key) || { id: key, name: p.client_name || '—', invoiced: 0, unbilled: 0, received: 0 };
@@ -695,7 +695,7 @@ function projectsDetails(ctx, projectName) {
     ...(ctx.canViewProjectValue ? [
       { label: 'Expenses booked', value: `${expenses.length} · ${fmtINR(expenseTotal)}` },
     ] : []),
-    { label: 'Invoice', value: p.invoice_status === 'Invoiced' ? `Invoiced ${p.invoice_no || ''} · ${fmtDate(p.invoice_date)}` : (p.status === 'Completed' ? 'Unbilled' : '—') },
+    { label: 'Invoice', value: isProjectInvoiced(p.invoice_status) ? `Invoiced ${p.invoice_no || ''} · ${fmtDate(p.invoice_date)}` : (p.status === 'Completed' ? 'Unbilled' : '—') },
   ];
   return {
     type: 'detail',
@@ -967,7 +967,7 @@ function inventoryByCategory(ctx, category) {
 function digestMyPending(ctx) {
   const pendingExpenses = (ctx.expenses || []).filter((e) => e.status === 'Pending');
   const expenseTotal = pendingExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const unbilled = (ctx.projects || []).filter((p) => p.status === 'Completed' && p.invoice_status !== 'Invoiced');
+  const unbilled = (ctx.projects || []).filter((p) => p.status === 'Completed' && !isProjectInvoiced(p.invoice_status));
   const unbilledTotal = unbilled.reduce((s, p) => s + projectTotal(p), 0);
   const overdue = (() => {
     const today = isoToday();

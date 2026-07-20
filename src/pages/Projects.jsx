@@ -23,7 +23,7 @@ import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExce
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
-  getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken
+  getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken, isProjectInvoiced
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
@@ -191,10 +191,10 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     let current = 0;
     if (['Confirmed', 'Ongoing', 'Completed', 'Closed'].includes(p.status)) current = 1;
     if (['Completed', 'Closed'].includes(p.status)) current = 2;
-    if (p.invoice_status === 'Invoiced') current = 3;
+    if (isProjectInvoiced(p.invoice_status)) current = 3;
     const grand = getProjectGrandTotal(p);
     const paid = (payments || []).filter(pay => pay.project_id === p.id).reduce((s, pay) => s + parseFloat(pay.amount || 0), 0);
-    if (p.invoice_status === 'Invoiced' && grand > 0 && paid >= grand - 1) current = 4;
+    if (isProjectInvoiced(p.invoice_status) && grand > 0 && paid >= grand - 1) current = 4;
     return { stages, current, paid, grand };
   };
 
@@ -816,7 +816,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     const demotionFromInvoiced =
       (fromStatus === 'Closed' || fromStatus === 'Completed') &&
       newStatus !== 'Closed' && newStatus !== 'Completed' &&
-      proj?.invoice_status === 'Invoiced';
+      isProjectInvoiced(proj?.invoice_status);
     const payload = { status: newStatus };
     if (demotionFromInvoiced) {
       Object.assign(payload, INVOICE_FIELD_RESET);
@@ -2586,17 +2586,17 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             {/* Invoice Card — owner-scoped: a non-owner manager must not see another
                 manager's client invoice no./amounts or print their Tax Invoice PDF. */}
             {canViewProjectFinancials && canManageProjectInvoices && (
-              <div className={`rounded-xl p-6 shadow-sm border transition-colors ${selectedProject.invoice_status === 'Invoiced' ? 'bg-green-50 border-green-200' : 'bg-white border-slate-100'}`}>
+              <div className={`rounded-xl p-6 shadow-sm border transition-colors ${isProjectInvoiced(selectedProject.invoice_status) ? 'bg-green-50 border-green-200' : 'bg-white border-slate-100'}`}>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
                     <FileText size={18} className="text-green-600" /> Invoice
                   </h3>
-                  <div className={`text-xs px-2 py-1 rounded-full font-medium ${selectedProject.invoice_status === 'Invoiced' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600'}`}>
+                  <div className={`text-xs px-2 py-1 rounded-full font-medium ${isProjectInvoiced(selectedProject.invoice_status) ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600'}`}>
                     {selectedProject.invoice_status || 'Not Invoiced'}
                   </div>
                 </div>
 
-                {selectedProject.invoice_status === 'Invoiced' ? (
+                {isProjectInvoiced(selectedProject.invoice_status) ? (
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between items-center">
                       <span className="text-slate-500 text-xs uppercase font-semibold">Invoice No.</span>
@@ -3820,7 +3820,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               <div className="flex-1">
                 <div className="flex items-center gap-2 mb-1">
                     <div className="font-bold text-lg text-slate-800">{project.project_name}</div>
-                    {project.invoice_status === 'Invoiced' && <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded border border-green-200" title={`Inv#: ${project.invoice_no}`}>INVOICED</span>}
+                    {isProjectInvoiced(project.invoice_status) && <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded border border-green-200" title={`Inv#: ${project.invoice_no}`}>INVOICED</span>}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">{clientName}</div>
               </div>
@@ -4128,7 +4128,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                       </div>
                       <div className="shrink-0 flex flex-col items-end gap-0.5">
                         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${STATUS_COLORS[p.status]}`}>{p.status}</span>
-                        {p.invoice_status === 'Invoiced' && <span className="text-[9px] text-green-600 font-medium">#{p.invoice_no}</span>}
+                        {isProjectInvoiced(p.invoice_status) && <span className="text-[9px] text-green-600 font-medium">#{p.invoice_no}</span>}
                         <span className="text-[10px] font-semibold text-slate-700">{formatCurrency(getProjectGrandTotal(p))}</span>
                       </div>
                     </label>

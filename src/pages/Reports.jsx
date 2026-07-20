@@ -8,7 +8,7 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2 } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2, isProjectInvoiced } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { purchaseGstSplit } from '../utils/aiAccountant';
@@ -154,7 +154,7 @@ const Reports = ({
       const clientInvoices = projects
         .filter(p => p.client_id === filterId && ['Completed', 'Closed'].includes(p.status))
         .map(p => {
-          const isInvoiced = p.invoice_status === 'Invoiced';
+          const isInvoiced = isProjectInvoiced(p.invoice_status);
           // Rule: Completed-not-invoiced projects appear in the client ledger
           // as UNBILLED entries (giving the full picture of what the client
           // owes). Once invoiced, the entry flips to INVOICED with the
@@ -428,7 +428,7 @@ const Reports = ({
       const unbilled = projects
         .filter(p => (!cid || p.client_id === cid)
           && ['Completed', 'Closed'].includes(p.status)
-          && p.invoice_status !== 'Invoiced')
+          && !isProjectInvoiced(p.invoice_status))
         .sort((a, b) => new Date(a.end_date || 0) - new Date(b.end_date || 0));
 
       const rows = [];

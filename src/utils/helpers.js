@@ -1,6 +1,21 @@
 // c:\APP\temp\rental-ops\src\utils\helpers.js
 import { GST_STATE_CODES, VALID_GST_RATES, GSTIN_CHECKSUM_CHARS } from './constants';
 
+const PROJECT_INVOICED_STATUSES = new Set([
+  'invoiced',
+  'clubbed invoice',
+  'clubbed invoiced',
+]);
+
+export const isProjectInvoiced = (status) =>
+  PROJECT_INVOICED_STATUSES.has(String(status || '').trim().toLowerCase().replace(/\s+/g, ' '));
+
+export const getProjectInvoiceReference = (project) => {
+  const invoiceNo = String(project?.invoice_no || '').trim();
+  if (!isProjectInvoiced(project?.invoice_status) || !invoiceNo) return null;
+  return { invoiceNo, invoiceDate: project?.invoice_date || '' };
+};
+
 // M-8 fix: round to paise to prevent float drift between line totals and grand total.
 export const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 

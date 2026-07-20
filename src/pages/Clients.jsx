@@ -10,7 +10,7 @@ import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken, isProjectInvoiced } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
@@ -74,7 +74,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
     // Revenue & billing
     // "Closed" status means project is fully done/invoiced per lifecycle (Closed = invoiced)
-    const invoicedProjects = clientProjects.filter(p => p.invoice_status === 'Invoiced' || p.status === 'Closed');
+    const invoicedProjects = clientProjects.filter(p => isProjectInvoiced(p.invoice_status) || p.status === 'Closed');
     const totalBilled = invoicedProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0);
     const totalReceived = clientPayments.reduce((s, p) => s + (p.amount || 0), 0);
     const outstanding = totalBilled - totalReceived;
@@ -94,7 +94,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const active = clientProjects.filter(p => ['Quoted', 'Confirmed', 'Ongoing'].includes(p.status));
     const completed = clientProjects.filter(p => ['Completed', 'Closed'].includes(p.status));
     // "Not invoiced" = Completed status (not yet Closed) and not explicitly marked Invoiced
-    const notInvoiced = completed.filter(p => p.status !== 'Closed' && p.invoice_status !== 'Invoiced');
+    const notInvoiced = completed.filter(p => p.status !== 'Closed' && !isProjectInvoiced(p.invoice_status));
 
     // GST
     const totalGST = invoicedProjects.reduce((s, p) => {
@@ -164,10 +164,10 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const branchSummaries = companyOptions.map(company => {
       const branchProjects = projects.filter(p => p.client_id === cid && getProjectCompanyId(p) === company.id);
       const branchPayments = payments.filter(p => p.client_id === cid && getPaymentCompanyId(p) === company.id);
-      const branchInvoiced = branchProjects.filter(p => p.invoice_status === 'Invoiced' || p.status === 'Closed');
+      const branchInvoiced = branchProjects.filter(p => isProjectInvoiced(p.invoice_status) || p.status === 'Closed');
       const branchBilled = branchInvoiced.reduce((s, p) => s + getProjectGrandTotal(p), 0);
       const branchReceived = branchPayments.reduce((s, p) => s + (p.amount || 0), 0);
-      const branchCompletedNotInvoiced = branchProjects.filter(p => ['Completed'].includes(p.status) && p.invoice_status !== 'Invoiced');
+      const branchCompletedNotInvoiced = branchProjects.filter(p => ['Completed'].includes(p.status) && !isProjectInvoiced(p.invoice_status));
       return {
         ...company,
         projects: branchProjects.length,
@@ -953,7 +953,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                       return (p.party_company_id || linkedProject?.party_company_id || 'primary') === branchId;
                     })
                     .reduce((s, p) => s + (p.amount || 0), 0);
-                  const invoiced = cp.filter(p => p.invoice_status === 'Invoiced').reduce((s, p) => s + getProjectGrandTotal(p), 0);
+                  const invoiced = cp.filter(p => isProjectInvoiced(p.invoice_status)).reduce((s, p) => s + getProjectGrandTotal(p), 0);
                   const outstanding = invoiced - clientPay;
                   return (
                     <button key={c.entity_key || c.id} onClick={() => setDashboardClient(c)}
@@ -1436,7 +1436,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                             <div className="text-right shrink-0">
                               <div className="font-bold text-slate-700 text-sm">{formatCurrency(grand)}</div>
                               <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusColor[p.status] || 'bg-slate-100 text-slate-600'}`}>{p.status}</span>
-                              {(p.invoice_status === 'Invoiced' || p.status === 'Closed') && <div className="text-xs text-green-600 mt-0.5">✓ Invoiced</div>}
+                              {(isProjectInvoiced(p.invoice_status) || p.status === 'Closed') && <div className="text-xs text-green-600 mt-0.5">✓ Invoiced</div>}
                             </div>
                           </div>
                         </div>
@@ -1581,9 +1581,9 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                                   <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${statusColor[p.status] || 'bg-slate-100 text-slate-600'}`}>{p.status}</span>
                                 </td>
                                 <td className="p-3 text-center">
-                                  {(p.invoice_status === 'Invoiced' || p.status === 'Closed') ? (
+                                  {(isProjectInvoiced(p.invoice_status) || p.status === 'Closed') ? (
                                     <div>
-                                      <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700">{p.status === 'Closed' && p.invoice_status !== 'Invoiced' ? 'Closed' : 'Invoiced'}</span>
+                                      <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700">{p.status === 'Closed' && !isProjectInvoiced(p.invoice_status) ? 'Closed' : 'Invoiced'}</span>
                                       {p.invoice_no && <div className="text-xs font-mono text-slate-500 mt-0.5">{p.invoice_no}</div>}
                                     </div>
                                   ) : (

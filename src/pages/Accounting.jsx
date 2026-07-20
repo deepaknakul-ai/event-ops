@@ -34,7 +34,7 @@ import {
   FileText,
   Search,
 } from 'lucide-react';
-import { formatCurrency, getFYFromDate, getProjectGSTBreakdown } from '../utils/helpers';
+import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import * as XLSX from '@e965/xlsx';
 import {
@@ -701,7 +701,7 @@ const Accounting = ({
     // From projects with invoice_status = 'Invoiced'
     const invoicedProjIds = new Set(taxInvoices.map(i => i.project_id).filter(Boolean));
     projects
-      .filter(p => (p.status === 'Completed' || p.status === 'Closed') && p.invoice_status === 'Invoiced' && !invoicedProjIds.has(p.id))
+      .filter(p => (p.status === 'Completed' || p.status === 'Closed') && isProjectInvoiced(p.invoice_status) && !invoicedProjIds.has(p.id))
       .filter(p => inFY(p.invoice_date || p.end_date))
       .forEach((p) => {
         const client = clientById[p.client_id];

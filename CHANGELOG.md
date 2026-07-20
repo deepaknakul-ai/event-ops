@@ -4,6 +4,21 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.23 — Complete server-side backup & restore
+
+Admin > Backup/Restore is now a real disaster-recovery tool. Backup auto-discovers
+**every** Firestore collection (previously 9 of 46 — financials, settings, counters,
+payroll and chat were all missing) and restore runs server-side through new admin-only
+callables (`adminExportData` / `adminRestoreData`), so rule-gated collections restore
+too. Firestore Timestamps survive the round-trip via a typed codec — the old JSON dump
+silently degraded every date to a plain map. Two restore modes: **Overwrite** (upsert)
+and **Exact snapshot** (wipe-first); legacy Admin and Data Portal backup files import
+without record duplication. Restoring chat history no longer push-notifies old
+messages. The standby project (`eventops-68df9`) now carries the full function set,
+rules and hosting for true failover parity — previously it had hosting only (no
+`verifyLogin`, so nobody could even sign in). Runbook + PITR/managed-backup commands:
+`docs/BACKUP_RESTORE.md`.
+
 ## 3.6.22 — Client ledger link: invoice → projects details
 
 On the shared client ledger, every **Inv# chip is now a link** — clicking it opens the

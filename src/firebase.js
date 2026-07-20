@@ -9,7 +9,7 @@ import {
 import { getStorage } from 'firebase/storage';
 import { getAnalytics } from "firebase/analytics";
 
-const firebaseConfig = {
+const defaultFirebaseConfig = {
   apiKey: "AIzaSyBjd7u6nS7FD2Xr4aRe0WBu7CgAvmeIjcQ",
   authDomain: "terms-a005e.firebaseapp.com",
   projectId: "terms-a005e",
@@ -18,6 +18,19 @@ const firebaseConfig = {
   appId: "1:269962655904:web:7a59b171cfd80ac4d6b1c5",
   measurementId: "G-D0HZ3NB682"
 };
+
+const envFirebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
+};
+
+const firebaseConfig = envFirebaseConfig.apiKey ? envFirebaseConfig : defaultFirebaseConfig;
+
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);

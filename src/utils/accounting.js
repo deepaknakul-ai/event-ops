@@ -1,5 +1,5 @@
 import { doc, runTransaction } from 'firebase/firestore';
-import { getFYFromDate, sumLogisticsRecord } from './helpers';
+import { getFYFromDate, isProjectInvoiced, sumLogisticsRecord } from './helpers';
 import { inputGSTLines } from './aiAccountant/knowledge.js';
 
 const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
@@ -663,7 +663,7 @@ export const buildAccountingSnapshot = ({
   // PROJECTS WITH INVOICE STATUS = 'Invoiced': These should go to Invoiced Sales
   const projectsMarkedAsInvoiced = projects
     .filter((p) => p.status === 'Completed' || p.status === 'Closed')
-    .filter((p) => p.invoice_status === 'Invoiced')
+    .filter((p) => isProjectInvoiced(p.invoice_status))
     .filter((p) => !invoicedProjectIds.has(p.id)) // Not already in tax_invoices
     .filter((p) => inFY(p.end_date || p.completion_date || p.invoice_date))
     .map((project) => {
@@ -698,7 +698,7 @@ export const buildAccountingSnapshot = ({
   const nonInvoicedSalesBook = projects
     .filter((p) => p.status === 'Completed' || p.status === 'Closed')
     .filter((p) => !invoicedProjectIds.has(p.id)) // Not in tax_invoices
-    .filter((p) => p.invoice_status !== 'Invoiced') // NOT marked as invoiced (catches all non-invoiced states)
+    .filter((p) => !isProjectInvoiced(p.invoice_status)) // NOT marked as invoiced (catches all non-invoiced states)
     .filter((p) => inFY(p.end_date || p.completion_date))
     .map((project) => {
       // Revenue Precedence: package_cost > itemised (no tax invoice for these)

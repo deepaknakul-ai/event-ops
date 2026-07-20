@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "terms-a005e"
-  }
+    "default": "terms-a005e",
+    "backup": "eventops-68df9"
+  },
+  "targets": {},
+  "etags": {}
 }

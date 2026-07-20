@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { appId } from '../utils/constants';
-import { formatCurrency, getProjectGrandTotal } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced } from '../utils/helpers';
 import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
@@ -114,19 +114,24 @@ const PublicLedger = () => {
         pids.forEach(pid => pid && invoicedPids.add(pid));
       });
 
-      // Unbilled completed/closed projects → quoted cost
+      // Projects not linked through a tax-invoice document may still be invoiced
+      // through the project bulk/group flow. Honour that project-side stamp so
+      // the public ledger shows its invoice number/date instead of "Unbilled".
       projects
         .filter(p => p.client_id === client.id && ['Completed', 'Closed'].includes(p.status) && !invoicedPids.has(p.id))
         .forEach(p => {
           const company = resolveCompany(p.party_company_id);
+          const invoiceRef = getProjectInvoiceReference(p);
           raw.push({
-            date: p.end_date,
-            desc: `Unbilled: ${p.project_name} (completed — awaiting invoice)`,
+            date: invoiceRef ? (invoiceRef.invoiceDate || p.end_date) : p.end_date,
+            desc: invoiceRef
+              ? `Invoice ${invoiceRef.invoiceNo}: ${p.project_name}`
+              : `Unbilled: ${p.project_name} (completed — awaiting invoice)`,
             debit: getProjectGrandTotal(p),
             credit: 0,
-            invoice_status: 'Unbilled',
-            invoice_no: '—',
-            invoice_date: '—',
+            invoice_status: invoiceRef ? 'Invoiced' : 'Unbilled',
+            invoice_no: invoiceRef?.invoiceNo || '—',
+            invoice_date: invoiceRef?.invoiceDate || '—',
             project_id: p.id,
             company_key: company.id,
             company_name: company.name,
@@ -768,7 +773,7 @@ const PublicLedger = () => {
                     {grp.billed != null && <span><span className="font-semibold text-slate-700">Invoice Amount:</span> <span className="text-indigo-700 font-bold">{formatCurrency(grp.billed)}</span></span>}
                     {grp.total > 0 && <span><span className="font-semibold text-slate-700">Projects Total:</span> <span className="text-slate-700 font-bold">{formatCurrency(grp.total)}</span></span>}
                     <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                      grp.invoice_status === 'Invoiced' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'
+                      isProjectInvoiced(grp.invoice_status) ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'
                     }`}>{grp.invoice_status}</span>
                   </div>
                   <div className="space-y-2">
@@ -941,7 +946,7 @@ const PublicLedger = () => {
                         </div>
                         {row.invoice_status && (
                           <div className="flex flex-wrap gap-1.5 mt-1">
-                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${row.invoice_status === 'Invoiced' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
+                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${isProjectInvoiced(row.invoice_status) ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
                               {row.invoice_status}
                             </span>
                             {row.invoice_no && row.invoice_no !== '—' && (
