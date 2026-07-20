@@ -46,10 +46,27 @@ const {
   projectSharedReimbursables,
   groupClientSharedExpenses,
 } = require('./ledger-project');
+const {
+  createCodec,
+  isValidCollectionName,
+  isValidDocId,
+  SUB_PARENTS,
+} = require('./backup');
 
 admin.initializeApp();
 const db = admin.firestore();
 const pbkdf2Async = promisify(pbkdf2);
+
+function firebaseConfigProjectId() {
+  try {
+    return JSON.parse(process.env.FIREBASE_CONFIG || '{}').projectId || null;
+  } catch {
+    return null;
+  }
+}
+
+const FUNCTION_PROJECT_ID = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || firebaseConfigProjectId() || 'terms-a005e';
+const FIREBASE_ADMIN_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${FUNCTION_PROJECT_ID}.iam.gserviceaccount.com`;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fyOf(dateStr) {
@@ -361,7 +378,7 @@ async function hashPasswordNode(plaintext) {
 // Replaces the client-side anonymous Firestore reads of employees/settings.
 // On success returns a Firebase custom token the client signs in with.
 exports.verifyLogin = onCall(
-  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, minInstances: 1, serviceAccount: 'firebase-adminsdk-fbsvc@terms-a005e.iam.gserviceaccount.com' },
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
   async (req) => {
     const { username, password, appId } = req.data || {};
     if (!username || !password || !appId) {
@@ -414,14 +431,40 @@ exports.verifyLogin = onCall(
 
       const adminEmp = empSnap.empty ? null : { id: empSnap.docs[0].id, ...empSnap.docs[0].data() };
       const uid = adminEmp?.id || `admin_${appId}`;
+      const adminProfile = {
+        name: adminEmp?.name || 'System Admin',
+        email: adminEmp?.email || 'admin@rentalops.com',
+        username: adminEmp?.username || 'admin',
+        role: 'admin',
+        status: adminEmp?.status || 'Active',
+        mobile1: adminEmp?.mobile1 || '',
+        address: adminEmp?.address || 'HQ',
+        photo_url: adminEmp?.photo_url || '',
+        id_proof_url: adminEmp?.id_proof_url || '',
+        address_proof_url: adminEmp?.address_proof_url || '',
+        updated_at: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      if (!adminEmp) {
+        await db.doc(`artifacts/${appId}/public/data/employees/${uid}`).set({
+          ...adminProfile,
+          created_at: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      await db.doc(`artifacts/${appId}/public/data/users/${uid}`).set({
+        email: adminProfile.email,
+        employee_id: uid,
+        role: adminProfile.role,
+        name: adminProfile.name,
+        updated_at: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
 
       const customToken = await admin.auth().createCustomToken(uid, { role: 'admin', appId });
       return {
         token: customToken,
         role: 'admin',
-        empId: adminEmp?.id || null,
-        name: adminEmp?.name || 'Administrator',
-        email: adminEmp?.email || null,
+        empId: uid,
+        name: adminProfile.name,
+        email: adminProfile.email,
       };
     }
 
@@ -480,6 +523,14 @@ exports.verifyLogin = onCall(
     if (Object.keys(updates).length > 0) await empDoc.ref.update(updates);
 
     const authEmail = emp.email || `${emp.id}@rental-ops.internal`;
+    await db.doc(`artifacts/${appId}/public/data/users/${emp.id}`).set({
+      email: authEmail,
+      employee_id: emp.id,
+      role: emp.role,
+      name: emp.name || '',
+      updated_at: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
     const customToken = await admin.auth().createCustomToken(emp.id, { role: emp.role, appId });
 
     return {
@@ -496,7 +547,7 @@ exports.verifyLogin = onCall(
 // Verifies the recovery key server-side (constant-time, rate-limited) and
 // resets the admin password.  Also handles first-time bootstrap setup.
 exports.resetAdminPassword = onCall(
-  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, serviceAccount: 'firebase-adminsdk-fbsvc@terms-a005e.iam.gserviceaccount.com' },
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
   async (req) => {
     const { appId, recoveryKey, newPassword } = req.data || {};
     if (!appId || !recoveryKey || !newPassword) {
@@ -513,12 +564,37 @@ exports.resetAdminPassword = onCall(
     if (!secSnap.exists) {
       const hashedPass = await hashPasswordNode(newPassword);
       const hashedKey = await hashPasswordNode(recoveryKey);
+      const adminUid = `admin_${appId}`;
+      const adminProfile = {
+        name: 'System Admin',
+        email: 'admin@rentalops.com',
+        username: 'admin',
+        role: 'admin',
+        status: 'Active',
+        mobile1: '',
+        address: 'HQ',
+        photo_url: '',
+        id_proof_url: '',
+        address_proof_url: '',
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+        updated_at: admin.firestore.FieldValue.serverTimestamp(),
+      };
       await secRef.set({
         admin_password: hashedPass,
         password_hashed: true,
         recovery_key_hash: hashedKey,
         failed_login_attempts: 0,
       });
+      await Promise.all([
+        db.doc(`artifacts/${appId}/public/data/employees/${adminUid}`).set(adminProfile, { merge: true }),
+        db.doc(`artifacts/${appId}/public/data/users/${adminUid}`).set({
+          email: adminProfile.email,
+          employee_id: adminUid,
+          role: adminProfile.role,
+          name: adminProfile.name,
+          updated_at: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true }),
+      ]);
       return { ok: true, mode: 'bootstrap' };
     }
 
@@ -1915,6 +1991,15 @@ exports.onChatMessageCreated = onDocumentCreated(
     const senderId = msg.sender_id || '';
     const ctype = msg.channel_type || '';
 
+    // Skip stale messages (created_at is an ISO string set by the client at
+    // send time). A backup restore recreates historical messages — without
+    // this guard every restored message would push-notify every recipient.
+    // Also shields against delayed trigger replays.
+    if (msg.created_at) {
+      const ageMs = Date.now() - new Date(msg.created_at).getTime();
+      if (Number.isFinite(ageMs) && ageMs > 10 * 60 * 1000) return;
+    }
+
     // 1. Resolve recipient employee ids.
     let recipientIds = [];
     if (ctype === 'team' || ctype === 'announcement') {
@@ -2419,6 +2504,133 @@ exports.scrubProjectEmbeddedMoney = onCall(
     if (pending > 0) await batch.commit();
     logger.info(`scrubProjectEmbeddedMoney: scrubbed ${scrubbed}, skipped ${skipped} (no sibling)`);
     return { scrubbed, skipped, projects: projSnap.size };
+  },
+);
+
+// ── Full-system backup & restore (admin-only) ────────────────────────────────
+// Server-side because a client-SDK restore is impossible under the rules:
+// project_financials/ai_usage deny all client writes, audit_logs/inventory_
+// movements/location_history deny update, chat_*/location docs are self-scoped,
+// and on an empty target the role lookup itself deadlocks. The Admin SDK
+// bypasses rules; access is gated by assertAdmin instead.
+//
+// Export is paged (client loops per collection with a cursor) so responses
+// stay far below the callable limit regardless of dataset size. Restore takes
+// ≤500 pre-serialized docs per call and batch-writes them. Firestore native
+// types survive via the ./backup codec (Timestamps → { __t:'ts', s, n }).
+const backupCodec = createCodec({
+  Timestamp: admin.firestore.Timestamp,
+  refFromPath: (p) => db.doc(p),
+});
+
+exports.adminExportData = onCall(
+  { region: 'us-central1', memory: '1GiB', timeoutSeconds: 540 },
+  async (req) => {
+    const { appId, collection: colName, cursor, pageSize } = req.data || {};
+    await assertAdmin(req.auth, appId);
+
+    // Mode 1 — no collection: discover them all. listCollections() on the data
+    // doc returns every live collection, so newly added collections can never
+    // be silently missing from a backup (the legacy exporters' core defect).
+    if (!colName) {
+      const cols = await db.doc(`artifacts/${appId}/public/data`).listCollections();
+      return { collections: cols.map((c) => c.id).sort() };
+    }
+
+    // Mode 2 — one page of one collection.
+    if (!isValidCollectionName(colName)) {
+      throw new HttpsError('invalid-argument', 'Invalid collection name');
+    }
+    const size = Math.max(1, Math.min(500, parseInt(pageSize, 10) || 300));
+    let q = db.collection(`artifacts/${appId}/public/data/${colName}`)
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .limit(size);
+    if (cursor) q = q.startAfter(String(cursor));
+    const snap = await q.get();
+
+    const subNames = SUB_PARENTS[colName] || [];
+    const docs = [];
+    for (const d of snap.docs) {
+      const entry = { id: d.id, d: backupCodec.encode(d.data()) };
+      for (const subName of subNames) {
+        const subSnap = await d.ref.collection(subName).get();
+        if (!subSnap.empty) {
+          entry.s = entry.s || {};
+          entry.s[subName] = subSnap.docs.map((sd) => ({ id: sd.id, d: backupCodec.encode(sd.data()) }));
+        }
+      }
+      docs.push(entry);
+    }
+    return { docs, nextCursor: snap.size === size ? snap.docs[snap.size - 1].id : null };
+  },
+);
+
+exports.adminRestoreData = onCall(
+  { region: 'us-central1', memory: '1GiB', timeoutSeconds: 540 },
+  async (req) => {
+    const { appId, collection: colName, docs, wipe, merge, registerApp } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    if (!isValidCollectionName(colName)) {
+      throw new HttpsError('invalid-argument', 'Invalid collection name');
+    }
+    const colPath = `artifacts/${appId}/public/data/${colName}`;
+
+    // Re-register the tenant so scheduled functions (draft poster, reminders)
+    // pick it up after a restore into a fresh project. arrayUnion — never
+    // clobbers other tenants in the shared registry doc.
+    if (registerApp) {
+      await db.doc('meta/active_apps').set(
+        { ids: admin.firestore.FieldValue.arrayUnion(appId) }, { merge: true },
+      );
+    }
+
+    // Op 1 — wipe (exact-restore mode): recursive so subcollections go too.
+    // Client calls this once per collection before streaming its docs.
+    if (wipe) {
+      await db.recursiveDelete(db.collection(colPath));
+      logger.info(`adminRestoreData: wiped ${colPath}`);
+      return { ok: true, wiped: true };
+    }
+
+    // Op 2 — write a chunk of docs.
+    if (!Array.isArray(docs) || docs.length === 0) {
+      throw new HttpsError('invalid-argument', 'docs required');
+    }
+    if (docs.length > 500) {
+      throw new HttpsError('invalid-argument', 'Max 500 docs per call');
+    }
+    const subNames = SUB_PARENTS[colName] || [];
+    let batch = db.batch(); let pending = 0; let written = 0; let subWritten = 0;
+    const commitIfFull = async () => {
+      if (pending >= 400) { await batch.commit(); batch = db.batch(); pending = 0; }
+    };
+    for (const entry of docs) {
+      if (!entry || !isValidDocId(entry.id)) {
+        throw new HttpsError('invalid-argument', `Invalid doc id in ${colName}`);
+      }
+      const data = backupCodec.decode(entry.d || {});
+      const ref = db.doc(`${colPath}/${entry.id}`);
+      if (merge) batch.set(ref, data, { merge: true }); else batch.set(ref, data);
+      pending += 1; written += 1; await commitIfFull();
+      if (entry.s) {
+        for (const [subName, subDocs] of Object.entries(entry.s)) {
+          if (!subNames.includes(subName)) {
+            throw new HttpsError('invalid-argument', `Unknown subcollection ${colName}/${subName}`);
+          }
+          if (!Array.isArray(subDocs)) continue;
+          for (const sd of subDocs) {
+            if (!sd || !isValidDocId(sd.id)) {
+              throw new HttpsError('invalid-argument', `Invalid doc id in ${colName}/${subName}`);
+            }
+            batch.set(ref.collection(subName).doc(sd.id), backupCodec.decode(sd.d || {}));
+            pending += 1; subWritten += 1; await commitIfFull();
+          }
+        }
+      }
+    }
+    if (pending > 0) await batch.commit();
+    logger.info(`adminRestoreData: ${colName} wrote ${written} doc(s), ${subWritten} subdoc(s), merge=${!!merge}`);
+    return { ok: true, written, subWritten };
   },
 );
 

@@ -151,7 +151,7 @@ const DataPortal = ({ db, appId, role, logAction, addToast }) => {
       const confirmed = await confirmDialog(
         `Import ${collections.length} collection(s)?\n\n` +
         preview.map((p) => `• ${p.label}: ${p.count} records`).join('\n') +
-        `\n\nThis will ADD records (not replace existing). Duplicate IDs will be skipped.`
+        `\n\nNew records will be created. Existing records with matching IDs will be UPDATED (fields in the file overwrite current values).`
       );
       if (!confirmed) { setBusy(''); return; }
 

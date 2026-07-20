@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { confirmDialog } from '../utils/dialog';
 import { notify } from '../utils/toast';
 import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin, Sparkles, Database } from 'lucide-react';
-import { collection, getDocs, doc, getDoc, setDoc, addDoc, writeBatch, deleteField } from 'firebase/firestore';
+import { doc, getDoc, setDoc, writeBatch, deleteField } from 'firebase/firestore';
 import { httpsCallable, getFunctions } from 'firebase/functions';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
@@ -51,6 +51,12 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const allowed = can(role, 'admin_tools', 'view');
   const [backupStatus, setBackupStatus] = useState('idle');
   const [restoreStatus, setRestoreStatus] = useState('idle');
+  const [backupProgress, setBackupProgress] = useState('');
+  const [restoreProgress, setRestoreProgress] = useState('');
+  const [backupError, setBackupError] = useState('');
+  const [restoreError, setRestoreError] = useState('');
+  const [restoreMode, setRestoreMode] = useState('replace'); // 'replace' | 'exact'
+  const [restoreReport, setRestoreReport] = useState(null);
   const [migrating, setMigrating] = useState('');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
   const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2, msme_reg: '', signature: '' });
@@ -139,8 +145,6 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     fetchSettings();
   }, [db, appId, allowed]);
 
-  const collections = ['projects', 'clients', 'inventory', 'expenses', 'employees', 'advances', 'payments', 'payouts', 'audit_logs'];
-
   // Generic one-time migration runner (see MIGRATIONS). confirmMsg='' skips the
   // confirm (used by the non-destructive commission recalc).
   const runMigration = async (key, fnName, fmt, confirmMsg = '') => {
@@ -153,72 +157,189 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     finally { setMigrating(''); }
   };
 
+  // ── Backup & Restore ──────────────────────────────────────────────────────
+  // Server-side via the adminExportData/adminRestoreData callables (Admin SDK).
+  // The old client-SDK version could neither read nor write the rule-gated
+  // collections (project_financials, audit_logs updates, chat, …) and its raw
+  // JSON.stringify degraded every Firestore Timestamp to a plain map. The
+  // server codec tags native types ({ __t:'ts', s, n }) so they round-trip.
+
   const handleBackup = async () => {
     setBackupStatus('loading');
+    setBackupError('');
+    setBackupProgress('Discovering collections…');
     try {
-      const backupData = {};
-      for (const colName of collections) {
-        const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', colName));
-        backupData[colName] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const exportCall = httpsCallable(getFunctions(), 'adminExportData');
+      const { collections: cols } = (await exportCall({ appId })).data;
+      const out = {
+        _meta: {
+          format: 'terms-backup',
+          version: 2,
+          exported_at: new Date().toISOString(),
+          app_id: appId,
+          collections: cols,
+          counts: {},
+        },
+        data: {},
+      };
+      let total = 0;
+      for (let i = 0; i < cols.length; i++) {
+        const col = cols[i];
+        const rows = [];
+        let cursor = null;
+        do {
+          setBackupProgress(`${col} (${i + 1}/${cols.length}) — ${rows.length} docs…`);
+          const res = (await exportCall({ appId, collection: col, cursor })).data;
+          rows.push(...res.docs);
+          cursor = res.nextCursor;
+        } while (cursor);
+        out.data[col] = rows;
+        out._meta.counts[col] = rows.length;
+        total += rows.length;
       }
 
-      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `rental_ops_backup_${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `full_backup_${new Date().toISOString().split('T')[0]}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      URL.revokeObjectURL(url);
       setBackupStatus('success');
-      logAction('admin', 'backup', 'system', {}, 'Full System Backup');
+      setBackupProgress(`${total} docs across ${cols.length} collections`);
+      logAction('admin', 'backup', 'system', { collections: cols.length, docs: total }, 'Full System Backup');
     } catch (error) {
       console.error(error);
       setBackupStatus('error');
+      setBackupError(error.message || 'Backup failed');
     }
-    setTimeout(() => setBackupStatus('idle'), 3000);
+    setTimeout(() => { setBackupStatus('idle'); setBackupProgress(''); }, 6000);
   };
+
+  // Accepts all three historical file formats and normalizes to
+  // { collections: { name: [{id, d, s?}] }, legacy, dropped }.
+  const normalizeBackupFile = (raw) => {
+    if (!raw || typeof raw !== 'object') return null;
+    let dropped = 0;
+    // Native v2 (this tool): { _meta: {format:'terms-backup'}, data: {col: [{id, d}]} }
+    if (raw._meta?.format === 'terms-backup' && raw.data) {
+      const cols = {};
+      for (const [k, rows] of Object.entries(raw.data)) {
+        if (!Array.isArray(rows) || !rows.length) continue;
+        const withId = rows.filter((r) => r && r.id);
+        dropped += rows.length - withId.length;
+        if (withId.length) cols[k] = withId;
+      }
+      return { collections: cols, legacy: false, dropped };
+    }
+    // Data Portal v1 export: { _meta: {collections:[...]}, col: [{_id, ...fields}] }
+    if (raw._meta && Array.isArray(raw._meta.collections)) {
+      const cols = {};
+      for (const k of raw._meta.collections) {
+        const rows = raw[k];
+        if (!Array.isArray(rows) || !rows.length) continue;
+        const withId = rows.filter((r) => r && r._id);
+        dropped += rows.length - withId.length;
+        if (withId.length) cols[k] = withId.map(({ _id, ...rest }) => ({ id: _id, d: rest }));
+      }
+      return { collections: cols, legacy: true, dropped };
+    }
+    // Legacy AdminTools backup: { col: [{id, ...fields}] } with no _meta.
+    if (!raw._meta) {
+      const cols = {};
+      for (const [k, rows] of Object.entries(raw)) {
+        if (!Array.isArray(rows) || !rows.length || typeof rows[0] !== 'object') continue;
+        const withId = rows.filter((r) => r && r.id);
+        dropped += rows.length - withId.length;
+        if (withId.length) cols[k] = withId.map(({ id, ...rest }) => ({ id, d: rest }));
+      }
+      if (Object.keys(cols).length) return { collections: cols, legacy: true, dropped };
+    }
+    return null;
+  };
+
+  // Identity/bootstrap collections restore first so logins and role checks
+  // work even if a later collection fails mid-restore.
+  const RESTORE_FIRST = ['employees', 'users', 'userRoles', 'settings'];
 
   const handleRestore = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    e.target.value = null;
+    setRestoreError('');
+    setRestoreReport(null);
 
-    if (!await confirmDialog("WARNING: This will overwrite existing data with the same IDs. Continue?")) {
-        e.target.value = null;
-        return;
+    let parsed;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch {
+      notify('Invalid JSON file.', 'error');
+      return;
     }
+    const norm = normalizeBackupFile(parsed);
+    if (!norm) { notify('Unrecognized backup format.', 'error'); return; }
+    const colNames = Object.keys(norm.collections);
+    if (!colNames.length) { notify('Backup file contains no data.', 'error'); return; }
+    const totalDocs = Object.values(norm.collections).reduce((s, r) => s + r.length, 0);
+    const exact = restoreMode === 'exact';
+
+    const confirmLines = [
+      `Restore ${totalDocs} docs across ${colNames.length} collection(s)?`,
+      '',
+      exact
+        ? 'EXACT MODE: each collection in the file is WIPED first — anything created since this backup is DELETED.'
+        : 'Overwrite mode: file docs replace matching IDs; records created since the backup are kept.',
+      norm.legacy ? 'Legacy file: its timestamps were stored in degraded form and restore as-is.' : '',
+      norm.dropped ? `${norm.dropped} record(s) without IDs will be skipped.` : '',
+    ].filter(Boolean);
+    if (!await confirmDialog(confirmLines.join('\n'))) return;
 
     setRestoreStatus('loading');
-    const reader = new FileReader();
-    reader.onload = async (event) => {
+    const restoreCall = httpsCallable(getFunctions(), 'adminRestoreData');
+    const ordered = [
+      ...RESTORE_FIRST.filter((c) => c in norm.collections),
+      ...colNames.filter((c) => !RESTORE_FIRST.includes(c)).sort(),
+    ];
+    const report = [];
+    let firstCall = true; // first server call re-registers the tenant in meta/active_apps
+    for (let i = 0; i < ordered.length; i++) {
+      const col = ordered[i];
+      const rows = norm.collections[col];
       try {
-        const data = JSON.parse(event.target.result);
-
-        for (const colName of Object.keys(data)) {
-          if (!collections.includes(colName)) continue;
-
-          const items = data[colName];
-          for (const item of items) {
-            const { id, ...docData } = item;
-            if (id) {
-               await setDoc(doc(db, 'artifacts', appId, 'public', 'data', colName, id), docData);
-            } else {
-               await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colName), docData);
-            }
-          }
+        let written = 0;
+        if (exact) {
+          setRestoreProgress(`Wiping ${col} (${i + 1}/${ordered.length})…`);
+          await restoreCall({ appId, collection: col, wipe: true, registerApp: firstCall });
+          firstCall = false;
         }
-        setRestoreStatus('success');
-        notify("Restore completed successfully. Please refresh the page.", 'error');
-        logAction('admin', 'restore', 'system', {}, 'Full System Restore');
+        for (let o = 0; o < rows.length; o += 300) {
+          const chunk = rows.slice(o, o + 300);
+          setRestoreProgress(`${col} (${i + 1}/${ordered.length}) — ${Math.min(o + 300, rows.length)}/${rows.length} docs`);
+          const res = (await restoreCall({ appId, collection: col, docs: chunk, registerApp: firstCall })).data;
+          firstCall = false;
+          written += res.written || 0;
+        }
+        report.push({ col, written, ok: true });
       } catch (error) {
-        console.error(error);
-        setRestoreStatus('error');
-        notify("Error during restore. Check console.", 'error');
+        console.error(`Restore failed for ${col}:`, error);
+        report.push({ col, ok: false, error: error.message || 'failed' });
       }
-      e.target.value = null;
-      setTimeout(() => setRestoreStatus('idle'), 3000);
-    };
-    reader.readAsText(file);
+    }
+    const failed = report.filter((r) => !r.ok);
+    setRestoreReport(report);
+    setRestoreProgress('');
+    if (failed.length) {
+      setRestoreStatus('error');
+      setRestoreError(`${failed.length} of ${report.length} collection(s) failed — see list below.`);
+      notify(`Restore finished with errors in: ${failed.map((f) => f.col).join(', ')}`, 'error');
+    } else {
+      setRestoreStatus('success');
+      notify('Restore completed successfully. Refresh the page to reload data.', 'success');
+    }
+    logAction('admin', 'restore', 'system', { mode: restoreMode, collections: report.length, failed: failed.length }, 'Full System Restore');
+    setTimeout(() => setRestoreStatus('idle'), 6000);
   };
 
   const handleUpdateSecurity = async () => {
@@ -647,21 +768,43 @@ const AdminTools = ({ db, appId, logAction, role }) => {
        {activeTab === 'system' && <><div className="grid md:grid-cols-2 gap-6">
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
              <h3 className="font-bold text-lg mb-2 flex items-center gap-2 text-slate-800"><Download size={20} /> Backup Data</h3>
-             <p className="text-slate-500 text-sm mb-4">Download a full JSON backup of all system data (Projects, Clients, Inventory, etc).</p>
+             <p className="text-slate-500 text-sm mb-4">Downloads a complete JSON snapshot of every Firestore collection — auto-discovered, including gated financials, settings, counters and chat history. Storage file attachments (receipts, scans, logos) are <span className="font-medium">not</span> included. The file contains credentials and financial data — store it securely.</p>
              <button onClick={handleBackup} disabled={backupStatus === 'loading'} className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:bg-indigo-300">
-                {backupStatus === 'loading' ? 'Generating Backup...' : 'Download Backup'}
+                {backupStatus === 'loading' ? 'Backing up…' : 'Download Full Backup'}
              </button>
-             {backupStatus === 'success' && <span className="ml-3 text-green-600 text-sm font-medium">Backup Downloaded!</span>}
+             {backupStatus === 'loading' && backupProgress && <div className="mt-2 text-indigo-600 text-sm">{backupProgress}</div>}
+             {backupStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Backup downloaded — {backupProgress}</div>}
+             {backupStatus === 'error' && <div className="mt-2 text-red-600 text-sm font-medium">Backup failed: {backupError}</div>}
           </div>
 
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
              <h3 className="font-bold text-lg mb-2 flex items-center gap-2 text-slate-800"><Upload size={20} /> Restore Data</h3>
-             <p className="text-slate-500 text-sm mb-4">Upload a previously generated JSON backup file. Existing records with matching IDs will be updated.</p>
+             <p className="text-slate-500 text-sm mb-4">Restores server-side, so rule-gated collections (financials, audit logs, chat) restore too. Accepts full backups from this tool plus legacy Admin / Data Portal export files.</p>
+             <div className="mb-3 space-y-1.5 text-sm text-slate-700">
+                <label className="flex items-start gap-2 cursor-pointer">
+                   <input type="radio" name="restoreMode" checked={restoreMode === 'replace'} onChange={() => setRestoreMode('replace')} className="mt-1" />
+                   <span><span className="font-medium">Overwrite</span> — file docs replace matching IDs; records created since the backup are kept</span>
+                </label>
+                <label className="flex items-start gap-2 cursor-pointer">
+                   <input type="radio" name="restoreMode" checked={restoreMode === 'exact'} onChange={() => setRestoreMode('exact')} className="mt-1" />
+                   <span><span className="font-medium text-rose-700">Exact snapshot</span> — wipes each collection in the file first; anything created after the backup is deleted</span>
+                </label>
+             </div>
              <div className="relative">
                 <input type="file" accept=".json" onChange={handleRestore} disabled={restoreStatus === 'loading'} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
              </div>
-             {restoreStatus === 'loading' && <div className="mt-2 text-indigo-600 text-sm">Restoring data... please wait...</div>}
-             {restoreStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Restore Complete!</div>}
+             {restoreStatus === 'loading' && <div className="mt-2 text-indigo-600 text-sm">{restoreProgress || 'Restoring…'}</div>}
+             {restoreStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Restore complete! Refresh the page to reload data.</div>}
+             {restoreStatus === 'error' && <div className="mt-2 text-red-600 text-sm font-medium">{restoreError}</div>}
+             {restoreReport && (
+                <ul className="mt-2 max-h-40 overflow-y-auto space-y-0.5 text-xs">
+                   {restoreReport.map((r) => (
+                      <li key={r.col} className={r.ok ? 'text-slate-500' : 'text-rose-600 font-medium'}>
+                         {r.ok ? `✓ ${r.col} — ${r.written} docs` : `✕ ${r.col} — ${r.error}`}
+                      </li>
+                   ))}
+                </ul>
+             )}
           </div>
        </div>
 
