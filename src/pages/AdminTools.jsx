@@ -4,6 +4,9 @@ import { notify } from '../utils/toast';
 import { Download, Upload, Briefcase, Calendar, Shield, ImageIcon as Image, CreditCard, Plus, Trash2, Edit, CheckCircle, Lock, Users, LockKeyhole, Unlock, Tag, X, Mail, FileCheck, Bell, MapPin, Sparkles, Database } from 'lucide-react';
 import { doc, getDoc, setDoc, writeBatch, deleteField } from 'firebase/firestore';
 import { httpsCallable, getFunctions } from 'firebase/functions';
+import { ref, getBlob, uploadBytes } from 'firebase/storage';
+import JSZip from 'jszip';
+import { storage } from '../firebase';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
 import { getFinancialYear } from '../utils/helpers';
@@ -57,6 +60,12 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [restoreError, setRestoreError] = useState('');
   const [restoreMode, setRestoreMode] = useState('replace'); // 'replace' | 'exact'
   const [restoreReport, setRestoreReport] = useState(null);
+  const [storageBackupStatus, setStorageBackupStatus] = useState('idle');
+  const [storageBackupProgress, setStorageBackupProgress] = useState('');
+  const [storageBackupError, setStorageBackupError] = useState('');
+  const [storageRestoreStatus, setStorageRestoreStatus] = useState('idle');
+  const [storageRestoreProgress, setStorageRestoreProgress] = useState('');
+  const [storageRestoreError, setStorageRestoreError] = useState('');
   const [migrating, setMigrating] = useState('');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
   const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2, msme_reg: '', signature: '' });
@@ -340,6 +349,123 @@ const AdminTools = ({ db, appId, logAction, role }) => {
     }
     logAction('admin', 'restore', 'system', { mode: restoreMode, collections: report.length, failed: failed.length }, 'Full System Restore');
     setTimeout(() => setRestoreStatus('idle'), 6000);
+  };
+
+  // ── Storage backup & restore (file attachments) ───────────────────────────
+  // The JSON backup covers Firestore only; uploaded files (expense proofs,
+  // PI scans, chat attachments, draft attachments) live in Storage. The
+  // adminListStorage callable produces the manifest; the files themselves
+  // download through the Storage SDK and pack into a zip alongside it.
+
+  const handleStorageBackup = async () => {
+    setStorageBackupStatus('loading');
+    setStorageBackupError('');
+    setStorageBackupProgress('Listing files…');
+    try {
+      const listCall = httpsCallable(getFunctions(), 'adminListStorage');
+      const plan = (await listCall({ appId })).data;
+      const manifest = [];
+      for (let i = 0; i < plan.prefixes.length; i++) {
+        let token = null;
+        do {
+          const res = (await listCall({ appId, prefixIndex: i, pageToken: token })).data;
+          manifest.push(...res.files);
+          token = res.nextPageToken;
+          setStorageBackupProgress(`Listing ${plan.prefixes[i]} — ${manifest.length} files`);
+        } while (token);
+      }
+      const totalMB = manifest.reduce((s, f) => s + f.size, 0) / 1048576;
+      const zip = new JSZip();
+      zip.file('storage-manifest.json', JSON.stringify({
+        format: 'terms-storage-backup', version: 1,
+        exported_at: new Date().toISOString(), app_id: appId, bucket: plan.bucket,
+        other_files_outside_prefixes: plan.otherFiles || 0, files: manifest,
+      }, null, 2));
+      let done = 0;
+      const failed = [];
+      for (const f of manifest) {
+        try {
+          const blob = await getBlob(ref(storage, f.path));
+          zip.file(f.path, blob);
+        } catch (err) {
+          failed.push(f.path);
+          console.error('Storage backup: download failed', f.path, err);
+        }
+        done += 1;
+        if (done % 5 === 0 || done === manifest.length) {
+          setStorageBackupProgress(`Downloading ${done}/${manifest.length} files (${totalMB.toFixed(1)} MB total)…`);
+        }
+      }
+      setStorageBackupProgress('Compressing…');
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `storage_backup_${new Date().toISOString().split('T')[0]}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStorageBackupStatus(failed.length ? 'error' : 'success');
+      if (failed.length) setStorageBackupError(`${failed.length} file(s) failed to download and are missing from the zip.`);
+      setStorageBackupProgress(
+        `${manifest.length - failed.length} files, ${(blob.size / 1048576).toFixed(1)} MB` +
+        (plan.otherFiles ? ` — ${plan.otherFiles} file(s) outside known app prefixes NOT included` : ''),
+      );
+      logAction('admin', 'backup', 'storage', { files: manifest.length, failed: failed.length }, 'Storage Backup');
+    } catch (error) {
+      console.error(error);
+      setStorageBackupStatus('error');
+      setStorageBackupError(error.message || 'Storage backup failed');
+    }
+    setTimeout(() => setStorageBackupStatus('idle'), 8000);
+  };
+
+  const handleStorageRestore = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = null;
+    setStorageRestoreError('');
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const manifestEntry = zip.file('storage-manifest.json');
+      const manifest = manifestEntry ? JSON.parse(await manifestEntry.async('string')) : null;
+      const entries = Object.values(zip.files).filter((f) => !f.dir && f.name !== 'storage-manifest.json');
+      if (!entries.length) { notify('Zip contains no files.', 'error'); return; }
+      const typeByPath = {};
+      (manifest?.files || []).forEach((m) => { typeByPath[m.path] = m.contentType; });
+      if (!await confirmDialog(`Upload ${entries.length} file(s) to Storage?\nExisting files at the same paths will be overwritten.`)) return;
+      setStorageRestoreStatus('loading');
+      let done = 0;
+      const failed = [];
+      for (const entry of entries) {
+        try {
+          const blob = await entry.async('blob');
+          await uploadBytes(ref(storage, entry.name), blob,
+            typeByPath[entry.name] ? { contentType: typeByPath[entry.name] } : undefined);
+        } catch (err) {
+          failed.push(entry.name);
+          console.error('Storage restore: upload failed', entry.name, err);
+        }
+        done += 1;
+        setStorageRestoreProgress(`Uploading ${done}/${entries.length}…`);
+      }
+      setStorageRestoreStatus(failed.length ? 'error' : 'success');
+      setStorageRestoreProgress('');
+      if (failed.length) {
+        setStorageRestoreError(`${failed.length} file(s) failed to upload — see console.`);
+        notify(`Storage restore finished with ${failed.length} failure(s).`, 'error');
+      } else {
+        notify('Storage restore complete.', 'success');
+      }
+      logAction('admin', 'restore', 'storage', { files: entries.length, failed: failed.length }, 'Storage Restore');
+    } catch (error) {
+      console.error(error);
+      setStorageRestoreStatus('error');
+      setStorageRestoreError(error.message || 'Invalid zip file');
+      notify('Storage restore failed.', 'error');
+    }
+    setTimeout(() => setStorageRestoreStatus('idle'), 8000);
   };
 
   const handleUpdateSecurity = async () => {
@@ -775,6 +901,15 @@ const AdminTools = ({ db, appId, logAction, role }) => {
              {backupStatus === 'loading' && backupProgress && <div className="mt-2 text-indigo-600 text-sm">{backupProgress}</div>}
              {backupStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Backup downloaded — {backupProgress}</div>}
              {backupStatus === 'error' && <div className="mt-2 text-red-600 text-sm font-medium">Backup failed: {backupError}</div>}
+             <div className="mt-4 pt-4 border-t border-slate-100">
+                <p className="text-slate-500 text-sm mb-3">File attachments (expense proofs, invoice scans, chat uploads) are backed up separately as a ZIP with a manifest.</p>
+                <button onClick={handleStorageBackup} disabled={storageBackupStatus === 'loading'} className="bg-slate-700 text-white px-4 py-2 rounded hover:bg-slate-800 disabled:bg-slate-400">
+                   {storageBackupStatus === 'loading' ? 'Backing up files…' : 'Download Storage Backup (ZIP)'}
+                </button>
+                {storageBackupStatus === 'loading' && storageBackupProgress && <div className="mt-2 text-indigo-600 text-sm">{storageBackupProgress}</div>}
+                {storageBackupStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Storage backup downloaded — {storageBackupProgress}</div>}
+                {storageBackupStatus === 'error' && <div className="mt-2 text-red-600 text-sm font-medium">{storageBackupError}</div>}
+             </div>
           </div>
 
           <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
@@ -805,6 +940,13 @@ const AdminTools = ({ db, appId, logAction, role }) => {
                    ))}
                 </ul>
              )}
+             <div className="mt-4 pt-4 border-t border-slate-100">
+                <p className="text-slate-500 text-sm mb-2">Restore file attachments from a Storage Backup ZIP. Files upload to their original paths.</p>
+                <input type="file" accept=".zip" onChange={handleStorageRestore} disabled={storageRestoreStatus === 'loading'} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"/>
+                {storageRestoreStatus === 'loading' && <div className="mt-2 text-indigo-600 text-sm">{storageRestoreProgress || 'Uploading…'}</div>}
+                {storageRestoreStatus === 'success' && <div className="mt-2 text-green-600 text-sm font-medium">Storage restore complete!</div>}
+                {storageRestoreStatus === 'error' && <div className="mt-2 text-red-600 text-sm font-medium">{storageRestoreError}</div>}
+             </div>
           </div>
        </div>
 

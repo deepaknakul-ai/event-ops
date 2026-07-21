@@ -2634,3 +2634,49 @@ exports.adminRestoreData = onCall(
   },
 );
 
+// Storage prefixes holding this tenant's uploaded files. The client's Storage
+// backup walks exactly these; anything outside them is counted and reported
+// (never silently dropped) via the `otherFiles` probe below.
+const storagePrefixes = (appId) => [
+  `artifacts/${appId}/`,          // chat uploads + journal draft attachments
+  `expense-proofs/${appId}/`,
+  `purchase-invoices/${appId}/`,
+  `reimbursable-proofs/${appId}/`,
+];
+
+exports.adminListStorage = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId, prefixIndex, pageToken } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    const prefixes = storagePrefixes(appId);
+    const bucket = admin.storage().bucket();
+
+    // Mode 1 — no prefixIndex: return the prefix plan plus a count of files
+    // OUTSIDE the known prefixes so a drifted upload path can't hide.
+    if (prefixIndex === undefined || prefixIndex === null) {
+      const [all] = await bucket.getFiles({ maxResults: 5000, autoPaginate: false });
+      const other = all.filter((f) => !prefixes.some((p) => f.name.startsWith(p))).length;
+      return { prefixes, bucket: bucket.name, otherFiles: other, sampled: all.length >= 5000 };
+    }
+
+    // Mode 2 — one page of one prefix.
+    const idx = parseInt(prefixIndex, 10);
+    if (!(idx >= 0 && idx < prefixes.length)) {
+      throw new HttpsError('invalid-argument', 'Bad prefixIndex');
+    }
+    const [files, nextQuery] = await bucket.getFiles({
+      prefix: prefixes[idx], maxResults: 1000, pageToken: pageToken || undefined, autoPaginate: false,
+    });
+    return {
+      files: files.map((f) => ({
+        path: f.name,
+        size: Number(f.metadata.size || 0),
+        contentType: f.metadata.contentType || 'application/octet-stream',
+        updated: f.metadata.updated || '',
+      })),
+      nextPageToken: (nextQuery && nextQuery.pageToken) || null,
+    };
+  },
+);
+

@@ -4,6 +4,18 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.24 — Storage backup + warm standby
+
+Closes the last backup gap: **file attachments**. Admin > Backup now also downloads a
+Storage Backup ZIP (expense proofs, purchase-invoice scans, reimbursable proofs, chat
+uploads) with a manifest, via the new `adminListStorage` callable; the Restore card
+uploads a ZIP back to the original paths. Files outside the known app prefixes are
+counted and reported, never silently skipped. The standby project (`eventops-68df9`)
+is now a **warm standby**: `scripts/sync-to-standby.cjs` copied all 6,469 Firestore
+docs (native-type-preserving, no JSON intermediate) and all Storage files, registered
+the tenant, and verified per-collection counts — the standby app is fully loginable
+with production credentials. Re-run the script to refresh the snapshot.
+
 ## 3.6.23 — Complete server-side backup & restore
 
 Admin > Backup/Restore is now a real disaster-recovery tool. Backup auto-discovers
