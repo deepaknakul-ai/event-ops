@@ -4,6 +4,20 @@ The app version is stamped from `package.json` into the running site (footer +
 `/version.json`) via `vite.config.js` → `src/version.js`. Bump with
 `npm version minor|patch` (or the `release:*` scripts) and add an entry here.
 
+## 3.6.25 — WhatsApp AI copilot
+
+Your books, on WhatsApp. Registered team members (matched by their employee mobile,
+or an explicit allowlist) can message the business WhatsApp number and: **ask
+questions** in English/Hinglish — "Acme ka balance kya hai", "is month GST kitna
+banta hai" — answered by the AI accountant from a server-built books digest (a
+verbatim port of the app's snapshot builder, guarded by a parity test); or **send a
+supplier invoice photo/PDF**, which is extracted and parked as an approval-required
+journal draft with the original file attached. Books answers are role-gated
+(admin/accountant), rate-limited and metered into the existing AI budget; every
+conversation is logged to an admin-only `wa_conversations` collection. Setup
+(Meta WhatsApp Cloud API) in Admin > WhatsApp Copilot + docs/WHATSAPP_COPILOT.md.
+Inert until configured.
+
 ## 3.6.24 — Storage backup + warm standby
 
 Closes the last backup gap: **file attachments**. Admin > Backup now also downloads a

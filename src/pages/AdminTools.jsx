@@ -6,7 +6,7 @@ import { doc, getDoc, setDoc, writeBatch, deleteField } from 'firebase/firestore
 import { httpsCallable, getFunctions } from 'firebase/functions';
 import { ref, getBlob, uploadBytes } from 'firebase/storage';
 import JSZip from 'jszip';
-import { storage } from '../firebase';
+import { storage, app } from '../firebase';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
 import { getFinancialYear } from '../utils/helpers';
@@ -66,6 +66,32 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   const [storageRestoreStatus, setStorageRestoreStatus] = useState('idle');
   const [storageRestoreProgress, setStorageRestoreProgress] = useState('');
   const [storageRestoreError, setStorageRestoreError] = useState('');
+  const [waForm, setWaForm] = useState({ enabled: false, access_token: '', phone_number_id: '', verify_token: '', app_secret: '', allowed_numbers: '' });
+  const [waStatus, setWaStatus] = useState('idle');
+
+  // settings/whatsapp is admin-read (secret-bearing docs list in rules).
+  useEffect(() => {
+    if (!allowed || role !== 'admin') return;
+    getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'whatsapp'))
+      .then((snap) => { if (snap.exists()) setWaForm((f) => ({ ...f, ...snap.data() })); })
+      .catch(() => { /* unconfigured */ });
+  }, [db, appId, allowed, role]);
+
+  const handleSaveWhatsapp = async () => {
+    setWaStatus('saving');
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'whatsapp'),
+        { ...waForm, qa_roles: ['admin', 'accountant'], updated_at: new Date().toISOString() }, { merge: true });
+      setWaStatus('saved');
+      logAction('admin', 'update', 'settings', {}, 'WhatsApp Copilot Settings');
+    } catch (e) {
+      console.error(e);
+      notify(`Save failed: ${e.message}`, 'error');
+      setWaStatus('idle');
+      return;
+    }
+    setTimeout(() => setWaStatus('idle'), 3000);
+  };
   const [migrating, setMigrating] = useState('');
   const [securityForm, setSecurityForm] = useState({ admin_password: '', recovery_key: '' });
   const [orgForm, setOrgForm] = useState({ name: '', address: '', pan: '', gstin: '', logo: '', currency: 'INR', email: '', phone: '', po_terms: '', challan_terms: '', payment_terms: '', invoice_terms: '', gst_api_key: '', expense_proof_threshold: 0, expense_proof_max_size_mb: 2, msme_reg: '', signature: '' });
@@ -949,6 +975,42 @@ const AdminTools = ({ db, appId, logAction, role }) => {
              </div>
           </div>
        </div>
+
+       {role === 'admin' && (
+         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+            <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Bell size={20} /> WhatsApp Copilot</h3>
+            <p className="text-slate-500 text-sm mb-4">Registered team members can WhatsApp the books — ask questions in English/Hinglish ("Acme ka balance?") or send an invoice photo to create a draft entry. Uses the Meta WhatsApp Cloud API; needs the AI accountant enabled. Paste the webhook URL below into your Meta app's WhatsApp webhook config.</p>
+            <div className="grid md:grid-cols-2 gap-3 mb-3">
+               <label className="text-sm text-slate-600">Phone Number ID
+                  <input type="text" value={waForm.phone_number_id} onChange={(e) => setWaForm({ ...waForm, phone_number_id: e.target.value })} className="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm" placeholder="from Meta > WhatsApp > API Setup"/>
+               </label>
+               <label className="text-sm text-slate-600">Permanent Access Token
+                  <input type="password" value={waForm.access_token} onChange={(e) => setWaForm({ ...waForm, access_token: e.target.value })} className="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm" placeholder="System-user token with whatsapp_business_messaging"/>
+               </label>
+               <label className="text-sm text-slate-600">Verify Token (any secret string)
+                  <input type="text" value={waForm.verify_token} onChange={(e) => setWaForm({ ...waForm, verify_token: e.target.value })} className="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm"/>
+               </label>
+               <label className="text-sm text-slate-600">App Secret (for webhook signatures)
+                  <input type="password" value={waForm.app_secret} onChange={(e) => setWaForm({ ...waForm, app_secret: e.target.value })} className="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm"/>
+               </label>
+            </div>
+            <label className="text-sm text-slate-600 block mb-3">Extra allowed numbers (optional — employees are matched by their profile mobile automatically). One per line: <code className="bg-slate-100 px-1 rounded">+919876543210 = EMPLOYEE_DOC_ID</code>
+               <textarea value={waForm.allowed_numbers} onChange={(e) => setWaForm({ ...waForm, allowed_numbers: e.target.value })} rows={2} className="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm font-mono"/>
+            </label>
+            <div className="flex items-center gap-4 mb-3">
+               <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={!!waForm.enabled} onChange={(e) => setWaForm({ ...waForm, enabled: e.target.checked })}/>
+                  Enabled
+               </label>
+               <button onClick={handleSaveWhatsapp} disabled={waStatus === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:bg-indigo-300 text-sm">
+                  {waStatus === 'saving' ? 'Saving…' : 'Save WhatsApp Settings'}
+               </button>
+               {waStatus === 'saved' && <span className="text-green-600 text-sm font-medium">Saved!</span>}
+            </div>
+            <p className="text-xs text-slate-400 break-all">Webhook URL: https://us-central1-{app?.options?.projectId}.cloudfunctions.net/whatsappWebhook</p>
+            <p className="text-xs text-slate-400 mt-1">Books answers over WhatsApp are limited to admin/accountant roles. All conversations are logged (admin-visible only).</p>
+         </div>
+       )}
 
        {role === 'admin' && (
          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">

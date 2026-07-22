@@ -52,6 +52,7 @@ const {
   isValidDocId,
   SUB_PARENTS,
 } = require('./backup');
+const { createWhatsApp } = require('./whatsapp');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -2678,5 +2679,40 @@ exports.adminListStorage = onCall(
       nextPageToken: (nextQuery && nextQuery.pageToken) || null,
     };
   },
+);
+
+// ── WhatsApp AI copilot ──────────────────────────────────────────────────────
+// Webhook stores inbound messages; the Firestore trigger answers them (books
+// Q&A / invoice-photo → draft). Inert until settings/whatsapp exists with
+// enabled=true. See functions/whatsapp.js for the full flow.
+const wa = createWhatsApp({
+  admin,
+  db,
+  logger,
+  Anthropic,
+  listAppIds,
+  sanitize: {
+    STATIC_QA_PROMPT,
+    STATIC_INVOICE_PROMPT,
+    LLM_INVOICE_SCHEMA,
+    sanitizeLlmInvoice,
+    supportsAdaptiveThinking,
+  },
+  books: require('./books-digest.cjs'),
+});
+
+exports.whatsappWebhook = onRequest(
+  { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
+  (req, res) => wa.handleWebhook(req, res),
+);
+
+exports.onWaMessageCreated = onDocumentCreated(
+  {
+    region: 'us-central1',
+    memory: '1GiB',
+    timeoutSeconds: 180,
+    document: 'artifacts/{appId}/public/data/wa_conversations/{wamid}',
+  },
+  (event) => wa.processInbound(event),
 );
 

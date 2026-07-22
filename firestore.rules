@@ -127,9 +127,12 @@ service cloud.firestore {
                   // don't let the generic read expose every project's money.
                   // ai_usage (Phase-2 AI): Cloud-Function-written token/budget counters —
                   // excluded so the dedicated admin/accountant-read stanza is authoritative.
+                  // wa_conversations: WhatsApp copilot transcripts (contain books answers)
+                  // — Cloud-Function-written, admin-read only via dedicated stanza below.
                   && !(collection in ['chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens',
                                       'employee_locations', 'location_history',
-                                      'clients', 'users', 'expenses', 'project_financials', 'ai_usage'])
+                                      'clients', 'users', 'expenses', 'project_financials', 'ai_usage',
+                                      'wa_conversations'])
                   // Company-wide accounting ledgers + payroll: Owner + Accountant only.
                   // They carry no per-project owner and no operational role needs them,
                   // so they must never be SDK-readable by manager / tech / user.
@@ -194,7 +197,7 @@ service cloud.firestore {
         // dedicated admin-only settings stanza. Every settings writer in the app
         // expects admin-only enforcement (Chat.jsx catch: "Only an admin can
         // change this."). Excluded here so the settings stanza is authoritative.
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations']
       ) ? false
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
@@ -334,7 +337,7 @@ service cloud.firestore {
         // ai_usage: deletes would reset the AI budget meter — Cloud Function only.
         // settings: same wildcard-vs-stanza fix as create/update above — deletes
         // of settings docs must go through the admin-only settings stanza.
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations']
       ) ? false
         // journal_entries: admin-only AND never inside a locked FY (B7) — a
         // hard delete in a locked year would silently rewrite closed books.
@@ -446,10 +449,19 @@ service cloud.firestore {
       // non-secret sibling settings/ai_public instead.
       allow read: if docId == 'ai'
                     ? false
-                    : (docId in ['security', 'communication', 'payments', 'einvoice'])
+                    : (docId in ['security', 'communication', 'payments', 'einvoice', 'whatsapp'])
                       ? isAdmin(appId)
                       : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
       allow write: if isAdmin(appId);
+    }
+
+    // ── WhatsApp copilot conversations ────────────────────────────────────────
+    // Inbound messages + AI replies, written ONLY by the WhatsApp Cloud
+    // Functions via the Admin SDK. Transcripts contain books answers, so
+    // reads are admin-only. Excluded from the broad wildcard above.
+    match /artifacts/{appId}/public/data/wa_conversations/{docId} {
+      allow read: if isAdmin(appId);
+      allow write: if false;
     }
 
     // ── AI usage metering (Phase-2 AI assistant) ──────────────────────────────
