@@ -10,7 +10,7 @@ import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken, isProjectInvoiced } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken, isProjectInvoiced, publicLink } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
@@ -612,7 +612,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       logAction('clients', 'create_ledger_link', client.id, { token }, client.name);
     }
 
-    const link = `${window.location.origin}/ledger/${token}`;
+    const link = publicLink(`/ledger/${token}`);
     setLedgerLinkModal({ isOpen: true, client, link });
     setLedgerExpiryDays('');
   };
@@ -629,7 +629,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       });
       logAction('clients', 'create_portal_link', client.id, { token }, client.name);
     }
-    const link = `${window.location.origin}/portal/${token}`;
+    const link = publicLink(`/portal/${token}`);
     try { await navigator.clipboard.writeText(link); notify('Portal link copied to clipboard.', 'success'); }
     catch { notify('Portal link: ' + link, 'info'); }
   };
@@ -652,7 +652,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       ledger_link_created_at: new Date().toISOString()
     });
     logAction('clients', 'regenerate_ledger_link', ledgerLinkModal.client.id, { token }, ledgerLinkModal.client.name);
-    const link = `${window.location.origin}/ledger/${token}`;
+    const link = publicLink(`/ledger/${token}`);
     setLedgerLinkModal(prev => ({ ...prev, link }));
     setLedgerExpiryDays('');
   };
@@ -710,7 +710,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     }
 
     const companyQuery = client.isBranch && client.branch_id ? `?company=${encodeURIComponent(client.branch_id)}` : '';
-    window.open(`${window.location.origin}/ledger/${token}${companyQuery}`, '_blank', 'noopener,noreferrer');
+    window.open(publicLink(`/ledger/${token}${companyQuery}`), '_blank', 'noopener,noreferrer');
   };
 
   const generateReimbursableToken = () => generateSecureToken(16);
@@ -744,7 +744,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       logAction('projects', 'create_reimbursable_link', project.id, { token }, project.project_name || project.id);
     }
 
-    window.open(`${window.location.origin}/reimbursable/${token}`, '_blank', 'noopener,noreferrer');
+    window.open(publicLink(`/reimbursable/${token}`), '_blank', 'noopener,noreferrer');
   };
 
   const displayParties = useMemo(() => {
@@ -833,7 +833,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         {paginatedClients.map(client => {
           const baseClient = client.rootClient || client;
           const ledgerLink = baseClient.ledger_link_token
-            ? `${window.location.origin}/ledger/${baseClient.ledger_link_token}`
+            ? publicLink(`/ledger/${baseClient.ledger_link_token}`)
             : '';
           return (
           <div key={client.entity_key || client.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col justify-between group relative">

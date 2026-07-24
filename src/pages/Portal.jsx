@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { Building2, FileText, Wallet, AlertCircle, Printer, Loader, CheckCircle2 } from 'lucide-react';
-import { appId } from '../utils/constants';
-import { formatCurrency, fmtDate } from '../utils/helpers';
+import { formatCurrency, fmtDate, publicAppId } from '../utils/helpers';
 
 // Public, magic-link self-service portal for a client/vendor. All data is
 // fetched through the token-validated getPortalData Cloud Function — the page
@@ -17,7 +16,7 @@ const Portal = () => {
     (async () => {
       try {
         const fn = httpsCallable(getFunctions(), 'getPortalData');
-        const res = await fn({ appId, token });
+        const res = await fn({ appId: publicAppId(), token });
         if (alive) setState({ loading: false, error: '', data: res.data });
       } catch (e) {
         if (alive) setState({ loading: false, error: e?.message || 'Could not load this link.', data: null });

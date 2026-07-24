@@ -1,5 +1,29 @@
 // c:\APP\temp\rental-ops\src\utils\helpers.js
-import { GST_STATE_CODES, VALID_GST_RATES, GSTIN_CHECKSUM_CHARS } from './constants';
+import { GST_STATE_CODES, VALID_GST_RATES, GSTIN_CHECKSUM_CHARS, appId } from './constants';
+import { IS_SAAS } from './edition';
+
+// Build a public share link. PRIVATE: returns origin + path unchanged (share
+// links are byte-identical to before). SAAS: appends the tenant id as `?w=` (or
+// `&w=` when the path already has a query) so the logged-out public page knows
+// which tenant to read — the routes are shared across all tenants. `appId` is
+// read at call time (live binding); on private this whole tail folds away.
+export function publicLink(pathWithToken) {
+  const p = pathWithToken.startsWith('/') ? pathWithToken : `/${pathWithToken}`;
+  const base = `${window.location.origin}${p}`;
+  if (!IS_SAAS || !appId) return base;
+  return `${base}${base.includes('?') ? '&' : '?'}w=${encodeURIComponent(appId)}`;
+}
+
+// Tenant id for a PUBLIC (logged-out) page. SAAS visitors have no session, so
+// the tenant travels in the share link's `?w=`; falls back to `appId` (the
+// fixed constant on private, where `w` is never present). Read at call time.
+export function publicAppId() {
+  try {
+    const w = new URLSearchParams(window.location.search).get('w');
+    if (IS_SAAS && w) return w;
+  } catch { /* no window/search */ }
+  return appId;
+}
 
 const PROJECT_INVOICED_STATUSES = new Set([
   'invoiced',

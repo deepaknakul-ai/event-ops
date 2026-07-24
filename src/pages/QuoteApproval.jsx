@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { appId } from '../utils/constants';
-import { formatCurrency, getProjectGrandTotal } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, publicAppId } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
 import { CheckCircle, XCircle, Package, Calendar, MapPin, Building2, ThumbsDown } from 'lucide-react';
 
@@ -20,7 +19,7 @@ const QuoteApproval = () => {
       try {
         // Token validation happens server-side; internal cost fields are stripped.
         const fn = httpsCallable(getFunctions(), 'getQuoteApprovalData');
-        const res = await fn({ appId, token });
+        const res = await fn({ appId: publicAppId(), token });
         const data = res.data || {};
         const projData = data.project || null;
         setProject(projData);
@@ -43,7 +42,7 @@ const QuoteApproval = () => {
     setProcessing(true);
     try {
       const fn = httpsCallable(getFunctions(), 'submitQuoteApproval');
-      await fn({ appId, token, decision: 'approved' });
+      await fn({ appId: publicAppId(), token, decision: 'approved' });
       setActionStatus('approved');
     } catch (err) {
       alert('Could not process approval. Please try again or contact us directly.');
@@ -55,7 +54,7 @@ const QuoteApproval = () => {
     setProcessing(true);
     try {
       const fn = httpsCallable(getFunctions(), 'submitQuoteApproval');
-      await fn({ appId, token, decision: 'rejected' });
+      await fn({ appId: publicAppId(), token, decision: 'rejected' });
       setActionStatus('rejected');
     } catch (err) {
       alert('Could not process your response. Please try again or contact us directly.');

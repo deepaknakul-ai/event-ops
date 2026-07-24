@@ -9,7 +9,7 @@ import { collection, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, setDoc 
 import { useEmployeeLocations, isLocationLive, locationAge } from '../utils/useEmployeeLocations';
 import jsPDF from 'jspdf';
 import { Modal, ConfirmDeleteModal } from '../components/Shared';
-import { formatCurrency, hashPassword, normalizeHourlyRateHistory, getHourlyRateForDate, generateSecureToken } from '../utils/helpers';
+import { formatCurrency, hashPassword, normalizeHourlyRateHistory, getHourlyRateForDate, generateSecureToken, publicLink } from '../utils/helpers';
 import { ROLE_LABELS, ROLE_COLOR, can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
 
@@ -420,7 +420,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       });
       logAction('employees', 'create_statement_link', emp.id, { token }, emp.name);
     }
-    const link = `${window.location.origin}/employee-statement/${token}`;
+    const link = publicLink(`/employee-statement/${token}`);
     setStatementLinkModal({ isOpen: true, employee: emp, link });
     setStatementExpiryDays('');
   };
@@ -445,7 +445,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
       return;
     }
     const token = await ensureEmployeeLedgerToken(emp);
-    window.open(`${window.location.origin}/employee-statement/${token}`, '_blank', 'noopener,noreferrer');
+    window.open(publicLink(`/employee-statement/${token}`), '_blank', 'noopener,noreferrer');
   };
 
   const toggleStatementLink = async (emp, enabled) => {

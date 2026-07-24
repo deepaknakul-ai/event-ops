@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { appId } from '../utils/constants';
-import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId } from '../utils/helpers';
 import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
@@ -39,7 +38,7 @@ const PublicLedger = () => {
       try {
         // Token validation + scoped data all happen server-side (Admin SDK).
         const fn = httpsCallable(getFunctions(), 'getLedgerData');
-        const res = await fn({ appId, token });
+        const res = await fn({ appId: publicAppId(), token });
         const data = res.data || {};
         if (!isMounted) return;
         setClient(data.client || null);

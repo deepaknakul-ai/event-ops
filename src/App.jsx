@@ -22,7 +22,8 @@ import {
 } from 'recharts';
 import { Routes, Route, Navigate, useLocation, Link, useNavigate, useParams } from 'react-router-dom';
 import { auth, db } from './firebase';
-import { appId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
+import { appId, setAppId, GST_STATE_CODES, STATUS_COLORS, LOGISTICS_TYPES, CATEGORIES, EXPENSE_CATS, DEFAULT_HQ_SETTINGS } from './utils/constants';
+import { IS_SAAS } from './utils/edition';
 import { getProjectGrandTotal, formatCurrency, formatCurrencyPDF, validateGSTIN, getDaysDifference, isDateOverlap, getFinancialYear, calculateWallSpecs, LEDTileModel, calculateLEDSignalPorts, getEffectivePOCost, hashPassword, verifyPassword, generateSecureToken } from './utils/helpers';
 import { upsertPartyAccount } from './utils/partyAccounts';
 import { VERSION_LABEL } from './version';
@@ -77,6 +78,13 @@ const HRSettings = lazy(() => import('./pages/HRSettings'));
 const HRPortal = lazy(() => import('./pages/HRPortal'));
 const HRPayroll = lazy(() => import('./pages/HRPayroll'));
 const DataPortal = lazy(() => import('./pages/DataPortal'));
+// SaaS-only tenant-platform console. The inline env check folds to a literal in
+// private builds so Rollup drops the import() entirely — no platform chunk ships
+// to private (enforced by scripts/check-private-bundle.cjs). Do NOT replace this
+// with the IS_SAAS const: DCE of the chunk relies on the textual env expression.
+const PlatformConsole = import.meta.env.VITE_EDITION === 'saas'
+  ? lazy(() => import('./platform'))
+  : null;
 import GlobalSearch from './components/GlobalSearch';
 import AppAssistant, { AppAssistantLauncher } from './components/AppAssistant';
 import NotificationBell from './components/NotificationBell';
@@ -93,7 +101,7 @@ import * as XLSX from '@e965/xlsx';
 import {
   signInAnonymously, onAuthStateChanged, signOut, signInWithCustomToken,
   signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail,
-  fetchSignInMethodsForEmail
+  fetchSignInMethodsForEmail, getIdTokenResult
 } from 'firebase/auth';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { collection, addDoc, updateDoc, doc, 
@@ -2893,6 +2901,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState(null); 
   const [impersonating, setImpersonating] = useState(null); // { empId, name, role } | null — admin view-as
+  // SaaS only: set when a platform staffer is inside a tenant workspace via an
+  // audited support token (claim support:true). Null on private (no such claim).
+  const [supportSession, setSupportSession] = useState(null); // { staffUid } | null
   const [showImpersonateModal, setShowImpersonateModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -2964,7 +2975,7 @@ export default function App() {
 
 
   // Login Form State
-  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [loginForm, setLoginForm] = useState({ username: '', password: '', tenant: IS_SAAS ? (appId || '') : '' });
   const [loginError, setLoginError] = useState('');
 
   // Data States
@@ -3043,18 +3054,31 @@ const [payroll, setPayroll] = useState([]);
     return () => unsubscribe();
   }, []);
 
-  // Register this appId in the cloud-functions registry so the scheduled
-  // poster knows where to look. Best-effort, fire-and-forget.
+  // SaaS: detect an audited support session from the token's `support` claim so
+  // every action is stamped and a banner is shown. No-op on private (the block
+  // compiles out — IS_SAAS folds to false — and no token ever carries `support`).
   useEffect(() => {
-    if (!user) return;
-    setDoc(doc(db, 'meta', 'active_apps'), {
-      ids: arrayUnion(appId),
-      last_seen: { [appId]: new Date().toISOString() },
-    }, { merge: true }).catch(() => { /* registry write best-effort */ });
+    if (!IS_SAAS) return;
+    if (!user || user.isAnonymous) { setSupportSession(null); return; }
+    getIdTokenResult(user)
+      .then((res) => {
+        setSupportSession(res.claims && res.claims.support
+          ? { staffUid: res.claims.staff_uid || '' }
+          : null);
+      })
+      .catch(() => setSupportSession(null));
   }, [user]);
+
+  // meta/active_apps registration now happens SERVER-SIDE inside verifyLogin
+  // (Admin SDK) on each successful login. The old client write here let any
+  // authenticated (even anonymous) session inject arbitrary appIds into the
+  // scheduler registry — a squat/flood risk once appIds are SaaS tenant codes.
+  // Rules now deny client writes to meta/active_apps.
 
   useEffect(() => {
     if (!user) return;
+    // SaaS: no active tenant selected yet (pre-login) — nothing to subscribe to.
+    if (!appId) { setLoading(false); return; }
 
     // Anonymous sessions (login page) must NOT read Firestore — the
     // verifyLogin Cloud Function handles all credential lookups server-side.
@@ -3334,6 +3358,7 @@ const [payroll, setPayroll] = useState([]);
         actor_name: actorEmp?.name || null,
         actor_role: impersonating ? `${role}->${impersonating.role}` : (role || null),
         impersonated: !!impersonating,
+        ...(supportSession ? { support_session: true, support_staff: supportSession.staffUid } : {}),
         timestamp: new Date().toISOString()
       });
     } catch (e) {
@@ -3366,10 +3391,22 @@ const [payroll, setPayroll] = useState([]);
     setLoginError('');
     const { username, password } = { username: loginForm.username.trim(), password: loginForm.password };
 
+    // SaaS: the company code entered at login selects the tenant. Private: the
+    // fixed appId constant (setAppId is a no-op in private builds).
+    const loginAppId = IS_SAAS ? String(loginForm.tenant || '').trim().toLowerCase() : appId;
+    if (IS_SAAS && !loginAppId) {
+      setLoginError('Please enter your company code.');
+      return;
+    }
+
     try {
+      // Point the app at this tenant BEFORE signing in, so the auth-state
+      // effects subscribe to the right workspace. No-op in private builds.
+      setAppId(loginAppId);
+
       // All credential verification is done server-side — no anonymous Firestore reads.
       const fn = httpsCallable(getFunctions(), 'verifyLogin');
-      const result = await fn({ username, password, appId });
+      const result = await fn({ username, password, appId: loginAppId });
       const { token, role: empRole, empId, name: empName, email: empEmail } = result.data;
 
       // Sign in with the custom token returned by the Cloud Function.
@@ -3528,16 +3565,44 @@ const [payroll, setPayroll] = useState([]);
     setRole(null);
     setCurrentEmpId(null);
     setImpersonating(null);
-    setLoginForm({ username: '', password: '' });
+    // Keep the tenant code on SaaS logout so the user needn't retype it.
+    setLoginForm({ username: '', password: '', tenant: IS_SAAS ? (appId || '') : '' });
     localStorage.removeItem('rentalOpsUser');
     // Sign out of Firebase Auth; onAuthStateChanged will create a fresh
     // anonymous session for the login screen automatically.
     signOut(auth).catch(() => { /* ignore */ });
   };
 
+  // SaaS: leave an audited support session and return to the platform console
+  // as the staff member (platformResumeStaff re-mints the staff token and logs
+  // the session end). Falls back to a plain logout if resume fails.
+  const handleExitSupport = async () => {
+    try {
+      const fn = httpsCallable(getFunctions(), 'platformResumeStaff');
+      const { data } = await fn();
+      await signInWithCustomToken(auth, data.token);
+      setSupportSession(null);
+      setAppId('');
+      window.location.assign('/platform');
+    } catch (err) {
+      console.error('Exit support failed', err);
+      handleLogout();
+    }
+  };
+
   const onProjectClick = (id) => {
     setSelectedProjectId(id);
   };
+
+  // SaaS platform console — own shell, staff session. Null (branch folds away)
+  // in private builds, so /platform there falls through to normal app routing.
+  if (PlatformConsole && location.pathname.startsWith('/platform')) {
+    return (
+      <Suspense fallback={<div className="flex h-screen items-center justify-center"><LoadingSpinner /></div>}>
+        <PlatformConsole />
+      </Suspense>
+    );
+  }
 
   if (location.pathname.startsWith('/ledger/')) {
     return (
@@ -3602,6 +3667,20 @@ const [payroll, setPayroll] = useState([]);
           </div>
           
           <form onSubmit={handleLogin} className="space-y-4">
+             {IS_SAAS && (
+               <div>
+                 <label htmlFor="login-tenant" className="block text-sm font-semibold text-slate-700 mb-1.5">Company Code</label>
+                 <input
+                   id="login-tenant"
+                   name="tenant"
+                   autoComplete="organization"
+                   className="w-full rounded-lg border border-slate-200 p-3 text-sm text-slate-800 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
+                   placeholder="your-company"
+                   value={loginForm.tenant}
+                   onChange={e => setLoginForm({...loginForm, tenant: e.target.value})}
+                 />
+               </div>
+             )}
              <div>
                <label htmlFor="login-username" className="block text-sm font-semibold text-slate-700 mb-1.5">Username / Email</label>
                <input 
@@ -3901,6 +3980,13 @@ const [payroll, setPayroll] = useState([]);
         )}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 lg:p-8 relative bg-slate-50">
           <div className="mx-auto max-w-6xl w-full min-w-0">
+            {supportSession && (
+              <div className="mb-4 flex items-center gap-3 rounded-xl bg-rose-50 border border-rose-300 px-4 py-3 text-sm shadow-sm">
+                <Shield size={17} className="text-rose-600 shrink-0" />
+                <span className="flex-1 text-rose-800 font-medium">SUPPORT SESSION — working inside <strong>{appId}</strong>. Every action is audited and visible to this workspace&apos;s admins.</span>
+                <button onClick={handleExitSupport} className="text-xs font-bold text-rose-700 hover:text-rose-900 border border-rose-300 px-3 py-1 rounded-lg hover:bg-rose-100 transition whitespace-nowrap">Exit Support</button>
+              </div>
+            )}
             {impersonating && (
               <div className="mb-4 flex items-center gap-3 rounded-xl bg-amber-50 border border-amber-300 px-4 py-3 text-sm shadow-sm">
                 <Eye size={17} className="text-amber-600 shrink-0" />

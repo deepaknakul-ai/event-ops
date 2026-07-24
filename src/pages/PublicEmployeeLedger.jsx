@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { appId } from '../utils/constants';
-import { formatCurrency } from '../utils/helpers';
+import { formatCurrency, publicAppId } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, Wallet, TrendingUp, IndianRupee } from 'lucide-react';
 import jsPDF from 'jspdf';
@@ -27,7 +26,7 @@ const PublicEmployeeLedger = () => {
       try {
         // Token validation + scoped data all happen server-side (Admin SDK).
         const fn = httpsCallable(getFunctions(), 'getEmployeeStatement');
-        const res = await fn({ appId, token });
+        const res = await fn({ appId: publicAppId(), token });
         const data = res.data || {};
         if (!isMounted) return;
         setEmployee(data.employee || null);

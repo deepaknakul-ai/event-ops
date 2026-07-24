@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { appId } from '../utils/constants';
-import { formatCurrency } from '../utils/helpers';
+import { formatCurrency, publicAppId } from '../utils/helpers';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, Download, Image as ImageIcon, Receipt, Building2 } from 'lucide-react';
 import jsPDF from 'jspdf';
@@ -25,7 +24,7 @@ const PublicReimbursable = () => {
       try {
         // Token validation + scoped (curated) data all happen server-side.
         const fn = httpsCallable(getFunctions(), 'getReimbursableData');
-        const res = await fn({ appId, token });
+        const res = await fn({ appId: publicAppId(), token });
         const data = res.data || {};
         if (isMounted) {
           setProject(data.project || null);

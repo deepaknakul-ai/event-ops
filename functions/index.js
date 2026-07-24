@@ -53,6 +53,7 @@ const {
   SUB_PARENTS,
 } = require('./backup');
 const { createWhatsApp } = require('./whatsapp');
+const { createPlatform } = require('./platform');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -378,12 +379,36 @@ async function hashPasswordNode(plaintext) {
 // ── verifyLogin callable ────────────────────────────────────────────────────
 // Replaces the client-side anonymous Firestore reads of employees/settings.
 // On success returns a Firebase custom token the client signs in with.
+// Register a tenant in the scheduler registry, server-side. Moved here from a
+// client effect that any authed (even anonymous) session could write — a
+// squat/flood risk once appIds are SaaS tenant codes. Best-effort.
+async function registerActiveApp(appId) {
+  try {
+    await db.doc('meta/active_apps').set({
+      ids: admin.firestore.FieldValue.arrayUnion(appId),
+      last_seen: { [appId]: new Date().toISOString() },
+    }, { merge: true });
+  } catch (err) {
+    logger.warn(`registerActiveApp(${appId}) failed: ${err.message}`);
+  }
+}
+
 exports.verifyLogin = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
   async (req) => {
     const { username, password, appId } = req.data || {};
     if (!username || !password || !appId) {
       throw new HttpsError('invalid-argument', 'Missing credentials');
+    }
+
+    // SaaS: block login to a suspended/churned tenant. The platform_tenants doc
+    // exists ONLY on the SaaS project, so this is a no-op on private/standby
+    // (same verifyLogin code deploys everywhere). Best-effort read: a transient
+    // error must not lock everyone out, so only an explicit suspended/churned
+    // status blocks.
+    const tenantSnap = await db.doc(`platform_tenants/${appId}`).get().catch(() => null);
+    if (tenantSnap && tenantSnap.exists && ['suspended', 'churned'].includes(tenantSnap.data().status)) {
+      throw new HttpsError('permission-denied', 'This workspace is suspended. Please contact support.');
     }
 
     const usernameNorm = String(username).trim();
@@ -460,6 +485,7 @@ exports.verifyLogin = onCall(
       }, { merge: true });
 
       const customToken = await admin.auth().createCustomToken(uid, { role: 'admin', appId });
+      await registerActiveApp(appId);
       return {
         token: customToken,
         role: 'admin',
@@ -533,6 +559,7 @@ exports.verifyLogin = onCall(
     }, { merge: true });
 
     const customToken = await admin.auth().createCustomToken(emp.id, { role: emp.role, appId });
+    await registerActiveApp(appId);
 
     return {
       token: customToken,
@@ -2715,4 +2742,28 @@ exports.onWaMessageCreated = onDocumentCreated(
   },
   (event) => wa.processInbound(event),
 );
+
+// ── SaaS tenant platform (control-plane, admin-only) ─────────────────────────
+// Inert on the private/standby projects: every handler is gated by the
+// platform_meta/config doc which exists ONLY on the SaaS project, so these
+// callables deploy everywhere but refuse to run off-platform. See
+// functions/platform.js. Token-minting handlers require the service account.
+const platform = createPlatform({
+  admin, db, logger, HttpsError,
+  verifyPasswordNode, hashPasswordNode,
+  coaDefaults: require('./coa-defaults.cjs'),
+  listAppIds,
+});
+
+const PLATFORM_OPTS = {
+  region: 'us-central1', memory: '256MiB', timeoutSeconds: 30,
+  serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT,
+};
+exports.platformLogin = onCall(PLATFORM_OPTS, (req) => platform.platformLogin(req));
+exports.platformCreateTenant = onCall(PLATFORM_OPTS, (req) => platform.platformCreateTenant(req));
+exports.platformListTenants = onCall(PLATFORM_OPTS, (req) => platform.platformListTenants(req));
+exports.platformUpdateTenant = onCall(PLATFORM_OPTS, (req) => platform.platformUpdateTenant(req));
+exports.platformSupportAccess = onCall(PLATFORM_OPTS, (req) => platform.platformSupportAccess(req));
+exports.platformResumeStaff = onCall(PLATFORM_OPTS, (req) => platform.platformResumeStaff(req));
+exports.platformManageStaff = onCall(PLATFORM_OPTS, (req) => platform.platformManageStaff(req));
 

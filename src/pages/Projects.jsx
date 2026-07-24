@@ -23,7 +23,7 @@ import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExce
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
   getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
-  getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken, isProjectInvoiced
+  getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken, isProjectInvoiced, publicLink
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import ProjectRemarks from '../components/ProjectRemarks';
@@ -867,7 +867,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         quote_approval_expires_at: expiresAt,
         quote_status: selectedProject.quote_status || 'pending',
       });
-      const url = `${window.location.origin}/quote-approval/${token}`;
+      const url = publicLink(`/quote-approval/${token}`);
       setQuoteShareUrl(url);
       setIsQuoteShareOpen(true);
       logAction('quote_share', `Shared quote approval link for ${selectedProject.project_name}`);
@@ -976,7 +976,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
       reimbursable_token: token, reimbursable_token_expires_at: expiresAt
     });
-    const url = `${window.location.origin}/reimbursable/${token}`;
+    const url = publicLink(`/reimbursable/${token}`);
     setReimbursableShareUrl(url);
     setIsReimbursableShareOpen(true);
     logAction('projects', 'share_reimbursable', selectedProject.id, {}, selectedProject.project_name);

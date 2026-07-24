@@ -1,8 +1,35 @@
 // c:\APP\temp\rental-ops\src\utils\constants.js
 import React from 'react';
 import { Truck, Hotel, Utensils, Briefcase } from 'lucide-react';
+import { IS_SAAS } from './edition';
 
-export const appId = 'TERMS 1.0.0';
+// Tenant id. PRIVATE: a fixed compile-time constant — `IS_SAAS` folds to false
+// so this whole block reduces to `let appId = 'TERMS 1.0.0'` and setAppId is a
+// no-op (byte-stable private behavior). SAAS: resolved per tenant from the
+// company code entered at login, persisted in localStorage across reloads.
+//
+// Exported as `let` so it is an ESM LIVE BINDING — every importer sees the
+// current value with no code changes at the import site. IMPORTANT: consumers
+// must read `appId` at CALL TIME (inside functions/effects), never capture it
+// at module-eval time. All current importers already do; keep it that way.
+const PRIVATE_APP_ID = 'TERMS 1.0.0';
+const SAAS_TENANT_KEY = 'saasTenantId';
+
+export let appId = IS_SAAS
+  ? (() => { try { return localStorage.getItem(SAAS_TENANT_KEY) || ''; } catch { return ''; } })()
+  : PRIVATE_APP_ID;
+
+// Set the active tenant (SaaS only). No-op in private builds so it can be
+// called unconditionally from shared login code. Call BEFORE the auth state
+// change that triggers data subscriptions so effects re-run with the new value.
+export function setAppId(next) {
+  if (!IS_SAAS) return;
+  appId = String(next || '').trim();
+  try {
+    if (appId) localStorage.setItem(SAAS_TENANT_KEY, appId);
+    else localStorage.removeItem(SAAS_TENANT_KEY);
+  } catch { /* storage unavailable — in-memory value still updates */ }
+}
 
 export const GST_STATE_CODES = {
   "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",

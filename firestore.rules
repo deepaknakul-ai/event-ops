@@ -31,6 +31,31 @@ service cloud.firestore {
       return request.auth.uid;
     }
 
+    // Token↔tenant binding: a verifyLogin/support token carries an `appId`
+    // claim; a role only counts for THAT tenant. Prevents a uid that holds
+    // role docs under two appIds (possible on the SaaS project) from using a
+    // token minted for tenant A to act on tenant B. Tokens with no appId claim
+    // (none minted by this app today) pass — preserving legacy behavior; on
+    // private every token carries appId 'TERMS 1.0.0', so this is a no-op.
+    function tokenApp(appId) {
+      return !('appId' in request.auth.token) || request.auth.token.appId == appId;
+    }
+
+    // ── SaaS platform staff (top-level platform_* tree) ──────────────────────
+    // A platform staff token carries claim `staff:true` + `staff_role`. On the
+    // PRIVATE/standby projects no token has this claim and the platform_*
+    // collections don't exist, so isStaff() short-circuits false and staffData()
+    // is never reached — these helpers are fully inert off the SaaS project.
+    function isStaff() {
+      return isAuthed() && request.auth.token.get('staff', false) == true;
+    }
+    function staffRole() {
+      return request.auth.token.get('staff_role', '');
+    }
+    function staffData() {
+      return get(/databases/$(database)/documents/platform_staff/$(request.auth.uid)).data;
+    }
+
     // Role lookup: /users/{uid} mirror first (written on login upgrade),
     // falls back to /employees/{uid} for the migration window.
     function userRole(appId) {
@@ -40,11 +65,11 @@ service cloud.firestore {
     }
 
     function hasRole(appId, role) {
-      return isAuthed() && userRole(appId) == role;
+      return isAuthed() && tokenApp(appId) && userRole(appId) == role;
     }
 
     function hasAnyRole(appId, roles) {
-      return isAuthed() && (userRole(appId) in roles);
+      return isAuthed() && tokenApp(appId) && (userRole(appId) in roles);
     }
 
     // isRoleUser: authenticated AND holds any recognised role.
@@ -93,11 +118,45 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // App registry doc consumed by Cloud Functions cron.
+    // App registry doc consumed by Cloud Functions cron. Writes are now
+    // SERVER-ONLY (verifyLogin / platformCreateTenant via Admin SDK) — the old
+    // client write let any authed (even anonymous) session inject arbitrary
+    // appIds, a squat/flood risk once appIds are SaaS tenant codes.
     match /meta/active_apps {
       allow read: if false;
-      allow create, update: if isAuthed();
-      allow delete: if false;
+      allow write: if false;
+    }
+
+    // ── SaaS platform tree (top-level, outside /artifacts) ───────────────────
+    // Exists ONLY on the SaaS project. All writes are Admin-SDK-only (platform
+    // Cloud Functions); rules grant scoped READS so the console can live-query.
+    // Reads are role-scoped by the staff_role claim; region/assignment scoping
+    // for lists is enforced server-side by platformListTenants (per-doc rules
+    // can't express list-query scoping). Inert on private (no staff tokens).
+    match /platform_meta/{docId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+    match /platform_staff/{staffId} {
+      // A staffer reads only their own profile; super_admin reads all. The
+      // password hash lives in the secret/ subdoc (never readable).
+      allow read: if isStaff() && (request.auth.uid == staffId || staffRole() == 'super_admin');
+      allow write: if false;
+      match /secret/{secretId} {
+        allow read, write: if false;
+      }
+    }
+    match /platform_tenants/{tenantId} {
+      allow read: if isStaff() && (
+        staffRole() == 'super_admin'
+        || (staffRole() == 'regional_admin' && resource.data.region in staffData().regions)
+        || (staffRole() == 'business_manager' && request.auth.uid in resource.data.assigned_managers)
+      );
+      allow write: if false;
+    }
+    match /platform_audit_logs/{docId} {
+      allow read: if isStaff() && staffRole() == 'super_admin';
+      allow write: if false;
     }
 
     // ── Broad catch-all for app-scoped data ───────────────────────────────────
