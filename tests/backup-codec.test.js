@@ -75,6 +75,21 @@ describe('backup codec', () => {
     expect([...decoded.blob]).toEqual([1, 2, 3, 255]);
   });
 
+  it('round-trips NaN and ±Infinity (JSON-hostile Firestore doubles)', () => {
+    const doc = { bad: NaN, up: Infinity, down: -Infinity, nested: [{ x: NaN }] };
+    const enc = codec.encode(doc);
+    // Encoded form must be JSON-safe — this is what the callable transport requires.
+    expect(enc.bad).toEqual({ __t: 'num', v: 'nan' });
+    expect(enc.up).toEqual({ __t: 'num', v: 'inf' });
+    expect(enc.down).toEqual({ __t: 'num', v: '-inf' });
+    expect(JSON.stringify(enc)).not.toContain('null');
+    const decoded = codec.decode(JSON.parse(JSON.stringify(enc)));
+    expect(Number.isNaN(decoded.bad)).toBe(true);
+    expect(decoded.up).toBe(Infinity);
+    expect(decoded.down).toBe(-Infinity);
+    expect(Number.isNaN(decoded.nested[0].x)).toBe(true);
+  });
+
   it('decodes legacy untagged data unchanged (old backup files)', () => {
     const legacy = { date: { seconds: 123, nanoseconds: 0 }, amount: 100 };
     expect(codec.decode(legacy)).toEqual(legacy);

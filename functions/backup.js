@@ -9,6 +9,11 @@
  *   Timestamp  → { __t: 'ts',    s: <seconds>, n: <nanoseconds> }
  *   Bytes      → { __t: 'bytes', b64: <base64> }
  *   Reference  → { __t: 'ref',   p: <path> }        (defensive — no known usage)
+ *   NaN/±Inf   → { __t: 'num',   v: 'nan'|'inf'|'-inf' }
+ *
+ * Firestore stores NaN and ±Infinity as legal double values, but the callable
+ * transport rejects them ("Data cannot be encoded in JSON: NaN" → 500), so
+ * they must be tagged like every other JSON-hostile type.
  *
  * decode() reverses the tagging; untagged values (including legacy backup
  * files that predate the codec) pass through unchanged. GeoPoint is not
@@ -30,6 +35,7 @@ const SUB_PARENTS = {
 const TS_TAG = 'ts';
 const BYTES_TAG = 'bytes';
 const REF_TAG = 'ref';
+const NUM_TAG = 'num';
 
 function isTimestampLike(v, Timestamp) {
   if (Timestamp && v instanceof Timestamp) return true;
@@ -41,6 +47,9 @@ function isTimestampLike(v, Timestamp) {
 function createCodec({ Timestamp, refFromPath } = {}) {
   const encode = (v) => {
     if (v === null || v === undefined) return null;
+    if (typeof v === 'number' && !Number.isFinite(v)) {
+      return { __t: NUM_TAG, v: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };
+    }
     if (typeof v !== 'object') return v;
     if (isTimestampLike(v, Timestamp)) {
       return {
@@ -80,6 +89,9 @@ function createCodec({ Timestamp, refFromPath } = {}) {
     }
     if (v.__t === REF_TAG && typeof v.p === 'string') {
       return refFromPath ? refFromPath(v.p) : v.p;
+    }
+    if (v.__t === NUM_TAG) {
+      return v.v === 'nan' ? NaN : v.v === 'inf' ? Infinity : -Infinity;
     }
     if (Array.isArray(v)) return v.map(decode);
     const out = {};

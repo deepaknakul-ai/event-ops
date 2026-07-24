@@ -82,12 +82,24 @@ Restoring chat messages re-fires `onChatMessageCreated`. The trigger now
 skips messages whose `created_at` is older than 10 minutes, so a restore
 cannot blast historical push notifications at every employee.
 
+## Storage attachments
+
+Admin Tools' storage backup (v3.6.24+) downloads every attachment in the
+browser via `getBlob()` — a direct XHR to `firebasestorage.googleapis.com`.
+That requires a CORS policy on the bucket; without one every download is
+blocked ("No 'Access-Control-Allow-Origin' header") and the zip comes out
+empty. One-time setup (idempotent, covers primary + standby buckets):
+
+```bash
+node scripts/set-storage-cors.cjs
+```
+
+Re-run it after adding a custom domain (edit `ORIGINS` in the script first).
+
 ## What is NOT covered
 
-- **Storage files** — expense proofs, purchase-invoice scans, project
-  attachments, chat uploads, org logo. The backup preserves only their URLs.
-  Cover via bucket-level copy (below) until an app-level Storage manifest is
-  built.
+- **Cross-tenant Storage files** — the attachments backup is per `appId`
+  prefix. Anything outside those prefixes needs the bucket-level copy below.
 - **Cross-tenant data** — the backup is per `appId`. `meta/active_apps` is
   re-registered on restore but not exported.
 
