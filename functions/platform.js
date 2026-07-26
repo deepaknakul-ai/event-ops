@@ -39,6 +39,30 @@ const TENANT_PLANS = ['trial', 'standard', 'premium'];
 const STAFF_ROLES = ['super_admin', 'regional_admin', 'business_manager'];
 const STAFF_STATUSES = ['active', 'disabled'];
 
+// Minimum length for a platform-staff password chosen during first-login setup.
+const PASSWORD_MIN_LEN = 10;
+// Minimum length for a tenant employee's password (matches the tenant-owner
+// password floor in platformCreateTenant / the app's own employee flows).
+const TENANT_USER_PASSWORD_MIN_LEN = 8;
+
+// Roles a tenant employee may hold (mirrors the app's employee roles). A
+// cross-tenant user op may only ever set a role drawn from this list — this is
+// what blocks escalating a user to an out-of-band role.
+const TENANT_USER_ROLES = ['admin', 'accountant', 'manager', 'tech', 'user'];
+// Employee status values a cross-tenant op may set. verifyLogin treats ONLY
+// 'Disabled'/'Deactivated' as login-blocking, so those two are what the
+// last-admin guard counts as inactive.
+const TENANT_USER_STATUSES = ['Active', 'Disabled', 'Deactivated'];
+
+// Small blocklist of obviously-weak passwords rejected regardless of length.
+const TRIVIAL_PASSWORDS = new Set([
+  'password', 'password1', 'password12', 'password123', 'passwordpassword',
+  '1234567890', '12345678', '123456789', '0123456789',
+  'qwertyuiop', 'qwerty1234', 'abcdefghij',
+  'letmein', 'welcome123', 'changeme', 'changeme123',
+  'adminadmin', 'administrator',
+]);
+
 // Fields platformUpdateTenant is allowed to write. Deliberately EXCLUDES
 // identity/provenance keys (code, created_at, created_by, updated_*) so a patch
 // can never re-key a tenant or forge its audit provenance.
@@ -73,7 +97,76 @@ function tenantInScope(staff, tenant) {
   return false;
 }
 
-function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, hashPasswordNode, coaDefaults, listAppIds }) {
+// Validate a platform-staff password chosen at first-login setup. Pure so the UI
+// can reuse it and it can be unit-tested. Returns null when acceptable, else a
+// human-readable reason. Policy: >= PASSWORD_MIN_LEN characters, some character
+// variety, and not an obviously trivial/common value.
+function validateStaffPassword(pw) {
+  if (typeof pw !== 'string') return 'Password is required';
+  if (pw.length < PASSWORD_MIN_LEN) return `Password must be at least ${PASSWORD_MIN_LEN} characters`;
+  if (pw.trim().length < PASSWORD_MIN_LEN) return `Password must be at least ${PASSWORD_MIN_LEN} non-space characters`;
+  if (new Set(pw).size < 4) return 'Password is too simple — use a longer mix of characters';
+  if (TRIVIAL_PASSWORDS.has(pw.toLowerCase())) return 'Password is too common — choose a less predictable one';
+  return null;
+}
+
+// Employee statuses that BLOCK login (mirrors functions/index.js verifyLogin,
+// which rejects only these two). Everything else — including a missing status —
+// is treated as a live, login-capable account.
+function isDisabledEmployeeStatus(status) {
+  return status === 'Disabled' || status === 'Deactivated';
+}
+
+// Count the tenant's active admins AFTER a pending change to one employee, so a
+// caller can refuse an op that would strip the tenant's last one and lock it
+// out. Pure/testable.
+//   employees : [{ id, role, status }, ...]  — the tenant's current employees
+//   change    : { id, role?, status?, removed? } — the doc being mutated; omit
+//               role/status to leave them, removed:true to drop the doc.
+function countActiveAdminsAfter(employees, change) {
+  if (!Array.isArray(employees)) return 0;
+  let count = 0;
+  for (const e of employees) {
+    if (!e) continue;
+    let role = e.role;
+    let status = e.status;
+    if (change && change.id != null && e.id === change.id) {
+      if (change.removed) continue;
+      if (change.role !== undefined) role = change.role;
+      if (change.status !== undefined) status = change.status;
+    }
+    if (role === 'admin' && !isDisabledEmployeeStatus(status)) count += 1;
+  }
+  return count;
+}
+
+// Map a default-equipment-catalog entry to this app's inventory doc shape
+// (src/pages/Inventory.jsx: name, category, sub_category, qty, unit, dimensions,
+// weight, power, rate_per_day/week, purchase_cost, status). Seeded as priced-at-
+// zero, zero-stock TEMPLATES (is_template) the tenant then stocks and prices.
+function equipmentToInventory(item) {
+  return {
+    name: item.name,
+    category: item.category || 'Uncategorised',
+    sub_category: item.sub_category || '',
+    unit: item.unit || 'piece',
+    dimensions: item.dimensions || '',
+    weight: item.weight != null ? item.weight : '',
+    power: item.power_requirement === 'passive' || !item.power_watts ? '' : `${item.power_watts}W`,
+    qty: 0,
+    rate_per_day: 0,
+    rate_per_week: 0,
+    purchase_cost: 0,
+    status: 'Active',
+    material: item.material || '',
+    classifier_tags: Array.isArray(item.classifier_tags) ? item.classifier_tags : [],
+    equipment_group: item.group || '',
+    is_template: true,
+    indicative: !!item.indicative,
+  };
+}
+
+function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, hashPasswordNode, coaDefaults, equipmentDefaults, listAppIds }) {
   // listAppIds is accepted for parity with the createWhatsApp DI contract and
   // future cross-tenant sweeps; the current handlers list tenants straight from
   // the platform_tenants collection, so it is intentionally not yet consumed.
@@ -188,6 +281,16 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       throw new HttpsError('permission-denied', 'Account is disabled. Contact your administrator.');
     }
 
+    // First-login setup: an account seeded without a password carries
+    // needs_password_setup and has no secret/credentials.password — only a
+    // one-time setup_key. Signal the UI (which keys off this EXACT code/message)
+    // to switch to setup mode. Same information exposure as the disabled branch
+    // above: only ever reached after a username/email match, so it leaks nothing
+    // beyond the module's existing behaviour.
+    if (staff.needs_password_setup === true) {
+      throw new HttpsError('failed-precondition', 'PASSWORD_SETUP_REQUIRED');
+    }
+
     // Rate limit — same shape as verifyLogin (5 failures → 15-min lock).
     const lockedUntil = staff.login_locked_until ? new Date(staff.login_locked_until) : null;
     if (lockedUntil && lockedUntil > new Date()) {
@@ -220,6 +323,98 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     await platformAudit({
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
       action: 'staff_login', tenant_id: null, details: {},
+    });
+    return { token, staffId: staff.id, role: staff.role, name: staff.name || '' };
+  }
+
+  // ── 1b. platformSetupPassword ────────────────────────────────────────────────
+  // First-login: exchange a one-time setup key (seeded as a pbkdf2 hash at
+  // platform_staff/{id}/secret/credentials.setup_key) for a chosen password, then
+  // log straight in. Mirrors platformLogin's rate-limit shape and mints the same
+  // staff custom token.
+  async function platformSetupPassword(req) {
+    await assertPlatformEnabled();
+    const { username, setupKey, newPassword } = req.data || {};
+    if (!username || !setupKey || !newPassword) {
+      throw new HttpsError('invalid-argument', 'username, setupKey and newPassword are required');
+    }
+    const usernameNorm = String(username).trim();
+
+    // Lookup by username, then email (both unique) — same as platformLogin.
+    const [byUsername, byEmail] = await Promise.all([
+      db.collection('platform_staff').where('username', '==', usernameNorm).limit(1).get(),
+      db.collection('platform_staff').where('email', '==', usernameNorm).limit(1).get(),
+    ]);
+    const staffDoc = !byUsername.empty ? byUsername.docs[0]
+      : !byEmail.empty ? byEmail.docs[0]
+      : null;
+
+    // ONE generic error for "no such account / not awaiting setup / wrong key",
+    // so this never reveals whether a username exists or its exact state.
+    const GENERIC = 'Invalid setup key or the account is not awaiting setup';
+    if (!staffDoc) throw new HttpsError('permission-denied', GENERIC);
+    const staff = { id: staffDoc.id, ...staffDoc.data() };
+    if (staff.status !== 'active' || staff.needs_password_setup !== true) {
+      throw new HttpsError('permission-denied', GENERIC);
+    }
+
+    // Rate limit — reuse the login counters on the staff doc.
+    const lockedUntil = staff.login_locked_until ? new Date(staff.login_locked_until) : null;
+    if (lockedUntil && lockedUntil > new Date()) {
+      throw new HttpsError('resource-exhausted', 'Too many failed attempts. Try again later.');
+    }
+
+    // Constant-time verify the setup key against its stored pbkdf2 hash. A wrong
+    // key counts as a failed attempt (same lockout as login).
+    const credSnap = await db.doc(`platform_staff/${staff.id}/secret/credentials`).get();
+    const cred = credSnap.exists ? credSnap.data() : {};
+    const storedKeyHash = cred.setup_key || null;
+    const keyValid = storedKeyHash ? await verifyPasswordNode(String(setupKey), storedKeyHash) : false;
+    if (!keyValid) {
+      const attempts = (staff.failed_login_attempts || 0) + 1;
+      const updates = { failed_login_attempts: attempts };
+      if (attempts >= LOGIN_MAX_ATTEMPTS) {
+        updates.login_locked_until = new Date(Date.now() + LOGIN_LOCK_MS).toISOString();
+      }
+      await staffDoc.ref.update(updates);
+      throw new HttpsError('permission-denied', GENERIC);
+    }
+
+    // Key correct but expired → do NOT set a password. Distinct code so the UI
+    // can prompt for a fresh key (the holder has already proven key knowledge, so
+    // this leaks nothing new).
+    const expISO = cred.setup_key_expires || null;
+    if (expISO && new Date(expISO) < new Date()) {
+      throw new HttpsError('failed-precondition', 'SETUP_KEY_EXPIRED');
+    }
+
+    // Validate the chosen password AFTER the key check (a valid key was spent to
+    // reach here, but a weak password neither consumes an attempt nor burns the
+    // key — the holder can simply retry with a stronger one).
+    const pwErr = validateStaffPassword(newPassword);
+    if (pwErr) throw new HttpsError('invalid-argument', pwErr);
+
+    // Commit: set the password, delete the one-time key, leave setup mode, reset
+    // the rate-limit counters.
+    const ts = nowISO();
+    await db.doc(`platform_staff/${staff.id}/secret/credentials`).set({
+      password: await hashPasswordNode(String(newPassword)),
+      setup_key: admin.firestore.FieldValue.delete(),
+      setup_key_expires: admin.firestore.FieldValue.delete(),
+      updated_at: ts,
+    }, { merge: true });
+    await staffDoc.ref.update({
+      needs_password_setup: false,
+      failed_login_attempts: 0,
+      login_locked_until: null,
+      password_set_at: ts,
+      last_login_at: ts,
+    });
+
+    const token = await admin.auth().createCustomToken(staff.id, { staff: true, staff_role: staff.role });
+    await platformAudit({
+      actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+      action: 'staff_password_set', tenant_id: null, details: {},
     });
     return { token, staffId: staff.id, role: staff.role, name: staff.name || '' };
   }
@@ -316,6 +511,25 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       if ((pending += 1) >= BATCH_LIMIT) { await batch.commit(); batch = db.batch(); pending = 0; }
     }
     if (pending > 0) await batch.commit();
+
+    // Seed a starter equipment catalog into inventory (default event/rental
+    // equipment with sizes/power specs) so the tenant starts with a usable
+    // catalog to stock and price. Templates: qty 0, rates 0. Best-effort per
+    // item; the tenant can bulk-edit/delete afterwards.
+    if (equipmentDefaults && typeof equipmentDefaults.getDefaultEquipmentCatalog === 'function') {
+      const items = equipmentDefaults.getDefaultEquipmentCatalog();
+      batch = db.batch();
+      pending = 0;
+      let seeded = 0;
+      for (const item of items) {
+        const ref = db.collection(`${dataPath(code)}/inventory`).doc();
+        batch.set(ref, { ...equipmentToInventory(item), created_by: staff.id, created_at: ts });
+        seeded += 1;
+        if ((pending += 1) >= BATCH_LIMIT) { await batch.commit(); batch = db.batch(); pending = 0; }
+      }
+      if (pending > 0) await batch.commit();
+      logger.info(`platformCreateTenant: seeded ${seeded} equipment templates for ${code}`);
+    }
 
     // Register with the cron/discovery registry so scheduled posters see it.
     await db.doc('meta/active_apps').set({
@@ -601,15 +815,234 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     throw new HttpsError('invalid-argument', `Unknown op: ${op}`);
   }
 
+  // ── 8. platformManageTenantUsers ─────────────────────────────────────────────
+  // Cross-tenant employee management: a scoped staff member operates directly on
+  // a tenant's employees (artifacts/{tenantId}/public/data/employees) and their
+  // /users mirror. Every mutation is double-logged — into the tenant's own
+  // audit_logs (so it surfaces in-app, support_session style) AND the
+  // control-plane platform_audit_logs.
+  async function platformManageTenantUsers(req) {
+    await assertPlatformEnabled();
+    const staff = await getStaff(req.auth);
+    const { tenantId, op, userId, data } = req.data || {};
+    if (!tenantId) throw new HttpsError('invalid-argument', 'tenantId is required');
+    if (!op) throw new HttpsError('invalid-argument', 'op is required');
+
+    const tSnap = await db.doc(`platform_tenants/${tenantId}`).get();
+    if (!tSnap.exists) throw new HttpsError('not-found', 'Tenant not found');
+    const tenant = { id: tSnap.id, ...tSnap.data() };
+    if (!tenantInScope(staff, tenant)) {
+      throw new HttpsError('permission-denied', 'Tenant is outside your scope');
+    }
+
+    const empCol = db.collection(`${dataPath(tenantId)}/employees`);
+    const usersCol = db.collection(`${dataPath(tenantId)}/users`);
+    const actor = `platform:${staff.email || staff.username || staff.id}`;
+
+    // Shared: load all employees (tenants are small) for guard checks.
+    const loadEmployees = async () =>
+      (await empCol.get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    if (op === 'list') {
+      const snap = await empCol.get();
+      const users = snap.docs
+        .map((d) => {
+          const e = d.data() || {};
+          // Never surface password material or hashes.
+          return {
+            id: d.id,
+            name: e.name || '',
+            username: e.username || '',
+            email: e.email || '',
+            role: e.role || '',
+            status: e.status || '',
+          };
+        })
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      return { users };
+    }
+
+    if (op === 'create') {
+      const dd = data || {};
+      const { name, username, email, role, password } = dd;
+      if (!name || !username || !email || !role || !password) {
+        throw new HttpsError('invalid-argument', 'name, username, email, role and password are required');
+      }
+      if (!TENANT_USER_ROLES.includes(role)) throw new HttpsError('invalid-argument', 'Invalid role');
+      if (String(password).length < TENANT_USER_PASSWORD_MIN_LEN) {
+        throw new HttpsError('invalid-argument', `Password must be at least ${TENANT_USER_PASSWORD_MIN_LEN} characters`);
+      }
+
+      const usernameNorm = String(username).trim();
+      const emailNorm = String(email).trim();
+      const [uSnap, eSnap] = await Promise.all([
+        empCol.where('username', '==', usernameNorm).limit(1).get(),
+        empCol.where('email', '==', emailNorm).limit(1).get(),
+      ]);
+      if (!uSnap.empty) throw new HttpsError('already-exists', 'Username already in use');
+      if (!eSnap.empty) throw new HttpsError('already-exists', 'Email already in use');
+
+      const ref = empCol.doc();
+      const ts = nowISO();
+      const empDoc = {
+        name: String(name).trim(),
+        username: usernameNorm,
+        email: emailNorm,
+        role,
+        status: 'Active',
+        password: await hashPasswordNode(String(password)),
+        password_hashed: true,
+        failed_login_attempts: 0,
+        created_at: ts,
+        created_by: actor,
+      };
+      await ref.set(empDoc);
+      // Mirror carries only what the tenant rules / UI need — no password.
+      await usersCol.doc(ref.id).set({
+        role,
+        name: empDoc.name,
+        email: emailNorm,
+        employee_id: ref.id,
+        updated_at: ts,
+      }, { merge: true });
+
+      await tenantAudit(tenantId, {
+        action: 'tenant_user_create',
+        details: { user_id: ref.id, username: usernameNorm, role },
+        staff,
+      });
+      await platformAudit({
+        actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+        action: 'tenant_user_create', tenant_id: tenantId,
+        details: { user_id: ref.id, username: usernameNorm, role },
+      });
+      return { ok: true, userId: ref.id };
+    }
+
+    if (op === 'update') {
+      if (!userId) throw new HttpsError('invalid-argument', 'userId is required');
+      const dd = data || {};
+      const ref = empCol.doc(userId);
+      if (!(await ref.get()).exists) throw new HttpsError('not-found', 'User not found');
+
+      // Whitelist the mutable fields — this is what blocks escalating via an
+      // arbitrary extra field (e.g. is_locked, password) or an off-list role.
+      const clean = {};
+      if (dd.name !== undefined) clean.name = String(dd.name).trim();
+      if (dd.email !== undefined) clean.email = String(dd.email).trim();
+      if (dd.role !== undefined) {
+        if (!TENANT_USER_ROLES.includes(dd.role)) throw new HttpsError('invalid-argument', 'Invalid role');
+        clean.role = dd.role;
+      }
+      if (dd.status !== undefined) {
+        if (!TENANT_USER_STATUSES.includes(dd.status)) throw new HttpsError('invalid-argument', 'Invalid status');
+        clean.status = dd.status;
+      }
+      if (Object.keys(clean).length === 0) throw new HttpsError('invalid-argument', 'No updatable fields provided');
+
+      // Last-admin guard: a role/status change must not remove the final admin.
+      if (clean.role !== undefined || clean.status !== undefined) {
+        const remaining = countActiveAdminsAfter(await loadEmployees(), {
+          id: userId, role: clean.role, status: clean.status,
+        });
+        if (remaining < 1) {
+          throw new HttpsError('failed-precondition', "This would remove the tenant's last active admin");
+        }
+      }
+
+      clean.updated_at = nowISO();
+      clean.updated_by = actor;
+      await ref.update(clean);
+
+      // Keep the mirror in sync for the fields it carries (role drives rules).
+      const mirror = {};
+      if (clean.role !== undefined) mirror.role = clean.role;
+      if (clean.name !== undefined) mirror.name = clean.name;
+      if (clean.email !== undefined) mirror.email = clean.email;
+      if (Object.keys(mirror).length > 0) {
+        mirror.updated_at = clean.updated_at;
+        await usersCol.doc(userId).set(mirror, { merge: true });
+      }
+
+      const fields = Object.keys(clean).filter((k) => k !== 'updated_at' && k !== 'updated_by');
+      await tenantAudit(tenantId, {
+        action: 'tenant_user_update', details: { user_id: userId, fields }, staff,
+      });
+      await platformAudit({
+        actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+        action: 'tenant_user_update', tenant_id: tenantId, details: { user_id: userId, fields },
+      });
+      return { ok: true };
+    }
+
+    if (op === 'disable') {
+      if (!userId) throw new HttpsError('invalid-argument', 'userId is required');
+      const ref = empCol.doc(userId);
+      if (!(await ref.get()).exists) throw new HttpsError('not-found', 'User not found');
+
+      // Last-admin guard: never disable the tenant's final active admin.
+      const remaining = countActiveAdminsAfter(await loadEmployees(), { id: userId, status: 'Disabled' });
+      if (remaining < 1) {
+        throw new HttpsError('failed-precondition', "This would disable the tenant's last active admin");
+      }
+
+      await ref.update({ status: 'Disabled', updated_at: nowISO(), updated_by: actor });
+      await tenantAudit(tenantId, { action: 'tenant_user_disable', details: { user_id: userId }, staff });
+      await platformAudit({
+        actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+        action: 'tenant_user_disable', tenant_id: tenantId, details: { user_id: userId },
+      });
+      return { ok: true };
+    }
+
+    if (op === 'resetPassword') {
+      if (!userId) throw new HttpsError('invalid-argument', 'userId is required');
+      const dd = data || {};
+      if (!dd.password || String(dd.password).length < TENANT_USER_PASSWORD_MIN_LEN) {
+        throw new HttpsError('invalid-argument', `Password must be at least ${TENANT_USER_PASSWORD_MIN_LEN} characters`);
+      }
+      const ref = empCol.doc(userId);
+      if (!(await ref.get()).exists) throw new HttpsError('not-found', 'User not found');
+
+      await ref.update({
+        password: await hashPasswordNode(String(dd.password)),
+        password_hashed: true,
+        failed_login_attempts: 0,
+        is_locked: false,
+        updated_at: nowISO(),
+        updated_by: actor,
+      });
+      await tenantAudit(tenantId, { action: 'tenant_user_reset_password', details: { user_id: userId }, staff });
+      await platformAudit({
+        actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+        action: 'tenant_user_reset_password', tenant_id: tenantId, details: { user_id: userId },
+      });
+      return { ok: true };
+    }
+
+    throw new HttpsError('invalid-argument', `Unknown op: ${op}`);
+  }
+
   return {
     platformLogin,
+    platformSetupPassword,
     platformCreateTenant,
     platformListTenants,
     platformUpdateTenant,
     platformSupportAccess,
     platformResumeStaff,
     platformManageStaff,
+    platformManageTenantUsers,
   };
 }
 
-module.exports = { createPlatform, tenantInScope, TENANT_PATCH_KEYS, isValidTenantCode };
+module.exports = {
+  createPlatform,
+  tenantInScope,
+  TENANT_PATCH_KEYS,
+  isValidTenantCode,
+  validateStaffPassword,
+  countActiveAdminsAfter,
+  TENANT_USER_ROLES,
+  PASSWORD_MIN_LEN,
+};

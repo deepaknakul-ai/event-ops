@@ -60,6 +60,25 @@ export const platformLogout = async () => {
   try { await signOut(auth); } catch { /* ignore */ }
 };
 
+// First-time password setup. platformLogin throws PASSWORD_SETUP_REQUIRED when an
+// account must set its password before it can sign in. This mints the session the
+// same way platformLogin does — it returns {token, staffId, role, name}, so we sign
+// the shared Firebase app in with the custom token and persist the identity
+// identically. After it resolves the caller is fully logged in.
+export const setupPassword = async ({ username, setupKey, newPassword }) => {
+  const data = await call('platformSetupPassword', { username, setupKey, newPassword }); // {token, staffId, role, name}
+  if (data?.token) {
+    try {
+      await signInWithCustomToken(auth, data.token);
+    } catch (e) {
+      throw new Error('Session could not be established: ' + (e?.message || e));
+    }
+  }
+  const session = { staffId: data?.staffId || null, role: data?.role || 'business_manager', name: data?.name || username };
+  saveSession(session);
+  return session;
+};
+
 // ── Tenants ──────────────────────────────────────────────────────────────────
 // listTenants -> {tenants:[{id(=code), name, code, region, status, plan,
 //   trial_expires_on, assigned_managers[], contact_*, notes, created_at, ...}]}
@@ -90,3 +109,13 @@ export const listStaff    = () => call('platformManageStaff', { op: 'list' });  
 export const createStaff  = (data) => call('platformManageStaff', { op: 'create', data });            // {name,username,email,role,regions,assigned_tenants,password} -> {ok, staff}
 export const updateStaff  = (staffId, data) => call('platformManageStaff', { op: 'update', staffId, data }); // {name,email,role,regions,assigned_tenants,status,password?} -> {ok}
 export const disableStaff = (staffId) => call('platformManageStaff', { op: 'disable', staffId });      // -> {ok}
+
+// ── Tenant users (single multiplexed callable) ───────────────────────────────
+// Manage a tenant company's own employees. tenantId is the tenant code/id from
+// listTenants. Roles are the in-tenant roles: admin|accountant|manager|tech|user.
+// Errors (e.g. "cannot disable the last admin") surface as thrown messages.
+export const listTenantUsers  = (tenantId) => call('platformManageTenantUsers', { tenantId, op: 'list' });                                   // -> {users:[{id,name,username,email,role,status}]}
+export const createTenantUser = (tenantId, data) => call('platformManageTenantUsers', { tenantId, op: 'create', data });                     // {name,username,email,role,password} -> {ok, userId}
+export const updateTenantUser = (tenantId, userId, data) => call('platformManageTenantUsers', { tenantId, op: 'update', userId, data });     // {name?,email?,role?,status?} -> {ok}
+export const disableTenantUser = (tenantId, userId) => call('platformManageTenantUsers', { tenantId, op: 'disable', userId });               // -> {ok}
+export const resetTenantUserPassword = (tenantId, userId, password) => call('platformManageTenantUsers', { tenantId, op: 'resetPassword', userId, data: { password } }); // -> {ok}

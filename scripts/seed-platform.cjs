@@ -2,12 +2,23 @@
  * scripts/seed-platform.cjs
  *
  * One-time bootstrap for the SaaS platform project. Writes the platform meta
- * flag and creates the first super_admin in platform_staff (plus its hashed
- * credentials), so the `platformLogin` callable can authenticate it.
+ * flag and creates the first super_admin in platform_staff (plus its secret
+ * credentials), so the `platformLogin` / `platformSetupPassword` callables can
+ * authenticate it.
  *
- * The password is hashed with the SAME pbkdf2 scheme as functions/index.js
- * (hashPasswordNode) — see PBKDF2_ITERS / hashPasswordNode below — so the
- * stored 'v3:...' string verifies cleanly server-side.
+ * TWO MODES:
+ *   • SETUP-KEY MODE (default) — the super_admin is seeded WITHOUT a password:
+ *       it carries `needs_password_setup: true` and a one-time SETUP KEY whose
+ *       pbkdf2 hash is stored at platform_staff/{id}/secret/credentials.setup_key
+ *       (with setup_key_expires). The plaintext key is PRINTED ONCE to stdout and
+ *       never stored. First sign-in goes through platformSetupPassword, which
+ *       swaps the key for a chosen password.
+ *   • PASSWORD MODE (escape hatch) — pass `--super-admin-pass <pw>` to seed a
+ *       ready-to-use password instead (the original behaviour), for automation.
+ *
+ * The setup key / password are hashed with the SAME pbkdf2 scheme as
+ * functions/index.js (hashPasswordNode) — see PBKDF2_ITERS below — so the stored
+ * 'v3:...' string verifies cleanly server-side.
  *
  * Usage:
  *   node scripts/seed-platform.cjs \
@@ -15,14 +26,16 @@
  *     --sa <path-to-service-account.json> \
  *     --super-admin-user  <username> \
  *     --super-admin-email <email> \
- *     --super-admin-pass  <password> \
- *     [--force]     overwrite an existing super_admin / staff doc
- *     [--dry-run]   print what would be written, write nothing
+ *     [--super-admin-pass <password>]     escape hatch: seed a ready password
+ *     [--setup-key-ttl-days <N>]          setup-key lifetime, default 7
+ *     [--force]                           overwrite an existing super_admin / doc
+ *     [--dry-run]                         print planned writes, write nothing
  *
  * Writes (top-level platform collections on the SaaS project):
  *   platform_meta/config                        { platform_enabled, seeded_at }
  *   platform_staff/{slug}                        { name, username, email, role, ... }
- *   platform_staff/{slug}/secret/credentials     { password:<v3 hash>, updated_at }
+ *   platform_staff/{slug}/secret/credentials     SETUP: { setup_key:<v3 hash>, setup_key_expires, updated_at }
+ *                                                PWORD: { password:<v3 hash>, updated_at }
  *
  * Exit codes:  0 = seeded (or dry-run)   1 = bad args / guard tripped / error
  */
@@ -47,7 +60,7 @@ const pbkdf2Async = promisify(pbkdf2);
 //     return `v3:${PBKDF2_ITERS}:${salt.toString('hex')}:${derived.toString('hex')}`;
 //   }
 // Keep these three constants and the format string byte-for-byte identical so
-// the platformLogin verifier (verifyPasswordNode, v3 branch) accepts the hash.
+// the server verifier (verifyPasswordNode, v3 branch) accepts the hash.
 const PBKDF2_ITERS = 100000; // MUST match functions/index.js
 const PBKDF2_KEYLEN = 32; //     MUST match (derived key length in bytes)
 const PBKDF2_DIGEST = 'sha256'; // MUST match
@@ -63,6 +76,26 @@ async function hashPasswordNode(plaintext) {
     PBKDF2_DIGEST
   );
   return `v3:${PBKDF2_ITERS}:${salt.toString('hex')}:${derived.toString('hex')}`;
+}
+
+// A readable, high-entropy one-time setup key: 20 random bytes rendered in
+// Crockford base32 (no I/L/O/U) and grouped in 4-char blocks. ~100 bits.
+function generateSetupKey() {
+  const bytes = randomBytes(20);
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return out.match(/.{1,4}/g).join('-');
 }
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
@@ -93,15 +126,25 @@ Usage:
     --sa <path-to-service-account.json> \\
     --super-admin-user  <username> \\
     --super-admin-email <email> \\
-    --super-admin-pass  <password> \\
-    [--force]    overwrite an existing super_admin
-    [--dry-run]  print planned writes without writing
+    [--super-admin-pass <password>]   escape hatch: seed a ready password
+    [--setup-key-ttl-days <N>]        setup-key lifetime in days (default 7)
+    [--force]                         overwrite an existing super_admin
+    [--dry-run]                       print planned writes without writing
 
-Example:
+Default (no --super-admin-pass): SETUP-KEY MODE — seeds the super_admin awaiting
+first-login setup and prints a one-time setup key ONCE. Sign in with that key to
+choose a password.
+
+Example (setup-key mode):
+  node scripts/seed-platform.cjs --project acme-saas-prod \\
+    --sa ./saas-service-account.json \\
+    --super-admin-user root --super-admin-email ops@acme.io
+
+Example (password escape hatch):
   node scripts/seed-platform.cjs --project acme-saas-prod \\
     --sa ./saas-service-account.json \\
     --super-admin-user root --super-admin-email ops@acme.io \\
-    --super-admin-pass 'S0me-strong-pass' --dry-run
+    --super-admin-pass 'S0me-strong-pass'
 `
   );
   process.exit(1);
@@ -125,24 +168,38 @@ function slugify(username) {
   const saPath = args.sa;
   const username = args['super-admin-user'];
   const email = args['super-admin-email'];
-  const password = args['super-admin-pass'];
+  const password = args['super-admin-pass']; // optional → escape hatch
   const DRY_RUN = args['dry-run'] === true;
   const FORCE = args.force === true;
 
-  // Validate required flags.
+  // Mode: SETUP-KEY by default; PASSWORD only when --super-admin-pass is given.
+  const PASSWORD_MODE = password !== undefined && password !== true;
+
+  // Setup-key TTL (days) — only meaningful in setup-key mode.
+  let ttlDays = 7;
+  if (args['setup-key-ttl-days'] !== undefined && args['setup-key-ttl-days'] !== true) {
+    ttlDays = parseInt(args['setup-key-ttl-days'], 10);
+  }
+
+  // ── Validate flags BEFORE any admin init ────────────────────────────────────
   if (!project) usage('--project is required');
   if (!saPath) usage('--sa is required');
   if (!username) usage('--super-admin-user is required');
   if (!email) usage('--super-admin-email is required');
-  if (!password) usage('--super-admin-pass is required');
   if (typeof project !== 'string' || project === 'REPLACE_WITH_SAAS_PROJECT_ID') {
     usage('--project is not set to a real SaaS project id');
   }
   if (typeof email !== 'string' || !email.includes('@')) {
     usage('--super-admin-email does not look like an email address');
   }
-  if (typeof password !== 'string' || password.length < 8) {
+  if (args['super-admin-pass'] === true) {
+    usage('--super-admin-pass was given without a value');
+  }
+  if (PASSWORD_MODE && (typeof password !== 'string' || password.length < 8)) {
     usage('--super-admin-pass must be at least 8 characters');
+  }
+  if (!Number.isInteger(ttlDays) || ttlDays < 1 || ttlDays > 3650) {
+    usage('--setup-key-ttl-days must be an integer between 1 and 3650');
   }
 
   // Load the service account.
@@ -165,9 +222,11 @@ function slugify(username) {
 
   console.log('');
   console.log(`Platform seed  —  project: ${project}${DRY_RUN ? '  (DRY RUN)' : ''}`);
+  console.log(`  mode            : ${PASSWORD_MODE ? 'PASSWORD (ready login)' : 'SETUP-KEY (first-login setup)'}`);
   console.log(`  service account : ${saAbs}`);
   console.log(`  super_admin     : ${username} <${email}>`);
   console.log(`  staff doc id    : platform_staff/${docId || '(auto-id)'}`);
+  if (!PASSWORD_MODE) console.log(`  setup-key TTL   : ${ttlDays} day(s)`);
   console.log('');
 
   // Initialize Admin SDK against the SaaS project.
@@ -219,7 +278,6 @@ function slugify(username) {
 
   // ── Build the payloads ──────────────────────────────────────────────────────
   const now = admin.firestore.FieldValue.serverTimestamp();
-  const passwordHash = await hashPasswordNode(password);
 
   const metaData = { platform_enabled: true, seeded_at: now };
   const staffData = {
@@ -230,12 +288,30 @@ function slugify(username) {
     regions: [],
     assigned_tenants: [],
     status: 'active',
+    needs_password_setup: !PASSWORD_MODE,
+    failed_login_attempts: 0,
+    login_locked_until: null,
     created_at: now,
   };
-  const credData = { password: passwordHash, updated_at: now };
 
-  // Show a redacted preview of the hash (it's one-way, but keep logs tidy).
-  const hashPreview = `${passwordHash.slice(0, 24)}...(${passwordHash.length} chars)`;
+  // Credentials + a one-time setup key (setup mode only). The setup_key_expires
+  // is a literal ISO string because the server compares it as `new Date(str)`.
+  let credData;
+  let setupKey = null;
+  let credPreview;
+  if (PASSWORD_MODE) {
+    const passwordHash = await hashPasswordNode(password);
+    credData = { password: passwordHash, updated_at: now };
+    credPreview = `{ password: '${passwordHash.slice(0, 24)}...(${passwordHash.length} chars)', updated_at: '<serverTimestamp>' }`;
+  } else {
+    setupKey = generateSetupKey();
+    const setupKeyHash = await hashPasswordNode(setupKey);
+    const setupKeyExpires = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+    credData = { setup_key: setupKeyHash, setup_key_expires: setupKeyExpires, updated_at: now };
+    credPreview =
+      `{ setup_key: '${setupKeyHash.slice(0, 24)}...(${setupKeyHash.length} chars)', ` +
+      `setup_key_expires: '${setupKeyExpires}', updated_at: '<serverTimestamp>' }`;
+  }
 
   console.log('Planned writes:');
   console.log(`  platform_meta/config`);
@@ -243,11 +319,14 @@ function slugify(username) {
   console.log(`  platform_staff/${finalId}`);
   console.log(`      ${JSON.stringify({ ...staffData, created_at: '<serverTimestamp>' })}`);
   console.log(`  platform_staff/${finalId}/secret/credentials`);
-  console.log(`      { password: '${hashPreview}', updated_at: '<serverTimestamp>' }`);
+  console.log(`      ${credPreview}`);
   console.log('');
 
   if (DRY_RUN) {
     console.log('DRY RUN — nothing written.');
+    if (!PASSWORD_MODE) {
+      console.log('(A fresh one-time setup key is generated and shown only on a real run.)');
+    }
     await app.delete().catch(() => {});
     process.exit(0);
   }
@@ -262,7 +341,23 @@ function slugify(username) {
   console.log('Seeded successfully:');
   console.log(`  platform_meta/config            (platform_enabled: true)`);
   console.log(`  platform_staff/${finalId}         (super_admin: ${username})`);
-  console.log(`  platform_staff/${finalId}/secret/credentials   (v3 pbkdf2 hash)`);
+  if (PASSWORD_MODE) {
+    console.log(`  platform_staff/${finalId}/secret/credentials   (v3 pbkdf2 password hash)`);
+    console.log('');
+    console.log('Sign in via platformLogin with the username and the password you supplied.');
+  } else {
+    console.log(`  platform_staff/${finalId}/secret/credentials   (v3 pbkdf2 setup-key hash)`);
+    console.log('');
+    console.log('════════════════════════════════════════════════════════════════════');
+    console.log('  ONE-TIME SETUP KEY  —  shown ONCE, copy it now (not recoverable):');
+    console.log('');
+    console.log(`      ${setupKey}`);
+    console.log('');
+    console.log(`  Valid for ${ttlDays} day(s). First sign-in: choose "set password",`);
+    console.log(`  enter username "${username}" + this key, then pick a password`);
+    console.log(`  (min 10 chars). The key is deleted once the password is set.`);
+    console.log('════════════════════════════════════════════════════════════════════');
+  }
   console.log('');
   await app.delete().catch(() => {});
   process.exit(0);

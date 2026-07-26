@@ -4,7 +4,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Pencil, PauseCircle, PlayCircle, UserX,
-  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy,
+  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy, UserCog,
 } from 'lucide-react';
 import { notify } from '../utils/toast';
 import { confirmDialog } from '../utils/dialog';
@@ -12,6 +12,7 @@ import { Card, TextInput, SelectInput, PrimaryButton, GhostButton, IconButton, S
 import { STATUS_ORDER, PLAN_ORDER, TENANT_STATUS, TENANT_PLAN, fmtDate, daysUntil } from './constants';
 import { updateTenant, enterSupport } from './api';
 import TenantFormModal from './TenantFormModal';
+import TenantUsersModal from './TenantUsersModal';
 
 const TrialHint = ({ tenant }) => {
   if (tenant.plan !== 'trial' || !tenant.trial_expires_on) return null;
@@ -27,6 +28,7 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
   const [statusFilter, setStatusFilter] = useState('all');
   const [planFilter, setPlanFilter] = useState('all');
   const [form, setForm] = useState({ open: false, mode: 'create', tenant: null });
+  const [usersModal, setUsersModal] = useState({ open: false, tenant: null });
   const [pendingId, setPendingId] = useState(null);
 
   const filtered = useMemo(() => {
@@ -172,6 +174,9 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex items-center justify-end gap-1">
+                          <IconButton title="Manage users" className="hover:text-indigo-600" onClick={() => setUsersModal({ open: true, tenant: t })} disabled={busy}>
+                            <UserCog size={15} />
+                          </IconButton>
                           <IconButton title="Support access" className="hover:text-rose-600" onClick={() => handleSupport(t)} disabled={busy}>
                             <LifeBuoy size={15} />
                           </IconButton>
@@ -218,6 +223,12 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
         isSuperAdmin={isSuperAdmin}
         onClose={() => setForm((f) => ({ ...f, open: false }))}
         onSaved={async () => { setForm((f) => ({ ...f, open: false })); await onReload(); }}
+      />
+
+      <TenantUsersModal
+        open={usersModal.open}
+        tenant={usersModal.tenant}
+        onClose={() => setUsersModal((s) => ({ ...s, open: false }))}
       />
     </div>
   );

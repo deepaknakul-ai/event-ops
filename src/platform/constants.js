@@ -42,6 +42,31 @@ export const STAFF_STATUS = {
 
 export const roleLabel = (role) => PLATFORM_ROLE[role]?.label || role || '—';
 
+// ── Tenant (company) user roles ──────────────────────────────────────────────
+// These are roles a user holds INSIDE a tenant workspace (distinct from the
+// PLATFORM_ROLE staff roles above). Used by the Tenant Users manager modal.
+export const TENANT_USER_ROLE = {
+  admin:      { label: 'Admin',      badge: 'bg-red-50 text-red-700 border-red-200',            desc: 'Full access to the tenant workspace.' },
+  accountant: { label: 'Accountant', badge: 'bg-indigo-50 text-indigo-700 border-indigo-200',   desc: 'Books, invoices and financial records.' },
+  manager:    { label: 'Manager',    badge: 'bg-blue-50 text-blue-700 border-blue-200',          desc: 'Operations, projects and staff oversight.' },
+  tech:       { label: 'Tech',       badge: 'bg-violet-50 text-violet-700 border-violet-200',    desc: 'Field / technical operations.' },
+  user:       { label: 'User',       badge: 'bg-slate-100 text-slate-600 border-slate-200',      desc: 'Standard limited access.' },
+};
+export const TENANT_USER_ROLE_OPTIONS = ['admin', 'accountant', 'manager', 'tech', 'user'];
+
+// Tenant user account status. Values match functions/platform.js
+// TENANT_USER_STATUSES exactly (capitalised). 'disable' op → 'Disabled';
+// update {status:'Active'} reactivates. Unknown values fall back in the badge.
+export const TENANT_USER_STATUS = {
+  Active:      { label: 'Active',      badge: 'border-emerald-200 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+  Disabled:    { label: 'Disabled',    badge: 'border-slate-200 bg-slate-100 text-slate-500',      dot: 'bg-slate-400'   },
+  Deactivated: { label: 'Deactivated', badge: 'border-rose-200 bg-rose-50 text-rose-700',          dot: 'bg-rose-400'    },
+};
+export const TENANT_USER_STATUS_OPTIONS = ['Active', 'Disabled', 'Deactivated'];
+// Mirror of the backend isDisabledEmployeeStatus(): anything not explicitly
+// Disabled/Deactivated (including a legacy empty value) counts as active.
+export const isTenantUserActive = (status) => status !== 'Disabled' && status !== 'Deactivated';
+
 // Client-side mirror of isValidTenantCode() — a slug of 3–30 [a-z0-9-].
 export const TENANT_CODE_RE = /^[a-z0-9-]{3,30}$/;
 

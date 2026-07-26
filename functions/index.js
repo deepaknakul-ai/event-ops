@@ -2752,6 +2752,7 @@ const platform = createPlatform({
   admin, db, logger, HttpsError,
   verifyPasswordNode, hashPasswordNode,
   coaDefaults: require('./coa-defaults.cjs'),
+  equipmentDefaults: require('./equipment-defaults.cjs'),
   listAppIds,
 });
 
@@ -2760,10 +2761,12 @@ const PLATFORM_OPTS = {
   serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT,
 };
 exports.platformLogin = onCall(PLATFORM_OPTS, (req) => platform.platformLogin(req));
+exports.platformSetupPassword = onCall(PLATFORM_OPTS, (req) => platform.platformSetupPassword(req));
 exports.platformCreateTenant = onCall(PLATFORM_OPTS, (req) => platform.platformCreateTenant(req));
 exports.platformListTenants = onCall(PLATFORM_OPTS, (req) => platform.platformListTenants(req));
 exports.platformUpdateTenant = onCall(PLATFORM_OPTS, (req) => platform.platformUpdateTenant(req));
 exports.platformSupportAccess = onCall(PLATFORM_OPTS, (req) => platform.platformSupportAccess(req));
 exports.platformResumeStaff = onCall(PLATFORM_OPTS, (req) => platform.platformResumeStaff(req));
 exports.platformManageStaff = onCall(PLATFORM_OPTS, (req) => platform.platformManageStaff(req));
+exports.platformManageTenantUsers = onCall(PLATFORM_OPTS, (req) => platform.platformManageTenantUsers(req));
 

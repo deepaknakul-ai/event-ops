@@ -2,7 +2,7 @@
 // Styling mirrors the host app: white cards, indigo primary, slate text.
 import React, { useState } from 'react';
 import { X } from 'lucide-react';
-import { TENANT_STATUS, TENANT_PLAN, PLATFORM_ROLE } from './constants';
+import { TENANT_STATUS, TENANT_PLAN, PLATFORM_ROLE, TENANT_USER_ROLE, TENANT_USER_STATUS } from './constants';
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 export const Card = ({ className = '', children }) => (
@@ -85,6 +85,19 @@ export const PlanBadge = ({ plan }) => {
 export const RoleBadge = ({ role }) => {
   const r = PLATFORM_ROLE[role] || { label: role || '—', badge: 'bg-slate-100 text-slate-600 border-slate-200' };
   return <Pill cls={r.badge}>{r.label}</Pill>;
+};
+
+// In-tenant user role (admin/accountant/manager/tech/user) — used by the Tenant
+// Users manager. Mirrors RoleBadge but keyed off TENANT_USER_ROLE.
+export const TenantUserRoleBadge = ({ role }) => {
+  const r = TENANT_USER_ROLE[role] || { label: role || '—', badge: 'bg-slate-100 text-slate-600 border-slate-200' };
+  return <Pill cls={r.badge}>{r.label}</Pill>;
+};
+
+// Tenant user account status (active/disabled).
+export const TenantUserStatusBadge = ({ status }) => {
+  const s = TENANT_USER_STATUS[status] || { label: status || 'Unknown', badge: 'bg-slate-100 text-slate-600 border-slate-200', dot: 'bg-slate-400' };
+  return <Pill cls={s.badge}><span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />{s.label}</Pill>;
 };
 
 // ── Stat card ────────────────────────────────────────────────────────────────
