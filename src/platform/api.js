@@ -16,7 +16,7 @@
 // in this browser, which is expected for the dedicated /platform route.
 
 import { httpsCallable, getFunctions } from 'firebase/functions';
-import { signInWithCustomToken, signOut, onAuthStateChanged } from 'firebase/auth';
+import { signInWithCustomToken, signOut, onAuthStateChanged, getIdTokenResult } from 'firebase/auth';
 import { auth } from '../firebase';
 import { setAppId } from '../utils/constants';
 
@@ -37,8 +37,21 @@ const clearSession = () => {
   try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
 };
 
-// Subscribe to the underlying Firebase auth state. cb receives the user (or null).
-export const onPlatformAuth = (cb) => onAuthStateChanged(auth, cb);
+// Subscribe to the underlying Firebase auth state. cb receives (user, isStaff),
+// where isStaff is true ONLY when the live session carries the `staff` custom
+// claim. Because the tenant app and this console share one Firebase auth
+// instance, a tenant login can replace the staff session; the console must
+// treat a non-staff session as logged-out (otherwise callables 403). We resolve
+// the claim from the CACHED id token (no forced refresh) so it's cheap.
+export const onPlatformAuth = (cb) => onAuthStateChanged(auth, async (user) => {
+  if (!user) { cb(null, false); return; }
+  try {
+    const res = await getIdTokenResult(user);
+    cb(user, !!(res.claims && res.claims.staff));
+  } catch {
+    cb(user, false);
+  }
+});
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 export const platformLogin = async ({ username, password }) => {

@@ -18,11 +18,13 @@ const PlatformConsole = () => {
   const [booting, setBooting] = useState(true);
 
   useEffect(() => {
-    // A valid console session needs BOTH a cached identity and a live Firebase
-    // auth user (the custom-token sign-in). If Firebase reports no user, any
-    // stale identity is void — drop back to the login screen.
-    const unsub = onPlatformAuth((user) => {
-      setSession((prev) => (user ? prev : null));
+    // A valid console session needs a live Firebase user that is a STAFF user
+    // (carries the `staff` claim) — not merely any signed-in user. The tenant
+    // app shares this Firebase auth instance, so a tenant login can occupy the
+    // session; in that case isStaff is false and we drop back to the login
+    // screen instead of letting staff callables fail with 403.
+    const unsub = onPlatformAuth((user, isStaff) => {
+      setSession((prev) => (user && isStaff ? (prev || loadSession()) : null));
       setBooting(false);
     });
     return unsub;
