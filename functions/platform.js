@@ -259,6 +259,25 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     return revoked;
   }
 
+  // Revoke a staff member's access when they are disabled: kill their own
+  // session AND any live support sessions they hold inside tenant workspaces.
+  // platformManageStaff('disable') flips their status (callables re-check it on
+  // every call), but without this a disabled staffer's browser keeps a valid
+  // token — rules-level reads of the control plane + any standing support-admin
+  // grant — until it expires (<=1h).
+  async function revokeStaffSessions(staffId) {
+    const supportUid = `support_${staffId}`;
+    await admin.auth().revokeRefreshTokens(staffId).catch(() => {});
+    await admin.auth().revokeRefreshTokens(supportUid).catch(() => {});
+    const tenants = await db.collection('platform_tenants').get();
+    let cleared = 0;
+    for (const t of tenants.docs) {
+      const ref = db.doc(`${dataPath(t.id)}/users/${supportUid}`);
+      if ((await ref.get()).exists) { await ref.delete().catch(() => {}); cleared += 1; }
+    }
+    return cleared;
+  }
+
   // tenant.assigned_managers is the ONLY source of truth for business_manager
   // scoping (enforced by tenantInScope + firestore.rules). staff.assigned_tenants
   // was previously written but read by nothing — assigning tenants from the staff
@@ -860,12 +879,22 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
 
     if (op === 'disable') {
       if (!staffId) throw new HttpsError('invalid-argument', 'staffId is required');
+      if (staffId === staff.id) throw new HttpsError('failed-precondition', 'You cannot disable your own account');
       const ref = db.doc(`platform_staff/${staffId}`);
-      if (!(await ref.get()).exists) throw new HttpsError('not-found', 'Staff not found');
+      const targetSnap = await ref.get();
+      if (!targetSnap.exists) throw new HttpsError('not-found', 'Staff not found');
+      // Never disable the last active super_admin — that would lock everyone out
+      // of staff management.
+      if (targetSnap.data().role === 'super_admin') {
+        const supers = await db.collection('platform_staff')
+          .where('role', '==', 'super_admin').where('status', '==', 'active').get();
+        if (supers.size <= 1) throw new HttpsError('failed-precondition', 'Cannot disable the last active super admin');
+      }
       await ref.update({ status: 'disabled', updated_at: nowISO(), updated_by: staff.id });
+      const clearedSupport = await revokeStaffSessions(staffId);
       await platformAudit({
         actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
-        action: 'staff_disable', tenant_id: null, details: { staffId },
+        action: 'staff_disable', tenant_id: null, details: { staffId, cleared_support: clearedSupport },
       });
       return { ok: true };
     }
