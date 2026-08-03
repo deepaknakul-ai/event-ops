@@ -69,9 +69,10 @@ const TRIVIAL_PASSWORDS = new Set([
 const TENANT_PATCH_KEYS = [
   'name', 'region', 'status', 'plan', 'trial_expires_on', 'assigned_managers',
   'contact_name', 'contact_email', 'contact_phone', 'notes',
+  'feature_overrides', 'limit_overrides',
 ];
-// Of those, only a super_admin may change these two (they alter reach/scoping).
-const TENANT_SUPER_ADMIN_ONLY_KEYS = ['region', 'assigned_managers'];
+// Of these, only a super_admin may change reach/scoping and entitlement overrides.
+const TENANT_SUPER_ADMIN_ONLY_KEYS = ['region', 'assigned_managers', 'feature_overrides', 'limit_overrides'];
 
 // Fields platformManageStaff('update') may write on the main staff doc.
 const STAFF_UPDATE_KEYS = ['name', 'email', 'role', 'regions', 'assigned_tenants', 'status'];
@@ -79,6 +80,51 @@ const STAFF_UPDATE_KEYS = ['name', 'email', 'role', 'regions', 'assigned_tenants
 // Tenant code == artifacts/{code} appId: a slug of 3–30 [a-z0-9-] chars.
 function isValidTenantCode(code) {
   return typeof code === 'string' && /^[a-z0-9-]{3,30}$/.test(code);
+}
+
+// ── Plan entitlements ────────────────────────────────────────────────────────
+// What each plan grants by default. `features` are booleans the tenant app /
+// server features check; `limits` are numeric caps (null = unlimited). A tenant
+// may carry feature_overrides / limit_overrides that win over these defaults, so
+// a plan is a starting point, not a straitjacket. resolveEntitlements() is the
+// single source of truth; the resolved result is mirrored to the tenant-readable
+// settings/entitlements doc. Enforced server-side (WhatsApp gate, user cap);
+// inert on the private edition, which has no settings/entitlements doc.
+const PLAN_ENTITLEMENTS = {
+  trial: {
+    features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true },
+    limits: { max_users: 3 },
+  },
+  standard: {
+    features: { ai_accountant: true, whatsapp_copilot: false, hr_module: true },
+    limits: { max_users: 15 },
+  },
+  premium: {
+    features: { ai_accountant: true, whatsapp_copilot: true, hr_module: true },
+    limits: { max_users: null },
+  },
+};
+// The complete set of known feature keys (union across plans) — the console
+// editor and override validation use this so a typo'd flag can't be stored.
+const FEATURE_KEYS = ['ai_accountant', 'whatsapp_copilot', 'hr_module'];
+const LIMIT_KEYS = ['max_users'];
+
+// Merge plan defaults with per-tenant overrides into the effective entitlements.
+// Pure/testable. Unknown plan falls back to 'trial'.
+function resolveEntitlements(tenant) {
+  const t = tenant || {};
+  const base = PLAN_ENTITLEMENTS[t.plan] || PLAN_ENTITLEMENTS.trial;
+  const features = { ...base.features };
+  for (const k of FEATURE_KEYS) {
+    if (t.feature_overrides && typeof t.feature_overrides[k] === 'boolean') features[k] = t.feature_overrides[k];
+  }
+  const limits = { ...base.limits };
+  for (const k of LIMIT_KEYS) {
+    if (t.limit_overrides && (t.limit_overrides[k] === null || Number.isFinite(t.limit_overrides[k]))) {
+      limits[k] = t.limit_overrides[k];
+    }
+  }
+  return { plan: t.plan || 'trial', features, limits };
 }
 
 // Pure scope predicate used by every scoped handler (list/update/support).
@@ -296,6 +342,17 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
         .update({ assigned_managers: admin.firestore.FieldValue.arrayRemove(staffId) })
         .catch(() => { /* tenant may not exist — skip */ });
     }
+  }
+
+  // Mirror the tenant's resolved entitlements to a tenant-readable settings doc
+  // so the tenant app can gate features and server features can enforce them.
+  // Called on create and whenever plan/overrides change.
+  async function writeEntitlements(tenantId, tenant) {
+    const ent = resolveEntitlements(tenant);
+    await db.doc(`${dataPath(tenantId)}/settings/entitlements`).set({
+      ...ent, updated_at: nowISO(),
+    });
+    return ent;
   }
 
   // Append an entry to a tenant's own audit_logs collection. Field names mirror
@@ -601,6 +658,9 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       last_seen: { [code]: ts },
     }, { merge: true });
 
+    // Mirror the plan's entitlements to the tenant-readable settings doc.
+    await writeEntitlements(code, tenant);
+
     await platformAudit({
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
       action: 'tenant_create', tenant_id: code,
@@ -667,6 +727,11 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     if ('assigned_managers' in clean && !Array.isArray(clean.assigned_managers)) {
       throw new HttpsError('invalid-argument', 'assigned_managers must be an array');
     }
+    for (const okey of ['feature_overrides', 'limit_overrides']) {
+      if (okey in clean && (typeof clean[okey] !== 'object' || clean[okey] === null || Array.isArray(clean[okey]))) {
+        throw new HttpsError('invalid-argument', `${okey} must be an object`);
+      }
+    }
     if (Object.keys(clean).length === 0) throw new HttpsError('invalid-argument', 'No updatable fields in patch');
 
     // Any transition INTO a non-active status (suspended or churned) must revoke
@@ -690,6 +755,10 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       ? (clean.status === 'churned' ? 'tenant_churn' : 'tenant_suspend')
       : 'tenant_update';
     const updated = { ...tenant, ...clean };
+    // Re-mirror entitlements whenever the plan or an override changed.
+    if ('plan' in clean || 'feature_overrides' in clean || 'limit_overrides' in clean) {
+      await writeEntitlements(tenantId, updated);
+    }
     await platformAudit({
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
       action, tenant_id: tenantId,
@@ -960,6 +1029,15 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
         throw new HttpsError('invalid-argument', `Password must be at least ${TENANT_USER_PASSWORD_MIN_LEN} characters`);
       }
 
+      // Enforce the plan/override user cap (null = unlimited).
+      const maxUsers = resolveEntitlements(tenant).limits.max_users;
+      if (Number.isFinite(maxUsers)) {
+        const active = (await loadEmployees()).filter((e) => !isDisabledEmployeeStatus(e.status)).length;
+        if (active >= maxUsers) {
+          throw new HttpsError('failed-precondition', `This tenant's plan allows ${maxUsers} active user(s). Disable one or upgrade the plan.`);
+        }
+      }
+
       const usernameNorm = String(username).trim();
       const emailNorm = String(email).trim();
       const [uSnap, eSnap] = await Promise.all([
@@ -1198,4 +1276,8 @@ module.exports = {
   countActiveAdminsAfter,
   TENANT_USER_ROLES,
   PASSWORD_MIN_LEN,
+  resolveEntitlements,
+  PLAN_ENTITLEMENTS,
+  FEATURE_KEYS,
+  LIMIT_KEYS,
 };

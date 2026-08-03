@@ -511,7 +511,10 @@ service cloud.firestore {
                     : (docId in ['security', 'communication', 'payments', 'einvoice', 'whatsapp'])
                       ? isAdmin(appId)
                       : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
-      allow write: if isAdmin(appId);
+      // settings/entitlements is the tenant's plan-resolved features/limits: the
+      // tenant may READ it (to gate its UI) but only the platform Admin SDK may
+      // write it — otherwise a tenant admin could grant themselves paid features.
+      allow write: if docId == 'entitlements' ? false : isAdmin(appId);
     }
 
     // ── WhatsApp copilot conversations ────────────────────────────────────────

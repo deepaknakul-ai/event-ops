@@ -380,6 +380,15 @@ function createWhatsApp({ admin, db, logger, Anthropic, listAppIds, sanitize, bo
     const mark = (fields) => snap.ref.set({ ...fields, answered_at: new Date().toISOString() }, { merge: true });
 
     try {
+      // Plan gate: the WhatsApp copilot is a plan feature on the SaaS edition.
+      // Inert on private (no settings/entitlements doc → allowed).
+      const entSnap = await db.doc(`${dataPath(appId)}/settings/entitlements`).get().catch(() => null);
+      if (entSnap && entSnap.exists && entSnap.data().features && entSnap.data().features.whatsapp_copilot === false) {
+        await sendText(cfg, m.from, "The WhatsApp copilot isn't included in this workspace's current plan.");
+        await mark({ status: 'rejected', reject_reason: 'plan_feature' });
+        return;
+      }
+
       const sender = await resolveSender(appId, cfg, m.from);
       if (!sender) {
         await sendText(cfg, m.from, 'This number is not registered for this workspace. Ask your admin to add your number in Admin > WhatsApp Copilot.');
