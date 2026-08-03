@@ -21,6 +21,51 @@ export const PLAN_ORDER = ['trial', 'standard', 'premium'];
 // suggestions so any pre-existing value still round-trips through the form.
 export const REGION_SUGGESTIONS = ['India', 'Middle East', 'Europe', 'North America', 'APAC', 'Africa', 'Other'];
 
+// ── Plan entitlements: features + limits ─────────────────────────────────────
+// Client-side mirror of the PLAN_DEFAULTS matrix in functions/platform.js. Each
+// plan grants default boolean FEATURES and numeric LIMITS (null = unlimited). A
+// tenant's feature_overrides / limit_overrides win PER KEY over these defaults;
+// any key not present in the override map inherits the plan default. The backend
+// stays the source of truth — this table only drives the editor + effective
+// preview, so keep it in lock-step with functions/platform.js.
+export const PLAN_DEFAULTS = {
+  trial:    { features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true }, limits: { max_users: 3 } },
+  standard: { features: { ai_accountant: true,  whatsapp_copilot: false, hr_module: true }, limits: { max_users: 15 } },
+  premium:  { features: { ai_accountant: true,  whatsapp_copilot: true,  hr_module: true }, limits: { max_users: null } },
+};
+
+// Feature catalogue — the boolean entitlement keys and how to label them. Order
+// drives the rows in the entitlements editor. Keys match PLAN_DEFAULTS.features.
+export const PLATFORM_FEATURES = [
+  { key: 'ai_accountant',    label: 'AI Accountant',    desc: 'AI-assisted bookkeeping, categorisation and reconciliation.' },
+  { key: 'whatsapp_copilot', label: 'WhatsApp Copilot', desc: 'WhatsApp assistant for capturing records on the go.' },
+  { key: 'hr_module',        label: 'HR Module',        desc: 'Employees, attendance and payroll workspace.' },
+];
+
+// Limit catalogue — numeric caps. A null override means unlimited. Keys match
+// PLAN_DEFAULTS.limits.
+export const PLATFORM_LIMITS = [
+  { key: 'max_users', label: 'Max users', desc: 'Maximum number of users the tenant may have.', unit: 'users' },
+];
+
+// Plan defaults for a given plan, falling back to trial for any unknown plan
+// (mirrors the backend, which treats an absent/unknown plan as trial).
+export const planDefaults = (plan) => PLAN_DEFAULTS[plan] || PLAN_DEFAULTS.trial;
+
+// Resolve the effective value of one entitlement = plan default overridden per
+// key by the tenant's override map (present-in-map wins, absent inherits).
+const has = (map, key) => !!map && Object.prototype.hasOwnProperty.call(map, key);
+export const resolveFeature = (plan, key, featureOverrides) =>
+  has(featureOverrides, key) ? !!featureOverrides[key] : !!planDefaults(plan).features[key];
+export const resolveLimit = (plan, key, limitOverrides) => {
+  if (has(limitOverrides, key)) return limitOverrides[key];
+  const defs = planDefaults(plan).limits;
+  return has(defs, key) ? defs[key] : null;
+};
+
+// Display helper for a numeric limit: null → "Unlimited".
+export const fmtLimit = (v) => (v === null || v === undefined ? 'Unlimited' : String(v));
+
 // ── Platform staff roles (from platformLogin → role) ─────────────────────────
 // Values mirror functions/platform.js STAFF_ROLES exactly. UI-level gating only;
 // the backend remains the source of truth.

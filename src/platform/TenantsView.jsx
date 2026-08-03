@@ -4,7 +4,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Pencil, PauseCircle, PlayCircle, UserX,
-  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy, UserCog,
+  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy, UserCog, SlidersHorizontal,
 } from 'lucide-react';
 import { notify } from '../utils/toast';
 import { confirmDialog } from '../utils/dialog';
@@ -13,6 +13,7 @@ import { STATUS_ORDER, PLAN_ORDER, TENANT_STATUS, TENANT_PLAN, fmtDate, daysUnti
 import { updateTenant, enterSupport } from './api';
 import TenantFormModal from './TenantFormModal';
 import TenantUsersModal from './TenantUsersModal';
+import TenantEntitlementsModal from './TenantEntitlementsModal';
 
 const TrialHint = ({ tenant }) => {
   if (tenant.plan !== 'trial' || !tenant.trial_expires_on) return null;
@@ -29,6 +30,7 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
   const [planFilter, setPlanFilter] = useState('all');
   const [form, setForm] = useState({ open: false, mode: 'create', tenant: null });
   const [usersModal, setUsersModal] = useState({ open: false, tenant: null });
+  const [entitlements, setEntitlements] = useState({ open: false, tenant: null });
   const [pendingId, setPendingId] = useState(null);
 
   const filtered = useMemo(() => {
@@ -180,6 +182,11 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
                           <IconButton title="Support access" className="hover:text-rose-600" onClick={() => handleSupport(t)} disabled={busy}>
                             <LifeBuoy size={15} />
                           </IconButton>
+                          {isSuperAdmin && (
+                            <IconButton title="Plan & features" className="hover:text-indigo-600" onClick={() => setEntitlements({ open: true, tenant: t })} disabled={busy}>
+                              <SlidersHorizontal size={15} />
+                            </IconButton>
+                          )}
                           <IconButton title="Edit" onClick={() => setForm({ open: true, mode: 'edit', tenant: t })} disabled={busy}>
                             <Pencil size={15} />
                           </IconButton>
@@ -229,6 +236,13 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
         open={usersModal.open}
         tenant={usersModal.tenant}
         onClose={() => setUsersModal((s) => ({ ...s, open: false }))}
+      />
+
+      <TenantEntitlementsModal
+        open={entitlements.open}
+        tenant={entitlements.tenant}
+        onClose={() => setEntitlements((s) => ({ ...s, open: false }))}
+        onSaved={async () => { setEntitlements((s) => ({ ...s, open: false })); await onReload(); }}
       />
     </div>
   );
