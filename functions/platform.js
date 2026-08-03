@@ -234,6 +234,51 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     return total;
   }
 
+  // Revoke access for EVERY user of a tenant — used when a tenant is suspended,
+  // churned, or its trial expires. Two-part revocation:
+  //   1. revokeRefreshTokens(uid) — the standard Firebase logout: the user's next
+  //      ID-token refresh (<=1h) fails, forcing re-auth, which verifyLogin then
+  //      blocks (its suspended/churned status check). This is what actually ends
+  //      the session; wiping the /users mirror alone does NOT, because
+  //      firestore.rules userRole() falls back to /employees/{uid}.role.
+  //   2. wipe the /users role mirror — removes support docs and forces every
+  //      user to re-materialise their mirror on next (blocked) login.
+  // uids are the tenant's employee doc ids (== the Firebase Auth uids minted by
+  // verifyLogin). Best-effort per uid: many employees have never signed in and
+  // have no Auth account, so revokeRefreshTokens throws — that's expected.
+  // Residual window: an already-issued ID token stays valid until it expires
+  // (<=1h); immediate cut-off would require a rules-level tenant-status gate.
+  async function revokeTenantSessions(tenantId) {
+    const empsSnap = await db.collection(`${dataPath(tenantId)}/employees`).get();
+    let revoked = 0;
+    for (const emp of empsSnap.docs) {
+      try { await admin.auth().revokeRefreshTokens(emp.id); revoked += 1; }
+      catch { /* no Firebase Auth account for this employee — nothing to revoke */ }
+    }
+    await deleteCollectionDocs(`${dataPath(tenantId)}/users`);
+    return revoked;
+  }
+
+  // tenant.assigned_managers is the ONLY source of truth for business_manager
+  // scoping (enforced by tenantInScope + firestore.rules). staff.assigned_tenants
+  // was previously written but read by nothing — assigning tenants from the staff
+  // screen silently did nothing. This writes those edits THROUGH to each tenant's
+  // assigned_managers so the staff-side assignment actually takes effect.
+  async function syncManagerAssignments(staffId, prevTenants, nextTenants) {
+    const prev = new Set(Array.isArray(prevTenants) ? prevTenants : []);
+    const next = new Set(Array.isArray(nextTenants) ? nextTenants : []);
+    for (const code of [...next].filter((c) => !prev.has(c))) {
+      await db.doc(`platform_tenants/${code}`)
+        .update({ assigned_managers: admin.firestore.FieldValue.arrayUnion(staffId) })
+        .catch(() => { /* tenant may not exist — skip */ });
+    }
+    for (const code of [...prev].filter((c) => !next.has(c))) {
+      await db.doc(`platform_tenants/${code}`)
+        .update({ assigned_managers: admin.firestore.FieldValue.arrayRemove(staffId) })
+        .catch(() => { /* tenant may not exist — skip */ });
+    }
+  }
+
   // Append an entry to a tenant's own audit_logs collection. Field names mirror
   // the client's logAction (src/App.jsx) EXACTLY so entries render in the
   // tenant's in-app audit view, plus a `support_session` marker.
@@ -605,24 +650,30 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     }
     if (Object.keys(clean).length === 0) throw new HttpsError('invalid-argument', 'No updatable fields in patch');
 
-    const suspending = clean.status === 'suspended' && tenant.status !== 'suspended';
+    // Any transition INTO a non-active status (suspended or churned) must revoke
+    // every live session — not merely block new logins. Previously only
+    // 'suspended' wiped the /users mirror, and even that left live sessions with
+    // access via the /employees role fallback; churn did neither.
+    const deactivating = ('status' in clean)
+      && ['suspended', 'churned'].includes(clean.status)
+      && clean.status !== tenant.status;
 
     clean.updated_at = nowISO();
     clean.updated_by = staff.id;
     await ref.update(clean);
 
-    // Suspending kills every live session's rules access: the tenant's rules
-    // resolve role via /users/{uid}, so wiping that collection locks everyone
-    // out immediately (they re-materialize their mirror doc on next login once
-    // reactivated).
-    if (suspending) {
-      await deleteCollectionDocs(`${dataPath(tenantId)}/users`);
+    if (deactivating) {
+      const revoked = await revokeTenantSessions(tenantId);
+      logger.info(`platformUpdateTenant: ${tenantId} -> ${clean.status}, revoked ${revoked} session(s)`);
     }
 
+    const action = deactivating
+      ? (clean.status === 'churned' ? 'tenant_churn' : 'tenant_suspend')
+      : 'tenant_update';
     const updated = { ...tenant, ...clean };
     await platformAudit({
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
-      action: suspending ? 'tenant_suspend' : 'tenant_update', tenant_id: tenantId,
+      action, tenant_id: tenantId,
       details: { fields: Object.keys(clean) },
     });
     return { ok: true, tenant: updated };
@@ -759,6 +810,8 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       await db.doc(`platform_staff/${ref.id}/secret/credentials`).set({
         password: await hashPasswordNode(password),
       });
+      // Write the assignment through to the tenants' assigned_managers.
+      await syncManagerAssignments(ref.id, [], doc.assigned_tenants);
       await platformAudit({
         actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
         action: 'staff_create', tenant_id: null, details: { staffId: ref.id, role },
@@ -770,7 +823,9 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       if (!staffId) throw new HttpsError('invalid-argument', 'staffId is required');
       const dd = data || {};
       const ref = db.doc(`platform_staff/${staffId}`);
-      if (!(await ref.get()).exists) throw new HttpsError('not-found', 'Staff not found');
+      const priorSnap = await ref.get();
+      if (!priorSnap.exists) throw new HttpsError('not-found', 'Staff not found');
+      const priorAssigned = priorSnap.data().assigned_tenants;
 
       const clean = {};
       for (const key of STAFF_UPDATE_KEYS) {
@@ -786,6 +841,9 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       clean.updated_by = staff.id;
       await ref.update(clean);
 
+      if ('assigned_tenants' in clean) {
+        await syncManagerAssignments(staffId, priorAssigned, clean.assigned_tenants);
+      }
       if (dd.password !== undefined) {
         await db.doc(`platform_staff/${staffId}/secret/credentials`).set(
           { password: await hashPasswordNode(dd.password) },
@@ -1023,6 +1081,70 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     throw new HttpsError('invalid-argument', `Unknown op: ${op}`);
   }
 
+  // ── Scheduled: enforce trial expiry ──────────────────────────────────────────
+  // Active tenants on the 'trial' plan whose trial_expires_on has passed (beyond
+  // an optional grace period from platform_meta/config.trial_grace_days, default
+  // 0) are auto-suspended and their sessions revoked. verifyLogin already blocks
+  // login to a suspended tenant. Inert off the SaaS project (empty query).
+  async function enforceTrialExpiry() {
+    const today = nowISO().slice(0, 10);
+    let graceDays = 0;
+    try {
+      const cfg = await db.doc(PLATFORM_CONFIG_PATH).get();
+      if (cfg.exists && Number.isFinite(cfg.data().trial_grace_days)) graceDays = cfg.data().trial_grace_days;
+    } catch { /* default grace */ }
+    const snap = await db.collection('platform_tenants')
+      .where('plan', '==', 'trial').where('status', '==', 'active').get();
+    let suspended = 0;
+    for (const doc of snap.docs) {
+      const t = doc.data();
+      if (!t.trial_expires_on) continue;
+      // Cutoff = expiry + grace, compared as YYYY-MM-DD strings (lexicographic).
+      const cutoff = graceDays > 0
+        ? new Date(new Date(`${t.trial_expires_on}T00:00:00Z`).getTime() + graceDays * 86400000).toISOString().slice(0, 10)
+        : t.trial_expires_on;
+      if (today <= cutoff) continue;
+      await doc.ref.update({ status: 'suspended', suspended_reason: 'trial_expired', updated_at: nowISO(), updated_by: 'system:trial_expiry' });
+      await revokeTenantSessions(doc.id);
+      await platformAudit({
+        actor_uid: 'system', actor_name: 'Trial Expiry', actor_role: 'system',
+        action: 'tenant_suspend', tenant_id: doc.id, details: { reason: 'trial_expired', trial_expires_on: t.trial_expires_on },
+      });
+      suspended += 1;
+    }
+    if (suspended) logger.info(`enforceTrialExpiry: suspended ${suspended} expired trial tenant(s)`);
+    return { suspended };
+  }
+
+  // ── Scheduled: sweep expired support sessions ────────────────────────────────
+  // A support session mints a users/support_{staffId} admin mirror doc with a
+  // support_expires_at (+4h). If staff never call platformResumeStaff, that
+  // standing tenant-admin grant would persist forever. This deletes expired
+  // support mirror docs and revokes the support uid's tokens. Iterates
+  // platform_tenants (naturally scoped, no collectionGroup index needed); inert
+  // off the SaaS project.
+  async function sweepSupportSessions() {
+    const now = Date.now();
+    let swept = 0;
+    const tenants = await db.collection('platform_tenants').get();
+    for (const t of tenants.docs) {
+      const supportDocs = await db.collection(`${dataPath(t.id)}/users`).where('support', '==', true).get();
+      for (const d of supportDocs.docs) {
+        const exp = d.data().support_expires_at;
+        if (!exp || new Date(exp).getTime() >= now) continue;
+        await d.ref.delete().catch(() => {});
+        await admin.auth().revokeRefreshTokens(d.id).catch(() => {}); // d.id == support_{staffId}
+        await platformAudit({
+          actor_uid: 'system', actor_name: 'Support Sweep', actor_role: 'system',
+          action: 'support_session_expired', tenant_id: t.id, details: { support_doc: d.id },
+        });
+        swept += 1;
+      }
+    }
+    if (swept) logger.info(`sweepSupportSessions: revoked ${swept} expired support session(s)`);
+    return { swept };
+  }
+
   return {
     platformLogin,
     platformSetupPassword,
@@ -1033,6 +1155,8 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     platformResumeStaff,
     platformManageStaff,
     platformManageTenantUsers,
+    enforceTrialExpiry,
+    sweepSupportSessions,
   };
 }
 

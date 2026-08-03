@@ -117,6 +117,24 @@ async function listAppIds() {
   return [...ids];
 }
 
+// Like listAppIds but excludes tenants that are suspended/churned on the SaaS
+// project — so scheduled processors (draft poster, due reminders) never act on a
+// non-active tenant (posting entries, emailing its clients). Inert on private/
+// standby: with no platform_tenants doc, every app is treated as active.
+async function activeAppIds() {
+  const ids = await listAppIds();
+  const out = [];
+  for (const appId of ids) {
+    try {
+      const t = await db.doc(`platform_tenants/${appId}`).get();
+      if (!t.exists || t.data().status === 'active') out.push(appId);
+    } catch {
+      out.push(appId); // transient read error must not silently drop a live tenant
+    }
+  }
+  return out;
+}
+
 async function isDraftAlreadyPosted(appId, draftId) {
   const q = await db
     .collection(`artifacts/${appId}/public/data/journal_entries`)
@@ -407,8 +425,15 @@ exports.verifyLogin = onCall(
     // error must not lock everyone out, so only an explicit suspended/churned
     // status blocks.
     const tenantSnap = await db.doc(`platform_tenants/${appId}`).get().catch(() => null);
-    if (tenantSnap && tenantSnap.exists && ['suspended', 'churned'].includes(tenantSnap.data().status)) {
-      throw new HttpsError('permission-denied', 'This workspace is suspended. Please contact support.');
+    if (tenantSnap && tenantSnap.exists) {
+      const t = tenantSnap.data();
+      if (['suspended', 'churned'].includes(t.status)) {
+        throw new HttpsError('permission-denied', 'This workspace is suspended. Please contact support.');
+      }
+      // Login-time trial-expiry gate (immediate; the daily sweep is the backstop).
+      if (t.plan === 'trial' && t.trial_expires_on && todayISO() > t.trial_expires_on) {
+        throw new HttpsError('permission-denied', 'This trial has expired. Please contact support to continue.');
+      }
     }
 
     const usernameNorm = String(username).trim();
@@ -684,7 +709,7 @@ exports.postScheduledDrafts = onSchedule(
   },
   async () => {
     const today = todayISO();
-    const appIds = await listAppIds();
+    const appIds = await activeAppIds();
     logger.info(`Scheduled poster scanning ${appIds.length} app(s) for date <= ${today}`);
     let totalPosted = 0;
     let totalFailed = 0;
@@ -1386,7 +1411,7 @@ exports.sendDueReminders = onSchedule(
   { schedule: 'every day 09:30', timeZone: 'Asia/Kolkata', memory: '256MiB', timeoutSeconds: 540 },
   async () => {
     const today = new Date();
-    const appIds = await listAppIds();
+    const appIds = await activeAppIds();
     for (const appId of appIds) {
       try { const r = await processDueReminders(appId, today); logger.info(`[${appId}] reminders`, r); }
       catch (e) { logger.error(`[${appId}] sendDueReminders error`, e); }
@@ -2769,4 +2794,16 @@ exports.platformSupportAccess = onCall(PLATFORM_OPTS, (req) => platform.platform
 exports.platformResumeStaff = onCall(PLATFORM_OPTS, (req) => platform.platformResumeStaff(req));
 exports.platformManageStaff = onCall(PLATFORM_OPTS, (req) => platform.platformManageStaff(req));
 exports.platformManageTenantUsers = onCall(PLATFORM_OPTS, (req) => platform.platformManageTenantUsers(req));
+
+// Scheduled platform maintenance. Inert off the SaaS project (empty queries).
+// Pinned to the admin service account because both call revokeRefreshTokens,
+// which needs Firebase Auth admin permission (same SA the platform callables use).
+exports.enforceTrialExpiry = onSchedule(
+  { schedule: 'every day 02:00', timeZone: 'Asia/Kolkata', memory: '256MiB', timeoutSeconds: 300, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
+  () => platform.enforceTrialExpiry(),
+);
+exports.sweepSupportSessions = onSchedule(
+  { schedule: 'every 60 minutes', memory: '256MiB', timeoutSeconds: 300, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
+  () => platform.sweepSupportSessions(),
+);
 
