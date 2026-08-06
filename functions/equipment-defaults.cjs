@@ -302,10 +302,24 @@ const DEFAULT_EQUIPMENT_CATALOG = [
 // Return deep-cloned rows so callers can mutate freely without touching the
 // module constants (mirrors coa-defaults.getDefaultChartOfAccounts). Nested
 // arrays (classifier_tags) are copied too.
+// Bump when the catalog changes (new items / metadata) so a tenant seeded at an
+// older version can be re-synced to pick up the additions. Re-sync only ADDS
+// missing items — it never touches a tenant's stocked/priced rows.
+const CATALOG_VERSION = 1;
+
+// Stable identity for a catalog row, used to detect which items a tenant already
+// has on re-sync. Derived from category+name (the catalog has no explicit id).
+// CAVEAT: renaming a row's name/category yields a NEW key, so on re-sync the
+// renamed item is added fresh and the old one is left in place.
+function catalogKey(item) {
+  return `${item.category || ''}::${item.name || ''}`
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 const getDefaultEquipmentCatalog = () =>
   DEFAULT_EQUIPMENT_CATALOG.map((row) => ({
     ...row,
     classifier_tags: Array.isArray(row.classifier_tags) ? row.classifier_tags.slice() : [],
   }));
 
-module.exports = { EQUIPMENT_GROUPS, DEFAULT_EQUIPMENT_CATALOG, getDefaultEquipmentCatalog };
+module.exports = { EQUIPMENT_GROUPS, DEFAULT_EQUIPMENT_CATALOG, getDefaultEquipmentCatalog, CATALOG_VERSION, catalogKey };

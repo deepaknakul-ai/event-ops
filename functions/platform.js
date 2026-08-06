@@ -28,6 +28,10 @@
  */
 'use strict';
 
+// Pure helpers for catalog identity/versioning (no firebase — safe to require
+// even under vitest). The catalog data itself is still injected via deps.
+const { catalogKey, CATALOG_VERSION } = require('./equipment-defaults.cjs');
+
 const PLATFORM_CONFIG_PATH = 'platform_meta/config';
 const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
@@ -209,6 +213,10 @@ function equipmentToInventory(item) {
     equipment_group: item.group || '',
     is_template: true,
     indicative: !!item.indicative,
+    // Catalog identity/version — lets platformResyncCatalog add later catalog
+    // additions to an existing tenant without duplicating what it already has.
+    catalog_key: catalogKey(item),
+    catalog_version: CATALOG_VERSION,
   };
 }
 
@@ -1252,6 +1260,49 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     return { swept };
   }
 
+  // ── platformResyncCatalog ────────────────────────────────────────────────────
+  // Add catalog items a tenant is MISSING (e.g. entries added since they were
+  // seeded) without touching anything they've stocked/priced/edited. Matches by
+  // catalog_key (new tenants) or a category+name-derived key (tenants seeded
+  // before catalog_key existed), so it never duplicates an item they already
+  // have. Only adds; never updates or deletes.
+  async function platformResyncCatalog(req) {
+    await assertPlatformEnabled();
+    const staff = await getStaff(req.auth);
+    const { tenantId } = req.data || {};
+    if (!tenantId) throw new HttpsError('invalid-argument', 'tenantId is required');
+    const tSnap = await db.doc(`platform_tenants/${tenantId}`).get();
+    if (!tSnap.exists) throw new HttpsError('not-found', 'Tenant not found');
+    const tenant = { id: tSnap.id, ...tSnap.data() };
+    if (!tenantInScope(staff, tenant)) throw new HttpsError('permission-denied', 'Tenant is outside your scope');
+
+    const catalog = equipmentDefaults.getDefaultEquipmentCatalog();
+    const invSnap = await db.collection(`${dataPath(tenantId)}/inventory`).get();
+    const existing = new Set();
+    for (const d of invSnap.docs) {
+      const inv = d.data();
+      if (inv.catalog_key) existing.add(inv.catalog_key);
+      existing.add(catalogKey({ category: inv.category, name: inv.name }));
+    }
+    const ts = nowISO();
+    let batch = db.batch(); let pending = 0; let added = 0;
+    for (const item of catalog) {
+      if (existing.has(catalogKey(item))) continue;
+      batch.set(db.collection(`${dataPath(tenantId)}/inventory`).doc(), {
+        ...equipmentToInventory(item), created_by: `platform:${staff.id}`, created_at: ts,
+      });
+      added += 1; pending += 1;
+      if (pending >= BATCH_LIMIT) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+    await db.doc(`platform_tenants/${tenantId}`).update({ catalog_version: CATALOG_VERSION, catalog_synced_at: ts });
+    await platformAudit({
+      actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
+      action: 'tenant_catalog_resync', tenant_id: tenantId, details: { added, catalog_version: CATALOG_VERSION },
+    });
+    return { added, catalog_version: CATALOG_VERSION, total_catalog: catalog.length };
+  }
+
   return {
     platformLogin,
     platformSetupPassword,
@@ -1262,6 +1313,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     platformResumeStaff,
     platformManageStaff,
     platformManageTenantUsers,
+    platformResyncCatalog,
     enforceTrialExpiry,
     sweepSupportSessions,
   };

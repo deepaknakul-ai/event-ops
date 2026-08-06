@@ -4,13 +4,13 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Pencil, PauseCircle, PlayCircle, UserX,
-  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy, UserCog, SlidersHorizontal,
+  Building2, RefreshCw, AlertTriangle, Users as UsersIcon, LifeBuoy, UserCog, SlidersHorizontal, PackagePlus,
 } from 'lucide-react';
 import { notify } from '../utils/toast';
 import { confirmDialog } from '../utils/dialog';
 import { Card, TextInput, SelectInput, PrimaryButton, GhostButton, IconButton, StatusBadge, PlanBadge, EmptyState } from './ui';
 import { STATUS_ORDER, PLAN_ORDER, TENANT_STATUS, TENANT_PLAN, fmtDate, daysUntil } from './constants';
-import { updateTenant, enterSupport } from './api';
+import { updateTenant, enterSupport, resyncCatalog } from './api';
 import TenantFormModal from './TenantFormModal';
 import TenantUsersModal from './TenantUsersModal';
 import TenantEntitlementsModal from './TenantEntitlementsModal';
@@ -71,6 +71,24 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
       await enterSupport(tenant.id); // navigates into the tenant app on success
     } catch (e) {
       notify(`Could not start support session: ${e?.message || 'error'}`, 'error');
+      setPendingId(null);
+    }
+  };
+
+  const handleResync = async (tenant) => {
+    const ok = await confirmDialog(
+      `Re-sync the equipment catalog for "${tenant.name}"?\n\n` +
+      'Adds any catalog items this tenant is missing. Their existing items — ' +
+      'quantities, prices, edits — are never touched.',
+    );
+    if (!ok) return;
+    setPendingId(tenant.id);
+    try {
+      const r = await resyncCatalog(tenant.id);
+      notify(r.added > 0 ? `Added ${r.added} catalog item(s).` : 'Catalog already up to date.', 'success');
+    } catch (e) {
+      notify(`Catalog re-sync failed: ${e?.message || 'error'}`, 'error');
+    } finally {
       setPendingId(null);
     }
   };
@@ -187,6 +205,9 @@ const TenantsView = ({ tenants, loading, error, onReload, staff, isSuperAdmin, c
                               <SlidersHorizontal size={15} />
                             </IconButton>
                           )}
+                          <IconButton title="Re-sync equipment catalog" className="hover:text-emerald-600" onClick={() => handleResync(t)} disabled={busy}>
+                            <PackagePlus size={15} />
+                          </IconButton>
                           <IconButton title="Edit" onClick={() => setForm({ open: true, mode: 'edit', tenant: t })} disabled={busy}>
                             <Pencil size={15} />
                           </IconButton>

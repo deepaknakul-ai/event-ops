@@ -117,6 +117,10 @@ export const enterSupport = async (tenantId) => {
   window.location.assign('/dashboard');
 };
 
+// Add catalog items the tenant is missing (never touches stocked/priced rows).
+// -> { added, catalog_version, total_catalog }
+export const resyncCatalog = (tenantId) => call('platformResyncCatalog', { tenantId });
+
 // ── Staff (single multiplexed callable; super_admin only) ────────────────────
 export const listStaff    = () => call('platformManageStaff', { op: 'list' });                        // -> {staff:[...]}
 export const createStaff  = (data) => call('platformManageStaff', { op: 'create', data });            // {name,username,email,role,regions,assigned_tenants,password} -> {ok, staff}

@@ -2801,6 +2801,7 @@ exports.platformSupportAccess = onCall(PLATFORM_OPTS, (req) => platform.platform
 exports.platformResumeStaff = onCall(PLATFORM_OPTS, (req) => platform.platformResumeStaff(req));
 exports.platformManageStaff = onCall(PLATFORM_OPTS, (req) => platform.platformManageStaff(req));
 exports.platformManageTenantUsers = onCall(PLATFORM_OPTS, (req) => platform.platformManageTenantUsers(req));
+exports.platformResyncCatalog = onCall(PLATFORM_OPTS, (req) => platform.platformResyncCatalog(req));
 
 // Scheduled platform maintenance. Inert off the SaaS project (empty queries).
 // Pinned to the admin service account because both call revokeRefreshTokens,
