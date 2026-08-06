@@ -92,6 +92,7 @@ import OfflineIndicator from './components/OfflineIndicator';
 import ProtectedRoute from './components/ProtectedRoute';
 import useOfflineMode from './hooks/useOfflineMode';
 import { can, ROLE_LABELS, ROLE_COLOR, setLiveConfig } from './utils/permissions';
+import { setEntitlements } from './utils/entitlements';
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -3295,6 +3296,20 @@ const [payroll, setPayroll] = useState([]);
     loadRBAC();
   }, [role]); // re-load if role changes (e.g. after login)
 
+  // SaaS: load the tenant's plan entitlements so the nav/pages can hide features
+  // the plan doesn't include. Local `ent` state makes the gated nav reactive;
+  // setEntitlements() also populates the module singleton featureOn() uses in
+  // pages. No-op on private — hasFeature() then defaults to ON (nothing hidden).
+  const [ent, setEnt] = useState(null);
+  useEffect(() => {
+    if (!IS_SAAS || !role || !appId) return;
+    getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'entitlements'))
+      .then((snap) => { const e = snap.exists() ? snap.data() : null; setEnt(e); setEntitlements(e); })
+      .catch(() => { setEnt(null); setEntitlements(null); });
+  }, [role]);
+  // A feature is ON unless entitlements are loaded AND explicitly disable it.
+  const hasFeature = (f) => !ent || !ent.features || ent.features[f] !== false;
+
   useEffect(() => {
     const storedUid = localStorage.getItem('rentalOpsUser');
     // Purge any legacy admin_temp shortcut — this was a privilege-injection vector.
@@ -3761,9 +3776,9 @@ const [payroll, setPayroll] = useState([]);
         clients={clients}
         inventory={inventory}
       />
-      <AppAssistantLauncher onClick={() => setIsAssistantOpen(true)} />
+      {hasFeature('ai_accountant') && <AppAssistantLauncher onClick={() => setIsAssistantOpen(true)} />}
       <AppAssistant
-        isOpen={isAssistantOpen}
+        isOpen={hasFeature('ai_accountant') && isAssistantOpen}
         onClose={() => setIsAssistantOpen(false)}
         projects={projects}
         clients={clients}

@@ -9,6 +9,7 @@ import JSZip from 'jszip';
 import { storage, app } from '../firebase';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { can } from '../utils/permissions';
+import { featureOn } from '../utils/entitlements';
 import { getFinancialYear } from '../utils/helpers';
 import { CATEGORIES, EXPENSE_CATS } from '../utils/constants';
 import RBACManager from './RBACManager';
@@ -976,7 +977,7 @@ const AdminTools = ({ db, appId, logAction, role }) => {
           </div>
        </div>
 
-       {role === 'admin' && (
+       {role === 'admin' && featureOn('whatsapp_copilot') && (
          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
             <h3 className="font-bold text-lg mb-1 flex items-center gap-2 text-slate-800"><Bell size={20} /> WhatsApp Copilot</h3>
             <p className="text-slate-500 text-sm mb-4">Registered team members can WhatsApp the books — ask questions in English/Hinglish ("Acme ka balance?") or send an invoice photo to create a draft entry. Uses the Meta WhatsApp Cloud API; needs the AI accountant enabled. Paste the webhook URL below into your Meta app's WhatsApp webhook config.</p>

@@ -925,6 +925,13 @@ exports.sendDocumentEmail = onCall(
 // is a DRAFT in the canonical Transaction shape: the client re-validates it
 // and a human confirms in the entry preview before anything is posted.
 async function readAiConfig(appId) {
+  // Plan gate (SaaS): AI accountant is a plan feature. This is the single choke
+  // point for every AI callable. Inert on private — no settings/entitlements
+  // doc means allowed, so private AI is unaffected.
+  const entSnap = await db.doc(`artifacts/${appId}/public/data/settings/entitlements`).get().catch(() => null);
+  if (entSnap && entSnap.exists && entSnap.data().features && entSnap.data().features.ai_accountant === false) {
+    throw new HttpsError('failed-precondition', "The AI accountant isn't included in this workspace's current plan.");
+  }
   const snap = await db.doc(`artifacts/${appId}/public/data/settings/ai`).get();
   const cfg = snap.exists ? (snap.data() || {}) : {};
   if (cfg.enabled !== true) throw new HttpsError('failed-precondition', 'AI assistant is not enabled. Turn it on in Admin Tools → AI Assistant.');
