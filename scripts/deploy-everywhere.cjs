@@ -86,6 +86,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const SKIP_TESTS = args['skip-tests'] === true;
+const SKIP_SMOKE = args['skip-smoke'] === true;
 const DRY_RUN = args['dry-run'] === true;
 
 // Resolve which editions to run (default: all, in declared order).
@@ -124,6 +125,18 @@ function readSaasAlias() {
 }
 const saasAlias = readSaasAlias();
 const saasReady = saasAlias && saasAlias !== SAAS_PLACEHOLDER;
+
+// The SaaS web API key (for the smoke check's custom-token exchange) lives in
+// the gitignored .env.saas.local. Returns null if not present.
+function readSaasApiKey() {
+  try {
+    const env = fs.readFileSync(path.join(ROOT, '.env.saas.local'), 'utf8');
+    const m = env.match(/^VITE_FIREBASE_API_KEY=(.+)$/m);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── Command runner ───────────────────────────────────────────────────────────
 // Prints the command (so --dry-run yields a full, copy-pasteable plan), then
@@ -196,6 +209,23 @@ for (const ed of selected) {
   run(`firebase deploy --project ${ed.alias} --only ${DEPLOY_TARGETS}`);
 
   deployed.push(`${ed.key} (--project ${ed.alias})`);
+
+  // SaaS blast-radius guard: run the post-deploy smoke check against a canary
+  // tenant. A non-zero exit aborts (execSync throws), surfacing a bad release
+  // before real tenants hit it. Needs the SA (GOOGLE_APPLICATION_CREDENTIALS)
+  // and the web API key (.env.saas.local); skipped with a warning if either is
+  // absent or --skip-smoke is passed.
+  if (ed.key === 'saas' && !SKIP_SMOKE) {
+    const sa = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    const apiKey = readSaasApiKey();
+    if (!sa || !apiKey) {
+      console.warn(`  !! SMOKE SKIPPED — need GOOGLE_APPLICATION_CREDENTIALS (${sa ? 'set' : 'unset'}) and .env.saas.local VITE_FIREBASE_API_KEY (${apiKey ? 'found' : 'missing'}). Deploy is UNVERIFIED.`);
+      skipped.push('saas smoke (SA/api-key unavailable)');
+    } else {
+      console.log('  Running post-deploy SaaS smoke check…');
+      run(`node scripts/smoke-saas.cjs --project ${ed.alias} --sa "${sa}" --api-key ${apiKey}`);
+    }
+  }
 }
 
 // ─── Final summary ────────────────────────────────────────────────────────────
