@@ -145,10 +145,10 @@ const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false
 
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="Region" htmlFor="tf-region" hint={!canEditRegion ? 'Only a super admin can change region.' : undefined}>
-            <TextInput id="tf-region" list="tf-region-list" value={form.region} onChange={set('region')} placeholder="India" disabled={!canEditRegion} />
-            <datalist id="tf-region-list">
-              {REGION_SUGGESTIONS.map((r) => <option key={r} value={r} />)}
-            </datalist>
+            <SelectInput id="tf-region" value={form.region} onChange={set('region')} disabled={!canEditRegion}>
+              <option value="">Select a region…</option>
+              {REGION_SUGGESTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </SelectInput>
           </Field>
           <Field label="Plan" htmlFor="tf-plan">
             <SelectInput id="tf-plan" value={form.plan} onChange={set('plan')}>

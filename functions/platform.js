@@ -43,6 +43,21 @@ const TENANT_PLANS = ['trial', 'standard', 'premium'];
 const STAFF_ROLES = ['super_admin', 'regional_admin', 'business_manager'];
 const STAFF_STATUSES = ['active', 'disabled'];
 
+// Controlled region vocabulary. regional_admin scoping compares tenant.region
+// against staff.regions by EXACT string, so a free-text typo ('india' vs
+// 'India') silently hid tenants. Region is now validated/normalized to this
+// canonical list on every write (must stay in sync with the console's
+// REGION_SUGGESTIONS in src/platform/constants.js).
+const REGIONS = ['India', 'Middle East', 'Europe', 'North America', 'APAC', 'Africa', 'Other'];
+const REGION_BY_LOWER = new Map(REGIONS.map((r) => [r.toLowerCase(), r]));
+
+// Normalize a region string to its canonical form (case/space-insensitive).
+// Returns the canonical region, or null if it isn't a known region.
+function normalizeRegion(region) {
+  if (typeof region !== 'string') return null;
+  return REGION_BY_LOWER.get(region.trim().toLowerCase()) || null;
+}
+
 // Minimum length for a platform-staff password chosen during first-login setup.
 const PASSWORD_MIN_LEN = 10;
 // Minimum length for a tenant employee's password (matches the tenant-owner
@@ -558,12 +573,17 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       contact_name, contact_email, contact_phone, ownerPassword,
     } = d;
 
+    // Normalize + validate region against the controlled vocabulary (exact-match
+    // scoping means a typo'd region would silently hide the tenant).
+    const regionNorm = normalizeRegion(region);
+    if (!regionNorm) throw new HttpsError('invalid-argument', `Region must be one of: ${REGIONS.join(', ')}`);
+
     // Authz: super_admin (any region) or regional_admin (own region only).
     if (staff.role === 'business_manager') {
       throw new HttpsError('permission-denied', 'Business managers cannot create tenants');
     }
     if (staff.role === 'regional_admin' &&
-        !(Array.isArray(staff.regions) && staff.regions.includes(region))) {
+        !(Array.isArray(staff.regions) && staff.regions.includes(regionNorm))) {
       throw new HttpsError('permission-denied', 'Region is outside your assigned regions');
     }
 
@@ -591,7 +611,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     const tenant = {
       name: String(name).trim(),
       code,
-      region: region || null,
+      region: regionNorm,
       status: 'active',
       plan: planNorm,
       trial_expires_on: trial_expires_on || null,
@@ -731,6 +751,11 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     }
     if ('plan' in clean && !TENANT_PLANS.includes(clean.plan)) {
       throw new HttpsError('invalid-argument', 'Invalid plan');
+    }
+    if ('region' in clean) {
+      const rn = normalizeRegion(clean.region);
+      if (!rn) throw new HttpsError('invalid-argument', `Region must be one of: ${REGIONS.join(', ')}`);
+      clean.region = rn; // store canonical
     }
     if ('assigned_managers' in clean && !Array.isArray(clean.assigned_managers)) {
       throw new HttpsError('invalid-argument', 'assigned_managers must be an array');
@@ -887,6 +912,12 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       if (!uSnap.empty) throw new HttpsError('already-exists', 'Username already in use');
       if (!eSnap.empty) throw new HttpsError('already-exists', 'Email already in use');
 
+      const regionsNorm = (Array.isArray(regions) ? regions : []).map((r) => {
+        const n = normalizeRegion(r);
+        if (!n) throw new HttpsError('invalid-argument', `Invalid region '${r}'. Must be one of: ${REGIONS.join(', ')}`);
+        return n;
+      });
+
       const ref = db.collection('platform_staff').doc();
       const ts = nowISO();
       const doc = {
@@ -894,7 +925,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
         email: emailNorm,
         username: usernameNorm,
         role,
-        regions: Array.isArray(regions) ? regions : [],
+        regions: regionsNorm,
         assigned_tenants: Array.isArray(assigned_tenants) ? assigned_tenants : [],
         status: 'active',
         failed_login_attempts: 0,
@@ -929,6 +960,13 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       }
       if ('role' in clean && !STAFF_ROLES.includes(clean.role)) throw new HttpsError('invalid-argument', 'Invalid role');
       if ('status' in clean && !STAFF_STATUSES.includes(clean.status)) throw new HttpsError('invalid-argument', 'Invalid status');
+      if ('regions' in clean) {
+        clean.regions = (Array.isArray(clean.regions) ? clean.regions : []).map((r) => {
+          const n = normalizeRegion(r);
+          if (!n) throw new HttpsError('invalid-argument', `Invalid region '${r}'. Must be one of: ${REGIONS.join(', ')}`);
+          return n;
+        });
+      }
       if (dd.password !== undefined && String(dd.password).length < 8) {
         throw new HttpsError('invalid-argument', 'Password must be at least 8 characters');
       }
@@ -1332,4 +1370,6 @@ module.exports = {
   PLAN_ENTITLEMENTS,
   FEATURE_KEYS,
   LIMIT_KEYS,
+  REGIONS,
+  normalizeRegion,
 };
