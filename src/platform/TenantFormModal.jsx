@@ -7,7 +7,7 @@ import { Loader2, KeyRound } from 'lucide-react';
 import { Modal } from '../components/Shared';
 import { notify } from '../utils/toast';
 import { Field, TextInput, TextArea, SelectInput, ChipInput, PrimaryButton, GhostButton } from './ui';
-import { PLAN_ORDER, TENANT_PLAN, REGION_SUGGESTIONS, TENANT_CODE_RE } from './constants';
+import { PLAN_ORDER, TENANT_PLAN, REGION_SUGGESTIONS, TENANT_CODE_RE, MSME_CLASS_OPTIONS, MSME_CLASS } from './constants';
 import { createTenant, updateTenant } from './api';
 
 const plusDays = (n) => {
@@ -28,6 +28,7 @@ const blank = () => ({
   trial_expires_on: plusDays(14),
   contact_name: '', contact_email: '', contact_phone: '',
   ownerPassword: '', notes: '', assigned_managers: [],
+  msme_class: 'none', udyam_number: '',
 });
 
 const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false, onClose, onSaved }) => {
@@ -50,6 +51,8 @@ const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false
         ownerPassword: '',
         notes: initial.notes || '',
         assigned_managers: Array.isArray(initial.assigned_managers) ? initial.assigned_managers : [],
+        msme_class: initial.msme_class || 'none',
+        udyam_number: initial.udyam_number || '',
       });
     } else {
       setForm(blank());
@@ -100,6 +103,8 @@ const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false
           contact_email: form.contact_email.trim(),
           contact_phone: form.contact_phone.trim(),
           notes: form.notes.trim(),
+          msme_class: form.msme_class,
+          udyam_number: form.udyam_number.trim(),
         };
         if (isSuperAdmin) {
           patch.region = form.region.trim();
@@ -117,6 +122,8 @@ const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false
           contact_name: form.contact_name.trim(),
           contact_email: form.contact_email.trim(),
           contact_phone: form.contact_phone.trim(),
+          msme_class: form.msme_class,
+          udyam_number: form.udyam_number.trim(),
           ownerPassword: form.ownerPassword,
         });
         notify(`Tenant "${name}" created. The owner signs in with username "admin" and the password you set.`, 'success');
@@ -187,6 +194,20 @@ const TenantFormModal = ({ open, mode, initial, staff = [], isSuperAdmin = false
             </Field>
             <Field label="Phone" htmlFor="tf-cphone">
               <TextInput id="tf-cphone" value={form.contact_phone} onChange={set('contact_phone')} placeholder="+91 98765 43210" />
+            </Field>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-100 pt-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-3">MSME status (as a supplier)</p>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Field label="MSME class" htmlFor="tf-msme" hint="Micro/Small enables the statutory 45-day payment cap in credit scoring (MSMED §15 / IT §43B(h)).">
+              <SelectInput id="tf-msme" value={form.msme_class} onChange={set('msme_class')}>
+                {MSME_CLASS_OPTIONS.map((k) => <option key={k} value={k}>{MSME_CLASS[k].label}</option>)}
+              </SelectInput>
+            </Field>
+            <Field label="Udyam number" htmlFor="tf-udyam" hint="Optional. The tenant's Udyam registration id.">
+              <TextInput id="tf-udyam" value={form.udyam_number} onChange={set('udyam_number')} placeholder="UDYAM-XX-00-0000000" className="font-mono" />
             </Field>
           </div>
         </div>

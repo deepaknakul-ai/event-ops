@@ -15,8 +15,35 @@ import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
 import { generateClientManagementReportPDF } from '../utils/pdf/clientPdf';
+import { IS_SAAS } from '../utils/edition';
+import { featureOn } from '../utils/entitlements';
 
-const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, currentEmpId, db, appId, logAction }) => {
+// Tenant-facing credit colour vocabulary. Colour + word ONLY — the numeric score
+// lives in the platform console, never here. Kept local (not imported from
+// src/platform/*) so the tenant page stays decoupled from platform code and the
+// private bundle carries no platform module. Bands match functions/credit-scoring.cjs.
+const CREDIT_CHIP = {
+  green: { label: 'Reliable',  cls: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+  amber: { label: 'Watch',     cls: 'bg-amber-100 text-amber-700',     dot: 'bg-amber-500'   },
+  red:   { label: 'High risk', cls: 'bg-rose-100 text-rose-700',       dot: 'bg-rose-500'    },
+  gray:  { label: 'Unrated',   cls: 'bg-slate-100 text-slate-500',     dot: 'bg-slate-400'   },
+};
+
+// A party's credit colour chip. Renders nothing unless we're in the SaaS edition,
+// the tenant's plan includes credit intelligence, and the bureau has a band for
+// this party — so it is absent on private, on unentitled plans, and for parties
+// with no cross-tenant history.
+const CreditChip = ({ band }) => {
+  if (!IS_SAAS || !featureOn('credit_intelligence') || !band) return null;
+  const b = CREDIT_CHIP[band] || CREDIT_CHIP.gray;
+  return (
+    <span title={`Credit standing: ${b.label}`} className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded ${b.cls}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${b.dot}`} />{b.label}
+    </span>
+  );
+};
+
+const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayments = [], expenses = [], timeLogs = [], employees = [], role, currentEmpId, db, appId, logAction, creditLabels = {} }) => {
   const canSeeAllClients = role !== 'manager'; // only managers are owner-scoped
   const empNameById = (id) => employees.find((e) => e.id === id)?.name || '';
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -849,6 +876,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                 <h3 className="font-bold text-slate-800 text-lg">{client.display_name || client.name}</h3>
                 <div className="flex flex-col items-end gap-1 mt-6">
                   <span className={`px-2 py-0.5 text-xs rounded ${client.type === 'Vendor' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>{client.type}</span>
+                  <CreditChip band={creditLabels?.[baseClient.id]?.band} />
                   {client.isBranch && <span className="px-2 py-0.5 text-xs rounded bg-cyan-100 text-cyan-700">Branch</span>}
                   {client.billing_terms && <span className="px-2 py-0.5 text-xs rounded bg-slate-100 text-slate-600 border border-slate-200">{client.billing_terms}</span>}
                 </div>

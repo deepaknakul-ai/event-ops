@@ -158,6 +158,16 @@ service cloud.firestore {
       allow read: if isStaff() && staffRole() == 'super_admin';
       allow write: if false;
     }
+    // Cross-tenant credit-worthiness scores (one doc per PAN). The NUMERIC score
+    // is control-plane data: readable only by a super_admin OR a staff member the
+    // super_admin has marked trusted (can_view_credit on their platform_staff
+    // doc). No tenant token carries `staff`, so tenants can never reach this —
+    // they only ever see the colour band mirrored into their own
+    // settings/credit_labels. Written solely by the Admin SDK (nightly job).
+    match /platform_credit_scores/{pan} {
+      allow read: if isStaff() && (staffRole() == 'super_admin' || staffData().get('can_view_credit', false) == true);
+      allow write: if false;
+    }
 
     // ── Broad catch-all for app-scoped data ───────────────────────────────────
     // NOTE: Firestore grants access if ANY matching rule permits it (OR logic).
@@ -511,10 +521,12 @@ service cloud.firestore {
                     : (docId in ['security', 'communication', 'payments', 'einvoice', 'whatsapp'])
                       ? isAdmin(appId)
                       : (isAuthed() && request.auth.token.firebase.sign_in_provider != 'anonymous');
-      // settings/entitlements is the tenant's plan-resolved features/limits: the
-      // tenant may READ it (to gate its UI) but only the platform Admin SDK may
-      // write it — otherwise a tenant admin could grant themselves paid features.
-      allow write: if docId == 'entitlements' ? false : isAdmin(appId);
+      // settings/entitlements is the tenant's plan-resolved features/limits and
+      // settings/credit_labels is the credit-worthiness colour projection: the
+      // tenant may READ both (to gate its UI / show party colours) but only the
+      // platform Admin SDK may write them — otherwise a tenant admin could grant
+      // themselves paid features or forge a party's credit colour.
+      allow write: if docId in ['entitlements', 'credit_labels'] ? false : isAdmin(appId);
     }
 
     // ── WhatsApp copilot conversations ────────────────────────────────────────

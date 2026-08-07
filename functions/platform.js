@@ -31,6 +31,9 @@
 // Pure helpers for catalog identity/versioning (no firebase — safe to require
 // even under vitest). The catalog data itself is still injected via deps.
 const { catalogKey, CATALOG_VERSION } = require('./equipment-defaults.cjs');
+// Pure cross-tenant credit-scoring engine (no firebase). computeCreditScores()
+// feeds each tenant's books through these; nothing here touches Firestore.
+const credit = require('./credit-scoring.cjs');
 
 const PLATFORM_CONFIG_PATH = 'platform_meta/config';
 const LOGIN_MAX_ATTEMPTS = 5;
@@ -40,6 +43,10 @@ const BATCH_LIMIT = 450; // < Firestore's 500-write cap, leaves headroom
 
 const TENANT_STATUSES = ['active', 'suspended', 'churned'];
 const TENANT_PLANS = ['trial', 'standard', 'premium'];
+// MSME (Udyam) classification of the tenant AS A SUPPLIER. Drives the statutory
+// 45-day payment cap in credit scoring (MSMED §15 / IT §43B(h)) — only micro/small
+// suppliers get the cap. 'none' = not an MSME (or unknown).
+const MSME_CLASSES = ['micro', 'small', 'medium', 'none'];
 const STAFF_ROLES = ['super_admin', 'regional_admin', 'business_manager'];
 const STAFF_STATUSES = ['active', 'disabled'];
 
@@ -88,13 +95,16 @@ const TRIVIAL_PASSWORDS = new Set([
 const TENANT_PATCH_KEYS = [
   'name', 'region', 'status', 'plan', 'trial_expires_on', 'assigned_managers',
   'contact_name', 'contact_email', 'contact_phone', 'notes',
-  'feature_overrides', 'limit_overrides',
+  'feature_overrides', 'limit_overrides', 'msme_class', 'udyam_number',
 ];
 // Of these, only a super_admin may change reach/scoping and entitlement overrides.
 const TENANT_SUPER_ADMIN_ONLY_KEYS = ['region', 'assigned_managers', 'feature_overrides', 'limit_overrides'];
 
 // Fields platformManageStaff('update') may write on the main staff doc.
-const STAFF_UPDATE_KEYS = ['name', 'email', 'role', 'regions', 'assigned_tenants', 'status'];
+// can_view_credit is the "trusted manager" flag: a non-super_admin staff member
+// the super_admin grants sight of the numeric cross-tenant credit scores (the
+// score is otherwise super_admin-only; tenants never see it at all).
+const STAFF_UPDATE_KEYS = ['name', 'email', 'role', 'regions', 'assigned_tenants', 'status', 'can_view_credit'];
 
 // Tenant code == artifacts/{code} appId: a slug of 3–30 [a-z0-9-] chars.
 function isValidTenantCode(code) {
@@ -111,21 +121,24 @@ function isValidTenantCode(code) {
 // inert on the private edition, which has no settings/entitlements doc.
 const PLAN_ENTITLEMENTS = {
   trial: {
-    features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true },
+    features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true, credit_intelligence: false },
     limits: { max_users: 3 },
   },
   standard: {
-    features: { ai_accountant: true, whatsapp_copilot: false, hr_module: true },
+    features: { ai_accountant: true, whatsapp_copilot: false, hr_module: true, credit_intelligence: false },
     limits: { max_users: 15 },
   },
   premium: {
-    features: { ai_accountant: true, whatsapp_copilot: true, hr_module: true },
+    features: { ai_accountant: true, whatsapp_copilot: true, hr_module: true, credit_intelligence: true },
     limits: { max_users: null },
   },
 };
 // The complete set of known feature keys (union across plans) — the console
 // editor and override validation use this so a typo'd flag can't be stored.
-const FEATURE_KEYS = ['ai_accountant', 'whatsapp_copilot', 'hr_module'];
+// credit_intelligence gates the cross-tenant credit-worthiness projection: a
+// tenant only receives colour labels for its parties if it participates (the
+// nightly job scores/labels only entitled tenants — reciprocity).
+const FEATURE_KEYS = ['ai_accountant', 'whatsapp_copilot', 'hr_module', 'credit_intelligence'];
 const LIMIT_KEYS = ['max_users'];
 
 // Merge plan defaults with per-tenant overrides into the effective entitlements.
@@ -378,6 +391,18 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     return ent;
   }
 
+  // Mirror a tenant's credit COLOUR LABELS (band only, keyed by client doc id) to
+  // a tenant-readable, server-written settings doc. Produced by the nightly
+  // computeCreditScores() pass. The numeric score NEVER lands here — only the
+  // colour — so a tenant learns "this party is high-risk" without seeing the
+  // number or any other tenant's figures. Server-write-only in firestore.rules.
+  async function writeCreditLabels(tenantId, labels) {
+    await db.doc(`${dataPath(tenantId)}/settings/credit_labels`).set({
+      labels: labels || {},
+      updated_at: nowISO(),
+    });
+  }
+
   // Append an entry to a tenant's own audit_logs collection. Field names mirror
   // the client's logAction (src/App.jsx) EXACTLY so entries render in the
   // tenant's in-app audit view, plus a `support_session` marker.
@@ -468,7 +493,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
       action: 'staff_login', tenant_id: null, details: {},
     });
-    return { token, staffId: staff.id, role: staff.role, name: staff.name || '' };
+    return { token, staffId: staff.id, role: staff.role, name: staff.name || '', can_view_credit: staff.can_view_credit === true };
   }
 
   // ── 1b. platformSetupPassword ────────────────────────────────────────────────
@@ -560,7 +585,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       actor_uid: staff.id, actor_name: staff.name, actor_role: staff.role,
       action: 'staff_password_set', tenant_id: null, details: {},
     });
-    return { token, staffId: staff.id, role: staff.role, name: staff.name || '' };
+    return { token, staffId: staff.id, role: staff.role, name: staff.name || '', can_view_credit: staff.can_view_credit === true };
   }
 
   // ── 2. platformCreateTenant ──────────────────────────────────────────────────
@@ -571,6 +596,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     const {
       code, name, region, plan, trial_expires_on,
       contact_name, contact_email, contact_phone, ownerPassword,
+      msme_class, udyam_number,
     } = d;
 
     // Normalize + validate region against the controlled vocabulary (exact-match
@@ -597,6 +623,8 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     }
     const planNorm = plan || 'trial';
     if (!TENANT_PLANS.includes(planNorm)) throw new HttpsError('invalid-argument', 'Invalid plan');
+    const msmeClass = msme_class || 'none';
+    if (!MSME_CLASSES.includes(msmeClass)) throw new HttpsError('invalid-argument', `msme_class must be one of: ${MSME_CLASSES.join(', ')}`);
 
     // Must not collide with an existing tenant OR any existing tenant data
     // (belt-and-braces: never provision over a live workspace).
@@ -619,6 +647,8 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       contact_name: contact_name || '',
       contact_email: contact_email || '',
       contact_phone: contact_phone || '',
+      msme_class: msmeClass,
+      udyam_number: udyam_number ? String(udyam_number).trim() : '',
       notes: '',
       created_at: ts,
       created_by: staff.id,
@@ -752,6 +782,9 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     if ('plan' in clean && !TENANT_PLANS.includes(clean.plan)) {
       throw new HttpsError('invalid-argument', 'Invalid plan');
     }
+    if ('msme_class' in clean && !MSME_CLASSES.includes(clean.msme_class)) {
+      throw new HttpsError('invalid-argument', `msme_class must be one of: ${MSME_CLASSES.join(', ')}`);
+    }
     if ('region' in clean) {
       const rn = normalizeRegion(clean.region);
       if (!rn) throw new HttpsError('invalid-argument', `Region must be one of: ${REGIONS.join(', ')}`);
@@ -875,7 +908,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     });
 
     const token = await admin.auth().createCustomToken(staff.id, { staff: true, staff_role: staff.role });
-    return { token, staffId: staff.id, role: staff.role, name: staff.name || '' };
+    return { token, staffId: staff.id, role: staff.role, name: staff.name || '', can_view_credit: staff.can_view_credit === true };
   }
 
   // ── 7. platformManageStaff ───────────────────────────────────────────────────
@@ -896,7 +929,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
 
     if (op === 'create') {
       const dd = data || {};
-      const { name, username, email, role, regions, assigned_tenants, password } = dd;
+      const { name, username, email, role, regions, assigned_tenants, password, can_view_credit } = dd;
       if (!name || !username || !email || !role || !password) {
         throw new HttpsError('invalid-argument', 'name, username, email, role and password are required');
       }
@@ -927,6 +960,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
         role,
         regions: regionsNorm,
         assigned_tenants: Array.isArray(assigned_tenants) ? assigned_tenants : [],
+        can_view_credit: can_view_credit === true,
         status: 'active',
         failed_login_attempts: 0,
         login_locked_until: null,
@@ -960,6 +994,7 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
       }
       if ('role' in clean && !STAFF_ROLES.includes(clean.role)) throw new HttpsError('invalid-argument', 'Invalid role');
       if ('status' in clean && !STAFF_STATUSES.includes(clean.status)) throw new HttpsError('invalid-argument', 'Invalid status');
+      if ('can_view_credit' in clean && typeof clean.can_view_credit !== 'boolean') throw new HttpsError('invalid-argument', 'can_view_credit must be a boolean');
       if ('regions' in clean) {
         clean.regions = (Array.isArray(clean.regions) ? clean.regions : []).map((r) => {
           const n = normalizeRegion(r);
@@ -1341,6 +1376,270 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     return { added, catalog_version: CATALOG_VERSION, total_catalog: catalog.length };
   }
 
+  // ── Cross-tenant credit scoring (bureau) ─────────────────────────────────────
+  // Get-or-create the accumulator for a PAN in the cross-tenant map.
+  function ensurePan(byPan, pan) {
+    let rec = byPan.get(pan);
+    if (!rec) {
+      rec = { observations: [], contributions: {}, names: new Set(), gstins: new Set() };
+      byPan.set(pan, rec);
+    }
+    return rec;
+  }
+
+  // Fold one tenant's observation of a party into the PAN's contribution rollup
+  // (the console drill-down record). Merged by tenant, so multiple client docs of
+  // the same legal entity within one tenant collapse to a single contribution.
+  function mergeContribution(contributions, tenant, clientDocId, partyName, obs) {
+    const key = tenant.id;
+    const c = contributions[key] || {
+      tenant_name: tenant.name || tenant.id, party_name: partyName || '',
+      client_doc_ids: [], billed: 0, received: 0, outstanding: 0,
+      ninetyPlus: 0, reminderCount: 0, invoiceCount: 0, lastActivity: null,
+      _lateSum: 0, _billedW: 0,
+    };
+    c.client_doc_ids.push(clientDocId);
+    c.billed += obs.billed; c.received += obs.received; c.outstanding += obs.outstanding;
+    c.ninetyPlus += obs.ninetyPlus; c.reminderCount += obs.reminderCount; c.invoiceCount += obs.invoiceCount;
+    c._lateSum += obs.avgDaysLate * obs.billed; c._billedW += obs.billed;
+    if (obs.lastActivity && (!c.lastActivity || obs.lastActivity > c.lastActivity)) c.lastActivity = obs.lastActivity;
+    if (!c.party_name && partyName) c.party_name = partyName;
+    contributions[key] = c;
+  }
+
+  // Read ONE tenant's books and fold its per-party observations into the shared
+  // cross-tenant accumulators (byPan) and its own client→PAN map (tenantParties,
+  // used to project colour labels back — including onto vendor rows whose PAN was
+  // only ever invoiced by OTHER tenants). Scores the party AS A PAYER: only
+  // client-role sales invoices (tax_invoices) + receipts (payments) feed the
+  // delay/overdue signals; purchase/vendor payments are the tenant paying out and
+  // are deliberately excluded.
+  async function ingestTenantCredit(tenant, { asOf, byPan, tenantParties }) {
+    const dp = dataPath(tenant.id);
+    const [clientsSnap, invSnap, paySnap, remSnap] = await Promise.all([
+      db.collection(`${dp}/clients`).get(),
+      db.collection(`${dp}/tax_invoices`).get(),
+      db.collection(`${dp}/payments`).get(),
+      db.collection(`${dp}/reminder_log`).get(),
+    ]);
+
+    const invByClient = new Map();
+    for (const d of invSnap.docs) {
+      const v = d.data() || {};
+      if (v.status && v.status !== 'Active') continue; // skip Cancelled/voided
+      const cid = v.client_id;
+      if (!cid) continue;
+      const amount = Number(v.final_amount != null ? v.final_amount : v.computed_total) || 0;
+      if (amount <= 0) continue;
+      if (!invByClient.has(cid)) invByClient.set(cid, []);
+      invByClient.get(cid).push({ amount, date: v.invoice_date, dueDate: v.due_date || undefined });
+    }
+    const payByClient = new Map();
+    for (const d of paySnap.docs) {
+      const v = d.data() || {};
+      const cid = v.client_id;
+      if (!cid) continue;
+      const amount = Number(v.amount) || 0;
+      if (amount <= 0) continue;
+      if (!payByClient.has(cid)) payByClient.set(cid, []);
+      payByClient.get(cid).push({ amount, date: v.date });
+    }
+    const remByClient = new Map();
+    for (const d of remSnap.docs) remByClient.set(d.id, Number((d.data() || {}).count) || 0);
+
+    const parties = [];
+    for (const d of clientsSnap.docs) {
+      const c = d.data() || {};
+      const pan = credit.panFromGstin(c.gstin);
+      if (!pan) continue; // GSTIN/PAN-only identity match — unregistered parties are unrated
+      parties.push({ clientDocId: d.id, pan });
+
+      const obs = credit.computePartyObservation({
+        invoices: invByClient.get(d.id) || [],
+        payments: payByClient.get(d.id) || [],
+        reminderCount: remByClient.get(d.id) || 0,
+        termDays: credit.termDaysFromBillingTerms(c.billing_terms),
+        // MSMED §15 / IT §43B(h): when the REPORTING TENANT (the supplier) is a
+        // micro/small enterprise, cap the statutory due date at 45 days (15 with
+        // no written terms) so a buyer who pays MSME suppliers late scores worse.
+        supplierMsme: ['micro', 'small'].includes(tenant.msme_class),
+        hasTerms: !!c.billing_terms,
+        asOf,
+      });
+      // Only parties with real receivable history contribute an observation; a
+      // party with no invoices here can still receive a label from other tenants.
+      if (obs.invoiceCount > 0) {
+        const rec = ensurePan(byPan, pan);
+        if (c.name) rec.names.add(c.name);
+        rec.gstins.add(String(c.gstin).trim().toUpperCase());
+        rec.observations.push(obs);
+        mergeContribution(rec.contributions, tenant, d.id, c.name, obs);
+      }
+    }
+    tenantParties.set(tenant.id, parties);
+  }
+
+  // ── Scheduled: nightly cross-tenant credit-worthiness scoring ────────────────
+  // For every PARTICIPATING tenant (active/suspended AND entitled to
+  // credit_intelligence — participation is reciprocal), derive each party's
+  // payment behaviour, match the same legal entity across tenants by PAN, score
+  // the aggregate, and write: the numeric score + factor breakdown to
+  // platform_credit_scores/{PAN} (super_admin / trusted-staff only, outside
+  // artifacts/), and a COLOUR-ONLY projection to each tenant's
+  // settings/credit_labels. Iterates platform_tenants like the other sweeps → a
+  // no-op off the SaaS project (empty query). Idempotent: full recompute + .set.
+  async function computeCreditScores() {
+    const asOf = nowISO();
+    const tenantsSnap = await db.collection('platform_tenants').get();
+
+    const byPan = new Map();          // PAN → { observations[], contributions{}, names, gstins }
+    const tenantParties = new Map();  // appId → [{ clientDocId, pan }]
+    const participating = [];
+
+    for (const tDoc of tenantsSnap.docs) {
+      const tenant = { id: tDoc.id, ...tDoc.data() };
+      const entitled = resolveEntitlements(tenant).features.credit_intelligence === true;
+      const live = tenant.status === 'active' || tenant.status === 'suspended';
+      if (!entitled || !live) {
+        // Non-participant: clear any stale projection so a downgrade/suspension
+        // stops the tenant seeing labels (no other code path clears this).
+        await db.doc(`${dataPath(tenant.id)}/settings/credit_labels`).delete().catch(() => {});
+        continue;
+      }
+      participating.push(tenant);
+      try {
+        await ingestTenantCredit(tenant, { asOf, byPan, tenantParties });
+      } catch (err) {
+        logger.error(`computeCreditScores: tenant ${tenant.id} skipped — ${err.message}`);
+      }
+    }
+
+    // Score each PAN from its cross-tenant observations. TWO-PASS: pass 1 derives
+    // each PAN's aggregate/factors and its UNSHRUNK base score, so pass 2 can
+    // shrink thin files toward the observed PORTFOLIO MEAN (bureau practice)
+    // rather than a fixed neutral 50 that would flatter a risky book.
+    const prep = [];
+    for (const [pan, rec] of byPan) {
+      const aggregate = credit.aggregateObservations(rec.observations, { asOf });
+      const factors = credit.scoreFactors(aggregate);
+      const base = credit.baseScore(factors, aggregate, { asOf });
+      prep.push({ pan, rec, aggregate, factors, base });
+    }
+    const prior = prep.length ? prep.reduce((s, p) => s + p.base, 0) / prep.length : 50;
+
+    const bandByPan = new Map();
+    const scoreDocs = [];
+    let red = 0; let amber = 0;
+    for (const { pan, rec, aggregate, factors } of prep) {
+      const score = credit.compositeScore(factors, aggregate, { asOf, prior });
+      const band = credit.bandForScore(score, aggregate, { asOf });
+      const reasons = credit.deriveReasons(factors, aggregate);
+      const outlook = credit.outlookFor(aggregate);
+      bandByPan.set(pan, band);
+      if (band === 'red') red += 1; else if (band === 'amber') amber += 1;
+
+      const contributions = {};
+      for (const [appId, c] of Object.entries(rec.contributions)) {
+        contributions[appId] = {
+          tenant_name: c.tenant_name, party_name: c.party_name, client_doc_ids: c.client_doc_ids,
+          billed: c.billed, received: c.received, outstanding: c.outstanding,
+          ninetyPlus: c.ninetyPlus, reminderCount: c.reminderCount, invoiceCount: c.invoiceCount,
+          avgDaysLate: c._billedW > 0 ? c._lateSum / c._billedW : 0,
+          lastActivity: c.lastActivity,
+        };
+      }
+      scoreDocs.push({
+        pan,
+        doc: {
+          pan, band, score, factors, reasons, outlook,
+          aggregate: {
+            billed: aggregate.billed, received: aggregate.received, outstanding: aggregate.outstanding,
+            overdueAmt: aggregate.overdueAmt, weightedDaysLate: aggregate.weightedDaysLate,
+            ninetyPlus: aggregate.ninetyPlus, reminderCount: aggregate.reminderCount,
+            maxDaysLate: aggregate.maxDaysLate, beyond45Amt: aggregate.beyond45Amt, timeBarredAmt: aggregate.timeBarredAmt,
+            invoiceCount: aggregate.invoiceCount, firstSeen: aggregate.firstSeen, lastActivity: aggregate.lastActivity,
+          },
+          contributions,
+          gstins: [...rec.gstins], names: [...rec.names],
+          sample_size: aggregate.sample_size, confidence: aggregate.confidence,
+          computed_at: asOf, computed_by: 'system:credit',
+        },
+      });
+    }
+
+    // Persist scores (batched).
+    let batch = db.batch(); let pending = 0;
+    for (const { pan, doc } of scoreDocs) {
+      batch.set(db.doc(`platform_credit_scores/${pan}`), doc);
+      if ((pending += 1) >= BATCH_LIMIT) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+
+    // Prune stale engine-written score docs (a PAN whose every contributor
+    // churned/downgraded). Never touches docs the engine didn't author.
+    const existing = await db.collection('platform_credit_scores').get();
+    batch = db.batch(); pending = 0;
+    for (const d of existing.docs) {
+      if (bandByPan.has(d.id) || (d.data() || {}).computed_by !== 'system:credit') continue;
+      batch.delete(d.ref);
+      if ((pending += 1) >= BATCH_LIMIT) { await batch.commit(); batch = db.batch(); pending = 0; }
+    }
+    if (pending > 0) await batch.commit();
+
+    // Project colour labels back to each participating tenant (band per client
+    // doc id — including vendor rows whose PAN another tenant scored).
+    for (const tenant of participating) {
+      const labels = {};
+      for (const { clientDocId, pan } of (tenantParties.get(tenant.id) || [])) {
+        const band = bandByPan.get(pan);
+        if (band) labels[clientDocId] = { band, updated_at: asOf };
+      }
+      await writeCreditLabels(tenant.id, labels)
+        .catch((err) => logger.error(`computeCreditScores: label write failed for ${tenant.id} — ${err.message}`));
+    }
+
+    await platformAudit({
+      actor_uid: 'system', actor_name: 'Credit Scoring', actor_role: 'system',
+      action: 'credit_scores_computed', tenant_id: null,
+      details: { tenants: participating.length, parties: byPan.size, red, amber },
+    });
+    if (byPan.size) logger.info(`computeCreditScores: scored ${byPan.size} parties across ${participating.length} tenant(s) (${red} red, ${amber} amber)`);
+    return { tenants: participating.length, parties: byPan.size, red, amber };
+  }
+
+  // ── platformListCreditScores ─────────────────────────────────────────────────
+  // Read the numeric cross-tenant scores. Gated to super_admin OR a staff member
+  // the super_admin has marked trusted (can_view_credit). No tenant — not even a
+  // tenant admin — can reach this or the underlying collection. With {pan} it
+  // returns the full drill-down (factors + per-tenant contributions); otherwise a
+  // riskiest-first list.
+  async function platformListCreditScores(req) {
+    await assertPlatformEnabled();
+    const staff = await getStaff(req.auth);
+    if (!(staff.role === 'super_admin' || staff.can_view_credit === true)) {
+      throw new HttpsError('permission-denied', 'Not authorized to view credit scores');
+    }
+    const { pan } = req.data || {};
+    if (pan) {
+      const snap = await db.doc(`platform_credit_scores/${pan}`).get();
+      if (!snap.exists) throw new HttpsError('not-found', 'No credit score for that entity');
+      return { score: { id: snap.id, ...snap.data() } };
+    }
+    const snap = await db.collection('platform_credit_scores').get();
+    const rank = { red: 0, amber: 1, gray: 2, green: 3 };
+    const scores = snap.docs.map((d) => {
+      const v = d.data() || {};
+      return {
+        pan: d.id, band: v.band, score: v.score, outlook: v.outlook || 'stable',
+        names: v.names || [], gstins: v.gstins || [],
+        sample_size: v.sample_size || 0, confidence: v.confidence || 'low',
+        contributor_count: v.contributions ? Object.keys(v.contributions).length : 0,
+        aggregate: v.aggregate || {}, computed_at: v.computed_at || null,
+      };
+    }).sort((a, b) => ((rank[a.band] ?? 9) - (rank[b.band] ?? 9)) || (a.score - b.score));
+    return { scores };
+  }
+
   return {
     platformLogin,
     platformSetupPassword,
@@ -1352,8 +1651,10 @@ function createPlatform({ admin, db, logger, HttpsError, verifyPasswordNode, has
     platformManageStaff,
     platformManageTenantUsers,
     platformResyncCatalog,
+    platformListCreditScores,
     enforceTrialExpiry,
     sweepSupportSessions,
+    computeCreditScores,
   };
 }
 

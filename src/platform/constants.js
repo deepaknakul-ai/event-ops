@@ -17,9 +17,33 @@ export const TENANT_PLAN = {
 };
 export const PLAN_ORDER = ['trial', 'standard', 'premium'];
 
+// ── Credit-worthiness bands ──────────────────────────────────────────────────
+// The colour vocabulary of the cross-tenant credit bureau. The NUMERIC score is
+// platform-staff-only (CreditView); a tenant ever only sees the band word/colour
+// on its client & vendor rows (src/pages/Clients.jsx CreditChip). Keys match
+// functions/credit-scoring.cjs BANDS.
+export const CREDIT_BAND = {
+  green: { label: 'Reliable',  tenantLabel: 'Reliable',  badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', dot: 'bg-emerald-500', desc: 'Pays on time; nothing materially overdue.' },
+  amber: { label: 'Watch',     tenantLabel: 'Watch',     badge: 'bg-amber-50 text-amber-700 border-amber-200',       dot: 'bg-amber-500',   desc: 'Some late payments or overdue balances.' },
+  red:   { label: 'High risk', tenantLabel: 'High risk', badge: 'bg-rose-50 text-rose-700 border-rose-200',          dot: 'bg-rose-500',    desc: 'Chronic delinquency or a material default.' },
+  gray:  { label: 'Unrated',   tenantLabel: 'Unrated',   badge: 'bg-slate-100 text-slate-500 border-slate-200',      dot: 'bg-slate-400',   desc: 'Not enough history yet to judge.' },
+};
+export const CREDIT_BAND_ORDER = ['red', 'amber', 'gray', 'green'];
+
 // Region is stored as a free string on the tenant; these are only autocomplete
 // suggestions so any pre-existing value still round-trips through the form.
 export const REGION_SUGGESTIONS = ['India', 'Middle East', 'Europe', 'North America', 'APAC', 'Africa', 'Other'];
+
+// MSME (Udyam) classification of the tenant AS A SUPPLIER. Mirrors
+// functions/platform.js MSME_CLASSES. Micro/small drive the statutory 45-day
+// payment cap used in credit scoring (MSMED §15 / IT §43B(h)).
+export const MSME_CLASS = {
+  none:   { label: 'Not an MSME' },
+  micro:  { label: 'Micro' },
+  small:  { label: 'Small' },
+  medium: { label: 'Medium' },
+};
+export const MSME_CLASS_OPTIONS = ['none', 'micro', 'small', 'medium'];
 
 // ── Plan entitlements: features + limits ─────────────────────────────────────
 // Client-side mirror of the PLAN_DEFAULTS matrix in functions/platform.js. Each
@@ -29,17 +53,18 @@ export const REGION_SUGGESTIONS = ['India', 'Middle East', 'Europe', 'North Amer
 // stays the source of truth — this table only drives the editor + effective
 // preview, so keep it in lock-step with functions/platform.js.
 export const PLAN_DEFAULTS = {
-  trial:    { features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true }, limits: { max_users: 3 } },
-  standard: { features: { ai_accountant: true,  whatsapp_copilot: false, hr_module: true }, limits: { max_users: 15 } },
-  premium:  { features: { ai_accountant: true,  whatsapp_copilot: true,  hr_module: true }, limits: { max_users: null } },
+  trial:    { features: { ai_accountant: false, whatsapp_copilot: false, hr_module: true, credit_intelligence: false }, limits: { max_users: 3 } },
+  standard: { features: { ai_accountant: true,  whatsapp_copilot: false, hr_module: true, credit_intelligence: false }, limits: { max_users: 15 } },
+  premium:  { features: { ai_accountant: true,  whatsapp_copilot: true,  hr_module: true, credit_intelligence: true  }, limits: { max_users: null } },
 };
 
 // Feature catalogue — the boolean entitlement keys and how to label them. Order
 // drives the rows in the entitlements editor. Keys match PLAN_DEFAULTS.features.
 export const PLATFORM_FEATURES = [
-  { key: 'ai_accountant',    label: 'AI Accountant',    desc: 'AI-assisted bookkeeping, categorisation and reconciliation.' },
-  { key: 'whatsapp_copilot', label: 'WhatsApp Copilot', desc: 'WhatsApp assistant for capturing records on the go.' },
-  { key: 'hr_module',        label: 'HR Module',        desc: 'Employees, attendance and payroll workspace.' },
+  { key: 'ai_accountant',      label: 'AI Accountant',      desc: 'AI-assisted bookkeeping, categorisation and reconciliation.' },
+  { key: 'whatsapp_copilot',   label: 'WhatsApp Copilot',   desc: 'WhatsApp assistant for capturing records on the go.' },
+  { key: 'hr_module',          label: 'HR Module',          desc: 'Employees, attendance and payroll workspace.' },
+  { key: 'credit_intelligence', label: 'Credit Intelligence', desc: 'Cross-tenant credit-worthiness colour labels on the tenant’s clients and vendors.' },
 ];
 
 // Limit catalogue — numeric caps. A null override means unlimited. Keys match

@@ -1,18 +1,20 @@
 // Platform console — authenticated layout: header, tab nav, data loading.
 import React, { useCallback, useEffect, useState } from 'react';
-import { LayoutDashboard, Building2, Users, LogOut, Building } from 'lucide-react';
+import { LayoutDashboard, Building2, Users, LogOut, Building, Gauge } from 'lucide-react';
 import { confirmDialog } from '../utils/dialog';
 import { RoleBadge } from './ui';
 import { initials } from './constants';
-import { listTenants, listStaff, platformLogout } from './api';
+import { listTenants, listStaff, listCreditScores, platformLogout } from './api';
 import OverviewView from './OverviewView';
 import TenantsView from './TenantsView';
 import StaffView from './StaffView';
+import CreditView from './CreditView';
 
 const PlatformShell = ({ session, onSignedOut }) => {
   const role = session?.role;
   const isSuperAdmin = role === 'super_admin';                 // may manage staff + region/managers
   const canCreateTenant = role === 'super_admin' || role === 'regional_admin'; // business_manager cannot
+  const canViewCredit = isSuperAdmin || session?.can_view_credit === true;      // numeric scores: super_admin or trusted staff
   const [tab, setTab] = useState('overview');
 
   // ── Tenants (shared by Overview + Tenants tabs) ─────────────────────────────
@@ -52,9 +54,30 @@ const PlatformShell = ({ session, onSignedOut }) => {
     }
   }, []);
 
+  // ── Credit scores (Credit tab; super_admin or trusted staff). Best-effort. ──
+  const [scores, setScores] = useState([]);
+  const [scoresLoading, setScoresLoading] = useState(true);
+  const [scoresError, setScoresError] = useState('');
+
+  const reloadScores = useCallback(async () => {
+    setScoresLoading(true);
+    setScoresError('');
+    try {
+      const res = await listCreditScores();
+      setScores(Array.isArray(res?.scores) ? res.scores : []);
+    } catch (e) {
+      setScoresError(e?.message || 'Failed to load credit scores.');
+      setScores([]);
+    } finally {
+      setScoresLoading(false);
+    }
+  }, []);
+
   useEffect(() => { reloadTenants(); }, [reloadTenants]);
   // Only super_admins can call platformManageStaff('list'); skip for others.
   useEffect(() => { if (isSuperAdmin) reloadStaff(); else setStaffLoading(false); }, [isSuperAdmin, reloadStaff]);
+  // Credit scores need super_admin or the trusted can_view_credit flag.
+  useEffect(() => { if (canViewCredit) reloadScores(); else setScoresLoading(false); }, [canViewCredit, reloadScores]);
 
   const handleSignOut = async () => {
     if (!(await confirmDialog('Sign out of the platform console?'))) return;
@@ -65,6 +88,7 @@ const PlatformShell = ({ session, onSignedOut }) => {
   const NAV = [
     { key: 'overview', label: 'Overview', icon: LayoutDashboard },
     { key: 'tenants', label: 'Tenants', icon: Building2 },
+    ...(canViewCredit ? [{ key: 'credit', label: 'Credit', icon: Gauge }] : []),
     ...(isSuperAdmin ? [{ key: 'staff', label: 'Staff', icon: Users }] : []),
   ];
 
@@ -141,6 +165,14 @@ const PlatformShell = ({ session, onSignedOut }) => {
             staff={staff}
             isSuperAdmin={isSuperAdmin}
             canCreateTenant={canCreateTenant}
+          />
+        )}
+        {tab === 'credit' && canViewCredit && (
+          <CreditView
+            scores={scores}
+            loading={scoresLoading}
+            error={scoresError}
+            onReload={reloadScores}
           />
         )}
         {tab === 'staff' && isSuperAdmin && (

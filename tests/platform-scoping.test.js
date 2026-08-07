@@ -105,8 +105,8 @@ describe('TENANT_PATCH_KEYS whitelist', () => {
   it('contains exactly the intended updatable keys', () => {
     expect([...TENANT_PATCH_KEYS].sort()).toEqual([
       'assigned_managers', 'contact_email', 'contact_name', 'contact_phone',
-      'feature_overrides', 'limit_overrides',
-      'name', 'notes', 'plan', 'region', 'status', 'trial_expires_on',
+      'feature_overrides', 'limit_overrides', 'msme_class',
+      'name', 'notes', 'plan', 'region', 'status', 'trial_expires_on', 'udyam_number',
     ]);
   });
 

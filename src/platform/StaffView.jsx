@@ -12,7 +12,8 @@ import { createStaff, updateStaff, disableStaff } from './api';
 
 const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
   const isEdit = mode === 'edit';
-  const [form, setForm] = useState({ username: '', name: '', email: '', role: 'business_manager', regions: [], assigned_tenants: [], password: '' });
+  const blankForm = { username: '', name: '', email: '', role: 'business_manager', regions: [], assigned_tenants: [], password: '', can_view_credit: false };
+  const [form, setForm] = useState(blankForm);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -26,8 +27,9 @@ const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
           regions: Array.isArray(initial.regions) ? initial.regions : [],
           assigned_tenants: Array.isArray(initial.assigned_tenants) ? initial.assigned_tenants : [],
           password: '',
+          can_view_credit: initial.can_view_credit === true,
         }
-      : { username: '', name: '', email: '', role: 'business_manager', regions: [], assigned_tenants: [], password: '' });
+      : blankForm);
   }, [open, isEdit, initial]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -43,6 +45,9 @@ const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
 
     setBusy(true);
     try {
+      // A super_admin sees every credit score inherently; the flag only matters
+      // for the other roles, so don't send a stray true for super_admins.
+      const canViewCredit = form.role !== 'super_admin' && form.can_view_credit === true;
       if (isEdit) {
         const data = {
           name: form.name.trim(),
@@ -50,6 +55,7 @@ const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
           role: form.role,
           regions: form.regions,
           assigned_tenants: form.assigned_tenants,
+          can_view_credit: canViewCredit,
         };
         if (form.password) data.password = form.password;
         await updateStaff(initial.id, data);
@@ -62,6 +68,7 @@ const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
           role: form.role,
           regions: form.regions,
           assigned_tenants: form.assigned_tenants,
+          can_view_credit: canViewCredit,
           password: form.password,
         });
         notify('Staff member added.', 'success');
@@ -108,6 +115,26 @@ const StaffModal = ({ open, mode, initial, tenants, onClose, onSaved }) => {
           <Field label="Assigned tenants" htmlFor="sf-tenants" hint="Tenant codes this manager owns. Pick from the list or type a code.">
             <ChipInput id="sf-tenants" values={form.assigned_tenants} onChange={(v) => setForm((f) => ({ ...f, assigned_tenants: v }))} suggestions={tenantSuggestions} placeholder="Add a tenant code…" />
           </Field>
+        )}
+
+        {form.role === 'super_admin' ? (
+          <p className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+            Super admins can view every party’s numeric credit score by default.
+          </p>
+        ) : (
+          <label htmlFor="sf-credit" className="flex items-start gap-2.5 rounded-lg border border-slate-200 p-3 cursor-pointer">
+            <input
+              id="sf-credit"
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-200"
+              checked={form.can_view_credit}
+              onChange={(e) => setForm((f) => ({ ...f, can_view_credit: e.target.checked }))}
+            />
+            <span className="text-sm">
+              <span className="font-semibold text-slate-700">Trusted for credit intelligence</span>
+              <span className="block text-xs text-slate-400">May view the numeric cross-tenant credit scores. Tenants only ever see colour labels.</span>
+            </span>
+          </label>
         )}
 
         <Field

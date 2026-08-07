@@ -2802,6 +2802,7 @@ exports.platformResumeStaff = onCall(PLATFORM_OPTS, (req) => platform.platformRe
 exports.platformManageStaff = onCall(PLATFORM_OPTS, (req) => platform.platformManageStaff(req));
 exports.platformManageTenantUsers = onCall(PLATFORM_OPTS, (req) => platform.platformManageTenantUsers(req));
 exports.platformResyncCatalog = onCall(PLATFORM_OPTS, (req) => platform.platformResyncCatalog(req));
+exports.platformListCreditScores = onCall(PLATFORM_OPTS, (req) => platform.platformListCreditScores(req));
 
 // Scheduled platform maintenance. Inert off the SaaS project (empty queries).
 // Pinned to the admin service account because both call revokeRefreshTokens,
@@ -2813,5 +2814,13 @@ exports.enforceTrialExpiry = onSchedule(
 exports.sweepSupportSessions = onSchedule(
   { schedule: 'every 60 minutes', memory: '256MiB', timeoutSeconds: 300, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
   () => platform.sweepSupportSessions(),
+);
+// Nightly cross-tenant credit-worthiness scoring (bureau). Slotted after the
+// 02:00 trial-expiry sweep so suspensions settle first. Heavier than the other
+// sweeps (reads every participating tenant's books) → more memory/time. Inert
+// off the SaaS project (empty platform_tenants query).
+exports.computeCreditScores = onSchedule(
+  { schedule: 'every day 02:30', timeZone: 'Asia/Kolkata', memory: '512MiB', timeoutSeconds: 540, serviceAccount: FIREBASE_ADMIN_SERVICE_ACCOUNT },
+  () => platform.computeCreditScores(),
 );
 

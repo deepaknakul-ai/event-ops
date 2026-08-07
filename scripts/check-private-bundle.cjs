@@ -37,12 +37,18 @@ const ASSETS = path.join(DIST, 'assets');
 
 // Markers that must NEVER appear in a private bundle.
 const FORBIDDEN_MARKERS = [
-  'platform_staff',        // platform staff collection (survives minification)
-  'platform_tenants',      // tenant registry collection (survives minification)
-  'platformLogin',         // platform login callable id (string literal — reliable)
-  'platformSupportAccess', // support-impersonation callable id (string literal)
-  'Company Code',          // SaaS login form label (JSX text — survives)
+  'platform_staff',           // platform staff collection (survives minification)
+  'platform_tenants',         // tenant registry collection (survives minification)
+  'platform_credit_scores',   // cross-tenant credit bureau collection (platform-only)
+  'platformLogin',            // platform login callable id (string literal — reliable)
+  'platformSupportAccess',    // support-impersonation callable id (string literal)
+  'platformListCreditScores', // credit-score callable id (lives only in the platform chunk)
+  'Company Code',             // SaaS login form label (JSX text — survives)
 ];
+// NOTE: 'credit_labels' is deliberately NOT forbidden — it is a tenant settings
+// doc the SHARED app (src/App.jsx / Clients.jsx) reads in both editions, gated by
+// IS_SAAS at runtime. Its presence in the private bundle is expected and benign,
+// exactly like settings/entitlements.
 
 // The private appId string. Its presence proves the app-id constant folded in
 // correctly. Absent => warn only (a future minifier could, in theory, mangle

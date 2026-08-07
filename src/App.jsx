@@ -3310,6 +3310,18 @@ const [payroll, setPayroll] = useState([]);
   // A feature is ON unless entitlements are loaded AND explicitly disable it.
   const hasFeature = (f) => !ent || !ent.features || ent.features[f] !== false;
 
+  // SaaS: load the tenant's credit-worthiness COLOUR labels (band per client/
+  // vendor doc id), produced nightly by the cross-tenant bureau. Colour only —
+  // the numeric score never reaches the tenant. No-op on private (the doc never
+  // exists there), so the credit chip stays absent outside SaaS.
+  const [creditLabels, setCreditLabels] = useState({});
+  useEffect(() => {
+    if (!IS_SAAS || !role || !appId) return;
+    getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'credit_labels'))
+      .then((snap) => setCreditLabels((snap.exists() && snap.data().labels) || {}))
+      .catch(() => setCreditLabels({}));
+  }, [role]);
+
   useEffect(() => {
     const storedUid = localStorage.getItem('rentalOpsUser');
     // Purge any legacy admin_temp shortcut — this was a privilege-injection vector.
@@ -4026,7 +4038,7 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/projects" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} payments={payments} /></ProtectedRoute>} />
                 <Route path="/projects/:projectId" element={<ProtectedRoute role={effectiveRole} resource="projects"><Projects projects={projects} clients={clients} inventory={inventory} expenses={expenses} employees={safeEmployees} role={effectiveRole} user={user} currentEmpId={effectiveEmpId} db={db} appId={appId} selectedProjectId={selectedProjectId} setSelectedProjectId={setSelectedProjectId} logAction={logAction} addToast={addToast} timeLogs={timeLogs} taxInvoices={taxInvoicesList} payments={payments} /></ProtectedRoute>} />
                 <Route path="/outsourcing" element={<ProtectedRoute role={effectiveRole} resource="outsourcing"><Outsourcing projects={projects} clients={clients} inventory={inventory} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} purchaseInvoices={purchaseInvoicesList} lockedFYs={lockedFYs} addToast={addToast} /></ProtectedRoute>} />
-                <Route path="/clients" element={<ProtectedRoute role={effectiveRole} resource="clients"><Clients clients={clients} inventory={inventory} projects={projects} payments={payments} vendorPayments={vendorPayments} expenses={expenses} timeLogs={timeLogs} employees={safeEmployees} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
+                <Route path="/clients" element={<ProtectedRoute role={effectiveRole} resource="clients"><Clients clients={clients} inventory={inventory} projects={projects} payments={payments} vendorPayments={vendorPayments} expenses={expenses} timeLogs={timeLogs} employees={safeEmployees} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} creditLabels={creditLabels} /></ProtectedRoute>} />
                 <Route path="/contacts" element={<ProtectedRoute role={effectiveRole} resource="contacts"><Contacts clients={clients} /></ProtectedRoute>} />
                 <Route path="/inventory" element={<ProtectedRoute role={effectiveRole} resource="inventory"><Inventory inventory={inventory} clients={clients} projects={projects} role={effectiveRole} db={db} appId={appId} logAction={logAction} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
                 <Route path="/warehouse-scan" element={<ProtectedRoute role={effectiveRole} resource="inventory"><WarehouseScan projects={projects} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} currentEmpId={effectiveEmpId} addToast={addToast} logAction={logAction} /></ProtectedRoute>} />

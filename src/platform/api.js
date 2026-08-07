@@ -55,7 +55,7 @@ export const onPlatformAuth = (cb) => onAuthStateChanged(auth, async (user) => {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 export const platformLogin = async ({ username, password }) => {
-  const data = await call('platformLogin', { username, password }); // {token, staffId, role, name}
+  const data = await call('platformLogin', { username, password }); // {token, staffId, role, name, can_view_credit}
   if (data?.token) {
     try {
       await signInWithCustomToken(auth, data.token);
@@ -63,7 +63,7 @@ export const platformLogin = async ({ username, password }) => {
       throw new Error('Session could not be established: ' + (e?.message || e));
     }
   }
-  const session = { staffId: data?.staffId || null, role: data?.role || 'business_manager', name: data?.name || username };
+  const session = { staffId: data?.staffId || null, role: data?.role || 'business_manager', name: data?.name || username, can_view_credit: data?.can_view_credit === true };
   saveSession(session);
   return session;
 };
@@ -79,7 +79,7 @@ export const platformLogout = async () => {
 // the shared Firebase app in with the custom token and persist the identity
 // identically. After it resolves the caller is fully logged in.
 export const setupPassword = async ({ username, setupKey, newPassword }) => {
-  const data = await call('platformSetupPassword', { username, setupKey, newPassword }); // {token, staffId, role, name}
+  const data = await call('platformSetupPassword', { username, setupKey, newPassword }); // {token, staffId, role, name, can_view_credit}
   if (data?.token) {
     try {
       await signInWithCustomToken(auth, data.token);
@@ -87,7 +87,7 @@ export const setupPassword = async ({ username, setupKey, newPassword }) => {
       throw new Error('Session could not be established: ' + (e?.message || e));
     }
   }
-  const session = { staffId: data?.staffId || null, role: data?.role || 'business_manager', name: data?.name || username };
+  const session = { staffId: data?.staffId || null, role: data?.role || 'business_manager', name: data?.name || username, can_view_credit: data?.can_view_credit === true };
   saveSession(session);
   return session;
 };
@@ -120,6 +120,13 @@ export const enterSupport = async (tenantId) => {
 // Add catalog items the tenant is missing (never touches stocked/priced rows).
 // -> { added, catalog_version, total_catalog }
 export const resyncCatalog = (tenantId) => call('platformResyncCatalog', { tenantId });
+
+// ── Credit intelligence (super_admin or trusted can_view_credit staff) ───────
+// Cross-tenant credit scores. No arg → riskiest-first list of {pan, band, score,
+// names, sample_size, confidence, contributor_count, aggregate}. With a pan →
+// {score:{... full doc incl. factors + per-tenant contributions}} drill-down.
+export const listCreditScores = () => call('platformListCreditScores', {});          // -> {scores:[...]}
+export const creditScoreDetail = (pan) => call('platformListCreditScores', { pan }); // -> {score:{...}}
 
 // ── Staff (single multiplexed callable; super_admin only) ────────────────────
 export const listStaff    = () => call('platformManageStaff', { op: 'list' });                        // -> {staff:[...]}

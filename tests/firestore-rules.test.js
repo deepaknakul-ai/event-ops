@@ -790,4 +790,58 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await assertSucceeds(deleteDoc(doc(asUser('admin1'), path('chart_of_accounts', 'man1'))));
     });
   });
+
+  // ── Cross-tenant credit intelligence ────────────────────────────────────────
+  // The NUMERIC score (platform_credit_scores) is control-plane, staff-only; the
+  // COLOUR projection (settings/credit_labels) is tenant-readable but server-write.
+  describe('credit intelligence — score is staff-only, labels are read-only for tenants', () => {
+    // A platform-staff session: staff:true + staff_role claim (mirrors the token
+    // verifyLogin/platformLogin mint). staffData() reads platform_staff/{uid}.
+    const asStaff = (uid, role) => testEnv.authenticatedContext(uid, { staff: true, staff_role: role }).firestore();
+
+    const seedCredit = () => testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'platform_credit_scores/PAN1'), { pan: 'PAN1', band: 'red', score: 18, computed_by: 'system:credit' });
+      await setDoc(doc(db, 'platform_staff/super1'), { role: 'super_admin', status: 'active' });
+      await setDoc(doc(db, 'platform_staff/trusted1'), { role: 'business_manager', status: 'active', can_view_credit: true });
+      await setDoc(doc(db, 'platform_staff/plain1'), { role: 'business_manager', status: 'active', can_view_credit: false });
+      await setDoc(doc(db, path('settings', 'credit_labels')), { labels: { cA: { band: 'red' } }, updated_at: 'x' });
+    });
+
+    test('super_admin and trusted (can_view_credit) staff CAN read a score', async () => {
+      await seedCredit();
+      await assertSucceeds(getDoc(doc(asStaff('super1', 'super_admin'), 'platform_credit_scores/PAN1')));
+      await assertSucceeds(getDoc(doc(asStaff('trusted1', 'business_manager'), 'platform_credit_scores/PAN1')));
+    });
+
+    test('untrusted staff and tenant users and anon CANNOT read a score', async () => {
+      await seedCredit();
+      await assertFails(getDoc(doc(asStaff('plain1', 'business_manager'), 'platform_credit_scores/PAN1')));
+      await assertFails(getDoc(doc(asUser('admin1'), 'platform_credit_scores/PAN1'))); // tenant admin — no staff claim
+      await assertFails(getDoc(doc(asUser('u1'), 'platform_credit_scores/PAN1')));
+      await assertFails(getDoc(doc(asAnon(), 'platform_credit_scores/PAN1')));
+    });
+
+    test('NOBODY can write a score — not even a super_admin (Admin SDK only)', async () => {
+      await seedCredit();
+      await assertFails(setDoc(doc(asStaff('super1', 'super_admin'), 'platform_credit_scores/PAN1'), { band: 'green' }, { merge: true }));
+      await assertFails(setDoc(doc(asStaff('trusted1', 'business_manager'), 'platform_credit_scores/PAN9'), { band: 'green' }));
+      await assertFails(deleteDoc(doc(asStaff('super1', 'super_admin'), 'platform_credit_scores/PAN1')));
+    });
+
+    test('settings/credit_labels is readable by any real tenant session, NOT anon', async () => {
+      await seedCredit();
+      await assertSucceeds(getDoc(doc(asUser('admin1'), path('settings', 'credit_labels'))));
+      await assertSucceeds(getDoc(doc(asUser('u1'), path('settings', 'credit_labels'))));
+      await assertSucceeds(getDoc(doc(asUser('tech1'), path('settings', 'credit_labels'))));
+      await assertFails(getDoc(doc(asAnon(), path('settings', 'credit_labels'))));
+    });
+
+    test('settings/credit_labels is client-UNwritable for every tenant role (server-only)', async () => {
+      await seedCredit();
+      await assertFails(setDoc(doc(asUser('admin1'), path('settings', 'credit_labels')), { labels: { cA: { band: 'green' } } }, { merge: true }));
+      await assertFails(setDoc(doc(asUser('acct1'), path('settings', 'credit_labels')), { labels: {} }, { merge: true }));
+      await assertFails(deleteDoc(doc(asUser('admin1'), path('settings', 'credit_labels'))));
+    });
+  });
 });
