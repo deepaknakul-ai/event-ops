@@ -25,13 +25,23 @@ const getProjectRevenue = (project, taxInvoiceForProject) => {
   // Level 2: Package cost on the project
   if (project.package_cost && parseFloat(project.package_cost) > 0) {
     const base = round2(parseFloat(project.package_cost));
-    const gstRate = parseFloat(project.package_cost_gst || 18);
+    const gstRate = parseFloat(project.package_cost_gst != null ? project.package_cost_gst : 18);
     const gst = round2(base * (gstRate / 100));
     return { taxable: base, gst, total: round2(base + gst), source: 'package_cost' };
   }
 
-  // Level 1: Itemised cost (items + logistics)
-  const equipment = (project.items || []).reduce((sum, i) => sum + (i.total || 0), 0);
+  // Level 1: Itemised cost (items + logistics) — GST summed PER LINE (respects 0%
+  // and mixed rates); never a flat 18% reverse-calc, which mis-stated any 0%/non-18%
+  // item. GST is still computed and carried even when a party has no GSTIN.
+  let equipTaxable = 0;
+  let equipGst = 0;
+  (project.items || []).forEach((i) => {
+    const taxable = parseFloat(i.amount || 0);
+    const gstRate = parseFloat(i.gst_rate != null ? i.gst_rate : 18);
+    const gst = i.gst_amount != null ? parseFloat(i.gst_amount) : taxable * (gstRate / 100);
+    equipTaxable += taxable;
+    equipGst += gst;
+  });
   let logisticsBase = 0;
   let logisticsGst = 0;
   if (project.logistics_costs) {
@@ -42,9 +52,6 @@ const getProjectRevenue = (project, taxInvoiceForProject) => {
       logisticsGst += s.gstAmount;
     });
   }
-  // Equipment items already include GST in their total — reverse-calc taxable at 18%
-  const equipTaxable = round2(equipment / 1.18);
-  const equipGst = round2(equipment - equipTaxable);
   const taxable = round2(equipTaxable + logisticsBase);
   const gst = round2(equipGst + logisticsGst);
   return { taxable, gst, total: round2(taxable + gst), source: 'itemised' };

@@ -1037,7 +1037,10 @@ export const getProjectDirectCosts = (project, expenses = []) => {
   let logistics = 0;
   if (project?.logistics_costs) {
     Object.values(project.logistics_costs).forEach((c) => {
-      logistics += (Number(c?.amount) || 0) * (1 + (Number(c?.gst) || 0) / 100);
+      // Split-line aware (like every other logistics helper): the legacy top-level
+      // amount/gst is undefined for split-line records, so this previously
+      // under-counted logistics cost → overstated net profit & referral commission.
+      logistics += sumLogisticsRecord(c).total;
     });
   }
   const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + (Number(e?.amount) || 0), 0);

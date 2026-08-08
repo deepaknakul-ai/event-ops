@@ -609,7 +609,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       let finalGstRate = poForm.gst_rate || 0;
       if (poForm.package_cost && poForm.package_cost > 0) {
         subtotal = poForm.package_cost;
-        finalGstRate = poForm.package_cost_gst || 18;
+        finalGstRate = poForm.package_cost_gst != null ? poForm.package_cost_gst : 18; // 0% stays 0%, not `|| 18`
       } else {
         subtotal = (poForm.equipment_cost || 0) + (poForm.labour_cost || 0) + (poForm.transport_cost || 0) + (poForm.fnb_cost || 0) + (poForm.travel_cost || 0) + (poForm.accommodation_cost || 0) + (poForm.misc_cost || 0);
       }
@@ -701,7 +701,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       let finalGstRate = poForm.gst_rate || 0;
       if (poForm.package_cost && poForm.package_cost > 0) {
         subtotal = poForm.package_cost;
-        finalGstRate = poForm.package_cost_gst || 18;
+        finalGstRate = poForm.package_cost_gst != null ? poForm.package_cost_gst : 18; // 0% stays 0%, not `|| 18`
       } else {
         subtotal = (poForm.equipment_cost || 0) + (poForm.labour_cost || 0) + (poForm.transport_cost || 0) + (poForm.fnb_cost || 0) + (poForm.travel_cost || 0) + (poForm.accommodation_cost || 0) + (poForm.misc_cost || 0);
       }
@@ -855,6 +855,14 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       const org = await getOrgSettings();
       const vendor = clients.find(c => c.id === po.vendor_id) || { name: po.vendor_name || 'Vendor', address: '' };
       const vendorHasGST = !!(vendor.gstin && vendor.gstin.trim());
+      // GST is DISPLAYED whenever the PO actually carries GST (a stored gst_amount),
+      // never suppressed merely because the vendor lacks a GSTIN — GST is always
+      // calculated + stored, and the PDF follows the stored figure. The
+      // "Unregistered Vendor" note below stays informational.
+      const poGstAmount = po.gst_amount !== undefined
+        ? po.gst_amount
+        : (po.items || []).reduce((s, it) => s + ((parseFloat(it.tax_amount) || 0) - (parseFloat(it.amount) || 0)), 0);
+      const poHasGST = (parseFloat(poGstAmount) || 0) > 0.005;
       const pageWidth = doc.internal.pageSize.width;
       const pageHeight = doc.internal.pageSize.height;
       const margin = 10;
@@ -912,7 +920,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
 
       doc.text(`Subject: ${po.subject || '-'}`, margin, y); y += 10;
 
-      const rows = vendorHasGST
+      const rows = poHasGST
         ? (po.items || []).map((item) => [
             item.item_name + (item.description ? `\n(${item.description})` : ''),
             item.qty,
@@ -932,7 +940,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
 
       autoTable(doc, {
           startY: y,
-          head: [vendorHasGST
+          head: [poHasGST
             ? ['Item', 'Qty', 'Days', 'Rate', 'Base Amt', 'GST %', 'Total Amt']
             : ['Item', 'Qty', 'Days', 'Rate', 'Amount']
           ],
@@ -940,7 +948,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           theme: 'grid',
           headStyles: { fillColor: [50, 50, 50] },
           styles: { cellPadding: 2, fontSize: 7, valign: 'middle' },
-          columnStyles: vendorHasGST ? {
+          columnStyles: poHasGST ? {
               0: { cellWidth: 'auto' },
               1: { cellWidth: 12, halign: 'center' },
               2: { cellWidth: 12, halign: 'center' },
@@ -1000,17 +1008,17 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       // Calculate Totals
       const totalBase = po.subtotal !== undefined ? po.subtotal : (po.items || []).reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
       const totalGST = po.gst_amount !== undefined ? po.gst_amount : (po.items || []).reduce((sum, item) => sum + ((parseFloat(item.tax_amount) || 0) - (parseFloat(item.amount) || 0)), 0);
-      const grandTotal = vendorHasGST
+      const grandTotal = poHasGST
         ? (po.amount !== undefined ? po.amount : (po.items || []).reduce((sum, item) => sum + (parseFloat(item.tax_amount) || 0), 0))
         : totalBase;
 
-      checkAddPage(vendorHasGST ? 35 : 25);
+      checkAddPage(poHasGST ? 35 : 25);
 
       const boxX = pageWidth - margin - 60;
 
       doc.setDrawColor(200);
 
-      if (vendorHasGST) {
+      if (poHasGST) {
         // Base Amount
         doc.setFillColor(250, 250, 250);
         doc.rect(boxX, finalY, 60, 8, 'FD');
