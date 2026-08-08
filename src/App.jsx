@@ -1264,6 +1264,12 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
   const [allocWizardSelection, setAllocWizardSelection] = useState({}); // { itemId: { selected: true, qty, rate, days } }
 
   const selectedProject = projects.find(p => p.id === selectedProjectId);
+  // Money arrays (vendor_allocations / purchase_orders) are stripped OFF the base doc
+  // and mirrored into project_financials (onProjectWritten trigger). A getDoc/
+  // transaction.get of the base returns them undefined, so read-modify-write against
+  // the base alone would write back [] and wipe the sibling on the next mirror.
+  // Fall back to the merged in-memory project (loader overlays the sibling).
+  const getMergedProject = (pId) => projects.find(p => String(p.id) === String(pId));
   const vendors = clients.filter(c => c.type === 'Vendor' || c.type === 'Both'); // Ensure vendors are filtered correctly
   
   const allProjectItems = useMemo(() => {
@@ -1366,7 +1372,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           
           // Try to find item gst from inventory if possible, else default
           const invItem = inventory.find(i => i.id === item.item_id);
-          if (invItem) gst = invItem.gst_rate || 18;
+          if (invItem) gst = invItem.gst_rate != null ? invItem.gst_rate : 18; // 0% must stay 0%, not `|| 18`
 
           const amount = qtyToAlloc * rate * days;
           const tax = amount * (gst/100);
@@ -1392,7 +1398,9 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
 
       try {
           const projectRef = doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProjectId);
-          await updateDoc(projectRef, { vendor_allocations: arrayUnion(...newAllocations) });
+          // Full-array write: arrayUnion onto the stripped base field would recreate
+          // it with only the new rows and the mirror would wipe older allocations.
+          await updateDoc(projectRef, { vendor_allocations: [...(selectedProject?.vendor_allocations || []), ...newAllocations] });
           logAction('projects', 'add_outsourcing', selectedProjectId, { count: newAllocations.length }, selectedProject.project_name);
           setIsAllocWizardOpen(false);
           setAllocWizardSelection({});
@@ -1427,7 +1435,8 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
         const pDoc = await transaction.get(projectRef);
         if (!pDoc.exists()) throw "Project not found";
         const pData = pDoc.data();
-        const newAllocations = (pData.vendor_allocations || []).map(a => a.id === editingAllocation.id ? finalAllocation : a);
+        const baseAllocs = pData.vendor_allocations ?? getMergedProject(selectedProjectId)?.vendor_allocations ?? [];
+        const newAllocations = baseAllocs.map(a => a.id === editingAllocation.id ? finalAllocation : a);
         transaction.update(projectRef, { vendor_allocations: newAllocations });
       });
       logAction('projects', 'update_outsourcing', selectedProjectId, { old: editingAllocation, new: finalAllocation }, selectedProject.project_name);
@@ -1441,8 +1450,11 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
 
   const handleRemove = async (alloc) => {
     if(await confirmDialog("Remove this vendor allocation?")) {
+        // Filter by id: arrayRemove can't deep-equal-match the merged on-screen copy
+        // against the stripped base field — it would reset the field to [] and the
+        // mirror would wipe ALL allocations from the sibling.
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProjectId), {
-          vendor_allocations: arrayRemove(alloc)
+          vendor_allocations: (selectedProject?.vendor_allocations || []).filter(a => a.id !== alloc.id)
         });
         logAction('projects', 'remove_outsourcing', selectedProjectId, alloc, selectedProject.project_name);
     }
@@ -1583,7 +1595,8 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
         const pDoc = await transaction.get(projectRef);
         if (!pDoc.exists()) throw new Error('Project not found');
         const pData = pDoc.data();
-        const updatedPOs = (pData.purchase_orders || []).map(p =>
+        const basePOs = pData.purchase_orders ?? getMergedProject(pId)?.purchase_orders ?? [];
+        const updatedPOs = basePOs.map(p =>
           p.id === invoicingPO.id ? { ...p, vendor_invoice: vendorInvoice } : p
         );
         transaction.update(projectRef, { purchase_orders: updatedPOs });
@@ -1671,7 +1684,8 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               if (!pDoc.exists()) throw "Project not found";
               
               const pData = pDoc.data();
-              const updatedAllocations = (pData.vendor_allocations || []).map(alloc => {
+              const baseAllocs = pData.vendor_allocations ?? getMergedProject(pId)?.vendor_allocations ?? [];
+              const updatedAllocations = baseAllocs.map(alloc => {
                   if (poVendorData.items.find(i => i.id === alloc.id)) {
                       // Update allocation with PO details including package cost if specified
                       const updatedAlloc = { ...alloc, po_id: poId, po_no: newPO.po_no };
@@ -1687,9 +1701,9 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                   return alloc;
               });
               
-              const updatedPOs = [...(pData.purchase_orders || []), newPO];
-              
-              transaction.update(projectRef, { 
+              const updatedPOs = [...(pData.purchase_orders ?? getMergedProject(pId)?.purchase_orders ?? []), newPO];
+
+              transaction.update(projectRef, {
                   vendor_allocations: updatedAllocations,
                   purchase_orders: updatedPOs
               });
@@ -1756,12 +1770,14 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               if (!pDoc.exists()) throw "Project not found";
               
               const pData = pDoc.data();
-              
+
               // Update PO in purchase_orders
-              const updatedPOs = (pData.purchase_orders || []).map(p => p.id === editingPO.id ? updatedPO : p);
-              
+              const basePOs = pData.purchase_orders ?? getMergedProject(pId)?.purchase_orders ?? [];
+              const updatedPOs = basePOs.map(p => p.id === editingPO.id ? updatedPO : p);
+
               // Update linked allocations with PO cost information
-              const updatedAllocations = (pData.vendor_allocations || []).map(alloc => {
+              const baseAllocs = pData.vendor_allocations ?? getMergedProject(pId)?.vendor_allocations ?? [];
+              const updatedAllocations = baseAllocs.map(alloc => {
                   if (alloc.po_id === editingPO.id) {
                       // Update allocation with PO details including package cost if specified
                       const updatedAlloc = { ...alloc, description: poItems.find(i => i.id === alloc.id)?.description || alloc.description };
@@ -1837,14 +1853,15 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               if (!pDoc.exists()) throw "Project not found";
               
               const pData = pDoc.data();
-              const updatedPOs = (pData.purchase_orders || []).map(p => {
+              const basePOs = pData.purchase_orders ?? getMergedProject(pId)?.purchase_orders ?? [];
+              const updatedPOs = basePOs.map(p => {
                   if (p.id === po.id) {
                       return { ...p, status: newStatus };
                   }
                   return p;
               });
 
-              let updatedAllocations = pData.vendor_allocations || [];
+              let updatedAllocations = pData.vendor_allocations ?? getMergedProject(pId)?.vendor_allocations ?? [];
               if (newStatus === 'Cancelled') {
                   updatedAllocations = updatedAllocations.filter(alloc => alloc.po_id !== po.id);
               }

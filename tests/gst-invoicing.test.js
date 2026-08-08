@@ -31,6 +31,41 @@ describe('getProjectGSTBreakdown — place of supply', () => {
   });
 });
 
+describe('getProjectGSTBreakdown — 0% lines must not be coerced to 18% (regression)', () => {
+  // Reproduces the real quotation that mis-taxed a 0% Transportation line:
+  // equipment + Travel @18%, Transportation @0%. The 0% line must add ZERO GST.
+  it('does not tax a 0% logistics (Transportation) line', () => {
+    const p = {
+      items: [
+        { item_name: 'WATCHOUT', amount: 24000, gst_rate: 18 },
+        { item_name: 'LED 90', amount: 104400, gst_rate: 18 },
+        { item_name: 'LED 42', amount: 48720, gst_rate: 18 },
+      ],
+      logistics_costs: {
+        travel: { amount: 4000, gst: 18 },
+        transport: { amount: 20000, gst: 0 }, // 0% — must stay 0%, not become 18%
+      },
+    };
+    const bd = getProjectGSTBreakdown(p, ORG_DELHI, CLIENT_MH); // inter → IGST
+    expect(round2(bd.totals.taxable)).toBe(201120);
+    expect(round2(bd.totals.igstAmt)).toBe(32601.60);  // NOT 36201.60 (which taxed the 20000 @18%)
+    expect(round2(bd.totals.total)).toBe(233721.60);   // subtotal + correct IGST reconciles
+  });
+
+  it('does not tax a 0% equipment item, and honours an explicit stored gst_amount of 0', () => {
+    const p = {
+      items: [
+        { item_name: 'Equipment', amount: 100000, gst_rate: 18 },
+        { item_name: 'Exempt goods', amount: 20000, gst_rate: 0 },              // 0 || 18 trap
+        { item_name: 'Zero-rated', amount: 30000, gst_rate: 0, gst_amount: 0 }, // stored 0 must be honoured
+      ],
+    };
+    const bd = getProjectGSTBreakdown(p, ORG_DELHI, CLIENT_MH);
+    expect(round2(bd.totals.taxable)).toBe(150000);
+    expect(round2(bd.totals.igstAmt)).toBe(18000); // only the 100000 @18%
+  });
+});
+
 describe('getProjectGSTBreakdown — rate-wise package cost', () => {
   it('splits a package across item GST slabs (package = items sum)', () => {
     const p = {

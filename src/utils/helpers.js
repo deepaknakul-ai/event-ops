@@ -488,9 +488,11 @@ export const getProjectGSTBreakdown = (project, orgGSTIN, clientGSTIN) => {
   } else {
     // Equipment items
     (project.items || []).forEach(item => {
-      const gstRate = parseFloat(item.gst_rate || 18);
+      // Guard with != null (like the package branch above): a legitimate 0% rate
+      // must NOT be coerced to 18% by a falsy `|| 18` (0 || 18 === 18).
+      const gstRate = parseFloat(item.gst_rate != null ? item.gst_rate : 18);
       const taxable = parseFloat(item.amount || 0); // amount = qty × rate × days (pre-GST)
-      const gstAmt = parseFloat(item.gst_amount || taxable * (gstRate / 100));
+      const gstAmt = item.gst_amount != null ? parseFloat(item.gst_amount) : taxable * (gstRate / 100);
       items.push({
         description: item.item_name,
         hsn: item.hsn_code || '998599',
@@ -517,7 +519,8 @@ export const getProjectGSTBreakdown = (project, orgGSTIN, clientGSTIN) => {
         const lines = getLogisticsLines(key, labelBase, cost);
         lines.forEach((line) => {
           if (!line.amount && !line.gst) return;
-          const gstRate = parseFloat(line.gst || 18);
+          // 0% logistics (e.g. Transportation) must stay 0% — never `|| 18`.
+          const gstRate = parseFloat(line.gst != null ? line.gst : 18);
           const taxable = parseFloat(line.amount || 0);
           const gstAmt = taxable * (gstRate / 100);
           items.push({

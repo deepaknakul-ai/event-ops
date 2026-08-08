@@ -14,7 +14,7 @@ import {
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc, arrayUnion, arrayRemove, runTransaction } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, doc, deleteDoc, serverTimestamp, getDoc, arrayUnion, runTransaction } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 
@@ -734,8 +734,13 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       message: `Permanently delete "${projName}" and all its associated data (items, challans, invoices)? This cannot be undone.`,
       onConfirm: async () => {
         if (!can(role, 'projects', 'delete')) return addToast('Access denied: only Admin can delete projects.', 'error');
-        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id));
-        logAction('projects', 'delete', id, {}, projName);
+        try {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', id));
+          logAction('projects', 'delete', id, {}, projName);
+          addToast('Project deleted.', 'success');
+        } catch (e) {
+          addToast('Delete failed: ' + (e?.message || 'error'), 'error');
+        }
       }
     });
   };
@@ -1527,8 +1532,11 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         package_cost_gst: selectedProject.package_cost_gst || 18,
       };
 
+      // Full-array write (not arrayUnion): proforma_invoices is stripped OFF the base
+      // doc by onProjectWritten, so a union would recreate the base field with only
+      // this PI and the mirror would wipe every older PI from project_financials.
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
-        proforma_invoices: arrayUnion(piData)
+        proforma_invoices: [...(selectedProject.proforma_invoices || []), piData]
       });
       logAction('projects', 'create_proforma_invoice', selectedProject.id, { pi_no: newPiNo }, selectedProject.project_name);
 
@@ -1553,8 +1561,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       message: `Are you sure you want to delete Proforma Invoice ${piRecord.pi_no}? This action cannot be undone.`,
       onConfirm: async () => {
         try {
+          // Filter by id instead of arrayRemove: the base field is stripped (mirrored
+          // to project_financials), so arrayRemove can't deep-equal-match the merged
+          // on-screen record — it would reset the base field to [] and the mirror
+          // would wipe ALL PIs from the sibling.
           await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), {
-            proforma_invoices: arrayRemove(piRecord)
+            proforma_invoices: (selectedProject.proforma_invoices || []).filter(pi => pi.id !== piRecord.id)
           });
           logAction('projects', 'delete_proforma_invoice', selectedProject.id, { pi_no: piRecord.pi_no }, selectedProject.project_name);
           addToast(`Proforma Invoice ${piRecord.pi_no} deleted`, 'success');
@@ -1730,7 +1742,12 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         specs: ledSpecs
       };
     }
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayUnion(newItem) });
+    // Write the FULL merged array, not arrayUnion: the base doc's items are money-
+    // stripped (mirrored to project_financials by onProjectWritten), so unioning onto
+    // the base array makes the trigger re-mirror stripped copies over the sibling —
+    // zeroing every previously allocated item's rate/amount. selectedProject.items is
+    // the merged (money-complete) view, same pattern as handleUpdateItemAllocation.
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: [...(selectedProject.items || []), newItem] });
     logAction('projects', 'allocate_item', selectedProject.id, newItem, selectedProject.project_name);
     setAllocationForm(p => ({...p, item_id: '', qty: 1, available_qty: 0, description: '', is_led: false, tilesWide: 0, tilesHigh: 0, tileModelData: null })); 
   };
@@ -1762,11 +1779,20 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     setIsEditItemModalOpen(false);
   };
 
-  const handleRemoveAllocation = async (item) => {
+  // Remove by INDEX and write the filtered array back. arrayRemove() matches only
+  // an element that deep-equals its argument, but the on-screen item is a merged
+  // copy (project + mirrored project_financials via _applyProjMerge in App.jsx),
+  // so arrayRemove silently matched nothing. Index removal is exact.
+  const handleRemoveAllocation = async (idx) => {
     if (!can(role, 'projects', 'allocation')) return addToast('Access denied: insufficient permissions.', 'error');
-    if(await confirmDialog("Remove this item?")) {
-        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: arrayRemove(item) });
-        logAction('projects', 'remove_item', selectedProject.id, item, selectedProject.project_name);
+    if (!(await confirmDialog("Remove this item?"))) return;
+    try {
+      const next = (selectedProject.items || []).filter((_, i) => i !== idx);
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', selectedProject.id), { items: next });
+      logAction('projects', 'remove_item', selectedProject.id, { idx }, selectedProject.project_name);
+      addToast('Item removed.', 'success');
+    } catch (e) {
+      addToast('Could not remove item: ' + (e?.message || 'error'), 'error');
     }
   };
 
@@ -2290,7 +2316,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                                 <button onClick={() => { setEditingItem(item); setIsEditItemModalOpen(true); }} className="p-1.5 rounded hover:bg-blue-50 text-blue-500 hover:text-blue-700 transition-colors">
                                   <Edit size={14} />
                                 </button>
-                                <button onClick={() => handleRemoveAllocation(item)} className="p-1.5 rounded hover:bg-red-50 text-red-400 hover:text-red-600 transition-colors">
+                                <button onClick={() => handleRemoveAllocation(idx)} className="p-1.5 rounded hover:bg-red-50 text-red-400 hover:text-red-600 transition-colors">
                                   <Trash2 size={14} />
                                 </button>
                               </div>

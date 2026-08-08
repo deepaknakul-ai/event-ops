@@ -42,7 +42,7 @@ export const ConfirmDeleteModal = ({ isOpen, onClose, onConfirm, title, message,
   const [typed, setTyped] = useState('');
   useEffect(() => { if (!isOpen) setTyped(''); }, [isOpen]);
   if (!isOpen) return null;
-  const canConfirm = !requireTyped || typed === 'DELETE';
+  const canConfirm = !requireTyped || typed.trim().toUpperCase() === 'DELETE';
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <div className="w-full max-w-md rounded-xl bg-white shadow-2xl border border-red-200">
