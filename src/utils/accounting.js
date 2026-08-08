@@ -743,6 +743,18 @@ export const buildAccountingSnapshot = ({
     // M-5: accountId only applies when the leg IS the party (Credit mode).
     const collectionAccountId = normalizeMode(row.mode) === 'Credit' ? partyAccountId : null;
 
+    const salesLines = [
+      { debitAccount: collectionAccount, debitAccountId: collectionAccountId, creditAccount: 'Sales Revenue', amount: row.taxable },
+      { debitAccount: collectionAccount, debitAccountId: collectionAccountId, creditAccount: 'Output GST Payable', amount: row.gst },
+    ];
+    // Round-off / discount: when the invoice's final_amount differs from taxable+gst,
+    // post the residual to Round Off so the party sub-ledger equals the document total.
+    const salesRoundOff = round2((row.total != null ? row.total : (row.taxable + row.gst)) - row.taxable - row.gst);
+    if (Math.abs(salesRoundOff) > 0.005) {
+      salesLines.push(salesRoundOff > 0
+        ? { debitAccount: collectionAccount, debitAccountId: collectionAccountId, creditAccount: 'Round Off', amount: salesRoundOff }
+        : { debitAccount: 'Round Off', creditAccount: collectionAccount, creditAccountId: collectionAccountId, amount: -salesRoundOff });
+    }
     pushDoubleEntry(
       journal,
       {
@@ -757,20 +769,7 @@ export const buildAccountingSnapshot = ({
         projectIds: row.projectIds || [],
         projectName: row.projectName || '',
       },
-      [
-        {
-          debitAccount: collectionAccount,
-          debitAccountId: collectionAccountId,
-          creditAccount: 'Sales Revenue',
-          amount: row.taxable,
-        },
-        {
-          debitAccount: collectionAccount,
-          debitAccountId: collectionAccountId,
-          creditAccount: 'Output GST Payable',
-          amount: row.gst,
-        },
-      ]
+      salesLines
     );
   });
 
@@ -793,17 +792,14 @@ export const buildAccountingSnapshot = ({
         projectName: row.projectName || '',
       },
       [
+        // Unbilled accrual: NO Output GST leg — the GST liability arises only when the
+        // tax invoice is raised (time of supply). Accruing it here overstated the
+        // balance-sheet Output GST Payable. Receivable = taxable (ex-GST) until invoiced.
         {
           debitAccount: partyAccount,
           debitAccountId: partyAccountId,
           creditAccount: 'Non-Invoiced Sales Revenue',
           amount: row.taxable,
-        },
-        {
-          debitAccount: partyAccount,
-          debitAccountId: partyAccountId,
-          creditAccount: 'Output GST Payable',
-          amount: row.gst,
         },
       ]
     );

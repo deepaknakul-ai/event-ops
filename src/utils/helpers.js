@@ -46,10 +46,11 @@ export const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPS
 export const getProjectGrandTotal = (project) => {
   if (!project) return 0;
 
-  // If package cost is specified, it supersedes all other costs
+  // If package cost is specified, it supersedes all other costs. Rate-wise total
+  // (respects a mixed-rate underlying item list) so the displayed grand total matches
+  // the issued invoice; a pure lump sum falls back to package_cost_gst inside the breakdown.
   if (project.package_cost && project.package_cost > 0) {
-    const gstRate = project.package_cost_gst ?? 18;
-    return round2(project.package_cost * (1 + gstRate / 100));
+    return round2(getProjectGSTBreakdown(project, '', '').totals.total);
   }
 
   // Otherwise, calculate from items and logistics
@@ -85,8 +86,8 @@ export const getProjectGST = (project) => {
   if (!project) return 0;
 
   if (project.package_cost && project.package_cost > 0) {
-    const gstRate = project.package_cost_gst ?? 18;
-    return round2(project.package_cost * (gstRate / 100));
+    const t = getProjectGSTBreakdown(project, '', '').totals; // rate-wise (matches the invoice)
+    return round2(t.cgstAmt + t.sgstAmt + t.igstAmt);
   }
 
   let totalGST = 0;
