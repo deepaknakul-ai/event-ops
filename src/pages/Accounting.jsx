@@ -673,68 +673,55 @@ const Accounting = ({
 
     // ── GSTR-1: Outward supplies (sales) ──
     const gstr1 = [];
-    // From tax invoices
-    taxInvoices.filter((inv) => inFY(inv.invoice_date)).forEach((inv) => {
-      const client = clientById[inv.client_id];
-      const clientGstin = inv.sale_company_gstin || client?.gstin || '';
-      const orgState = (orgGstin || '').substring(0, 2);
-      const clientState = (clientGstin || '').substring(0, 2);
-      const isIntra = orgState && clientState && orgState === clientState;
-      const taxable = parseFloat(inv.taxable || 0);
-      const gstAmt = parseFloat(inv.gst_amount || 0);
-      gstr1.push({
-        date: inv.invoice_date,
-        invoiceNo: inv.invoice_no,
-        clientName: inv.client_name || client?.name || '',
-        clientGstin,
-        placeOfSupply: clientState || orgState,
-        supplyType: isIntra ? 'Intra-State' : 'Inter-State',
-        taxable,
-        cgst: isIntra ? gstAmt / 2 : 0,
-        sgst: isIntra ? gstAmt / 2 : 0,
-        igst: isIntra ? 0 : gstAmt,
-        total: parseFloat(inv.final_amount || inv.computed_total || (taxable + gstAmt)),
-        gst_breakup: Array.isArray(inv.gst_breakup) && inv.gst_breakup.length ? inv.gst_breakup : null,
-        source: 'Tax Invoice',
-      });
-    });
-    // From projects with invoice_status = 'Invoiced'
-    const invoicedProjIds = new Set(taxInvoices.map(i => i.project_id).filter(Boolean));
-    projects
-      .filter(p => (p.status === 'Completed' || p.status === 'Closed') && isProjectInvoiced(p.invoice_status) && !invoicedProjIds.has(p.id))
-      .filter(p => inFY(p.invoice_date || p.end_date))
-      .forEach((p) => {
-        const client = clientById[p.client_id];
-        const clientGstin = client?.gstin || '';
-        const bd = getProjectGSTBreakdown(p, orgGstin, clientGstin);
+    // From tax invoices ONLY (authoritative). Cancelled excluded; supply-type + the
+    // CGST/SGST/IGST split are read from the STORED invoice — we do NOT re-derive
+    // place-of-supply from live GSTINs (that flipped a B2C CGST+SGST supply to IGST).
+    // No project-derived rows: a tax invoice already covers its project(s), so
+    // re-adding "Project Invoice" rows double-counted output tax (~2x).
+    taxInvoices
+      .filter((inv) => inv.status !== 'Cancelled' && inFY(inv.invoice_date))
+      .forEach((inv) => {
+        const client = clientById[inv.client_id];
+        const isIGST = (inv.supply_type || '') === 'IGST';
+        const taxable = parseFloat(inv.taxable || 0);
+        const gstAmt = parseFloat(inv.gst_amount || 0);
+        const cgst = isIGST ? 0 : (inv.cgst_amount != null ? parseFloat(inv.cgst_amount) : gstAmt / 2);
+        const sgst = isIGST ? 0 : (inv.sgst_amount != null ? parseFloat(inv.sgst_amount) : gstAmt / 2);
+        const igst = isIGST ? (inv.igst_amount != null ? parseFloat(inv.igst_amount) : gstAmt) : 0;
+        const posCode = ((inv.place_of_supply || '').toString().substring(0, 2))
+          || ((inv.bill_to_gstin_at_issue || inv.sale_company_gstin || client?.gstin || '').substring(0, 2))
+          || (orgGstin || '').substring(0, 2);
         gstr1.push({
-          date: p.invoice_date || p.end_date,
-          invoiceNo: p.invoice_no || `PROJECT-${p.project_name}`,
-          clientName: client?.name || 'Unknown',
-          clientGstin,
-          placeOfSupply: bd.placeOfSupply,
-          supplyType: bd.supplyType === 'IGST' ? 'Inter-State' : 'Intra-State',
-          taxable: bd.totals.taxable,
-          cgst: bd.totals.cgstAmt,
-          sgst: bd.totals.sgstAmt,
-          igst: bd.totals.igstAmt,
-          total: bd.totals.total,
-          source: 'Project Invoice',
+          date: inv.invoice_date,
+          invoiceNo: inv.invoice_no,
+          clientName: inv.sale_company_name || inv.client_name || client?.name || '',
+          clientGstin: inv.bill_to_gstin_at_issue || inv.sale_company_gstin || client?.gstin || '',
+          placeOfSupply: posCode,
+          supplyType: isIGST ? 'Inter-State' : 'Intra-State',
+          taxable,
+          cgst, sgst, igst,
+          total: parseFloat(inv.final_amount || inv.computed_total || (taxable + gstAmt)),
+          gst_breakup: Array.isArray(inv.gst_breakup) && inv.gst_breakup.length ? inv.gst_breakup : null,
+          source: 'Tax Invoice',
         });
       });
     gstr1.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
     // ── GSTR-2: Inward supplies (purchases) ──
     const gstr2 = purchaseInvoices
-      .filter(pi => pi.status !== 'Rejected' && inFY(pi.invoice_date))
+      .filter(pi => pi.status !== 'Rejected' && pi.status !== 'Cancelled' && inFY(pi.invoice_date))
       .map((pi) => {
         const vendor = clientById[pi.vendor_id];
         const vendorGstin = pi.vendor_company_gstin || vendor?.gstin || '';
-        const orgState = (orgGstin || '').substring(0, 2);
-        const vendorState = (vendorGstin || '').substring(0, 2);
-        const isIntra = orgState && vendorState && orgState === vendorState;
         const taxable = parseFloat(pi.amount || 0);
         const gstAmt = parseFloat(pi.gst_amount || 0);
+        // Prefer the STORED supply_type (as booked) over re-deriving from live state codes.
+        const isIntra = pi.supply_type
+          ? pi.supply_type !== 'IGST'
+          : (() => { const os = (orgGstin || '').substring(0, 2); const vs = (vendorGstin || '').substring(0, 2); return !!(os && vs && os === vs); })();
+        const cgst = isIntra ? (pi.cgst_amount != null ? parseFloat(pi.cgst_amount) : gstAmt / 2) : 0;
+        const sgst = isIntra ? (pi.sgst_amount != null ? parseFloat(pi.sgst_amount) : gstAmt / 2) : 0;
+        const igst = isIntra ? 0 : (pi.igst_amount != null ? parseFloat(pi.igst_amount) : gstAmt);
         return {
           date: pi.invoice_date,
           piNo: pi.pi_no,
@@ -742,12 +729,10 @@ const Accounting = ({
           vendorName: pi.vendor_name || vendor?.name || '',
           vendorGstin,
           type: pi.type || 'Service',
-          placeOfSupply: vendorState || orgState,
+          placeOfSupply: (vendorGstin || '').substring(0, 2) || (orgGstin || '').substring(0, 2),
           supplyType: isIntra ? 'Intra-State' : 'Inter-State',
           taxable,
-          cgst: isIntra ? gstAmt / 2 : 0,
-          sgst: isIntra ? gstAmt / 2 : 0,
-          igst: isIntra ? 0 : gstAmt,
+          cgst, sgst, igst,
           total: taxable + gstAmt,
         };
       })
@@ -760,51 +745,91 @@ const Accounting = ({
     const totalInputCgst = gstr2.reduce((s, r) => s + r.cgst, 0);
     const totalInputSgst = gstr2.reduce((s, r) => s + r.sgst, 0);
     const totalInputIgst = gstr2.reduce((s, r) => s + r.igst, 0);
+
+    // Credit notes (to clients) reduce OUTPUT tax; debit notes (to vendors) reverse
+    // ITC (reduce INPUT tax). Extract taxable + GST from the posted journal legs and
+    // net them into GSTR-3B so net payable isn't overstated. Split is best-effort from
+    // the party's GSTIN (notes carry no stored supply_type). A full per-note CDNR
+    // table + portal-JSON section is a compliance-feature follow-up.
+    const noteAdj = { outCgst: 0, outSgst: 0, outIgst: 0, outTaxable: 0, inCgst: 0, inSgst: 0, inIgst: 0, inTaxable: 0 };
+    (manualJournalEntries || [])
+      .filter((r) => (r.source === 'credit_note' || r.source === 'debit_note') && inFY(r.date))
+      .forEach((r) => {
+        const isCN = r.source === 'credit_note';
+        const legs = Array.isArray(r.entries) ? r.entries : [];
+        const gstAmt = legs.filter((e) => (isCN ? e.debitAccount === 'Output GST Payable' : e.creditAccount === 'Input GST Credit')).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const taxable = legs.filter((e) => (isCN ? e.debitAccount === 'Sales Revenue' : e.creditAccount === 'Purchase Expense')).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const partyAcc = legs.map((e) => e.debitAccount).concat(legs.map((e) => e.creditAccount)).find((a) => a && a.startsWith('Party: '));
+        const party = clientById[Object.keys(clientById).find((id) => clientById[id]?.name === (partyAcc || '').replace('Party: ', ''))];
+        const os = (orgGstin || '').substring(0, 2);
+        const ps = (party?.gstin || '').substring(0, 2);
+        const isIntra = !!(os && ps && os === ps);
+        if (isCN) {
+          noteAdj.outTaxable += taxable;
+          if (isIntra) { noteAdj.outCgst += gstAmt / 2; noteAdj.outSgst += gstAmt / 2; } else { noteAdj.outIgst += gstAmt; }
+        } else {
+          noteAdj.inTaxable += taxable;
+          if (isIntra) { noteAdj.inCgst += gstAmt / 2; noteAdj.inSgst += gstAmt / 2; } else { noteAdj.inIgst += gstAmt; }
+        }
+      });
+    const netOutCgst = totalOutputCgst - noteAdj.outCgst;
+    const netOutSgst = totalOutputSgst - noteAdj.outSgst;
+    const netOutIgst = totalOutputIgst - noteAdj.outIgst;
+    const netInCgst = totalInputCgst - noteAdj.inCgst;
+    const netInSgst = totalInputSgst - noteAdj.inSgst;
+    const netInIgst = totalInputIgst - noteAdj.inIgst;
     const gstr3b = {
-      outputTaxable: gstr1.reduce((s, r) => s + r.taxable, 0),
-      outputCgst: totalOutputCgst,
-      outputSgst: totalOutputSgst,
-      outputIgst: totalOutputIgst,
-      outputTotal: totalOutputCgst + totalOutputSgst + totalOutputIgst,
-      inputTaxable: gstr2.reduce((s, r) => s + r.taxable, 0),
-      inputCgst: totalInputCgst,
-      inputSgst: totalInputSgst,
-      inputIgst: totalInputIgst,
-      inputTotal: totalInputCgst + totalInputSgst + totalInputIgst,
-      netCgst: totalOutputCgst - totalInputCgst,
-      netSgst: totalOutputSgst - totalInputSgst,
-      netIgst: totalOutputIgst - totalInputIgst,
-      netPayable: (totalOutputCgst + totalOutputSgst + totalOutputIgst) - (totalInputCgst + totalInputSgst + totalInputIgst),
+      outputTaxable: gstr1.reduce((s, r) => s + r.taxable, 0) - noteAdj.outTaxable,
+      outputCgst: netOutCgst,
+      outputSgst: netOutSgst,
+      outputIgst: netOutIgst,
+      outputTotal: netOutCgst + netOutSgst + netOutIgst,
+      inputTaxable: gstr2.reduce((s, r) => s + r.taxable, 0) - noteAdj.inTaxable,
+      inputCgst: netInCgst,
+      inputSgst: netInSgst,
+      inputIgst: netInIgst,
+      inputTotal: netInCgst + netInSgst + netInIgst,
+      netCgst: netOutCgst - netInCgst,
+      netSgst: netOutSgst - netInSgst,
+      netIgst: netOutIgst - netInIgst,
+      netPayable: (netOutCgst + netOutSgst + netOutIgst) - (netInCgst + netInSgst + netInIgst),
     };
 
     // ── HSN Summary ──
     const hsnMap = {};
-    // Sales HSN
-    taxInvoices.filter(inv => inFY(inv.invoice_date)).forEach((inv) => {
-      const proj = projects.find(p => p.id === inv.project_id);
-      if (proj) {
+    // Sales HSN — iterate the invoice's project_ids (array); the old code read the
+    // singular inv.project_id, which modern invoices never set → the HSN sales table
+    // was always blank. Cancelled excluded.
+    taxInvoices.filter(inv => inv.status !== 'Cancelled' && inFY(inv.invoice_date)).forEach((inv) => {
+      const ids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
+      ids.forEach((pid) => {
+        const proj = projects.find(p => p.id === pid);
+        if (!proj) return;
         const client = clientById[proj.client_id];
         const bd = getProjectGSTBreakdown(proj, orgGstin, client?.gstin || '');
         bd.items.forEach(item => {
-          const key = `${item.hsn || '998599'}_${item.gstRate || 18}`;
-          if (!hsnMap[key]) hsnMap[key] = { hsn: item.hsn || '998599', gstRate: item.gstRate || 18, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
+          const rate = item.gstRate ?? 18;
+          const key = `${item.hsn || '998599'}_${rate}`;
+          if (!hsnMap[key]) hsnMap[key] = { hsn: item.hsn || '998599', gstRate: rate, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
           hsnMap[key].salesTaxable += item.taxable;
           hsnMap[key].salesGst += (item.cgstAmt + item.sgstAmt + item.igstAmt);
         });
-      }
+      });
     });
-    // Purchase HSN (default SAC 998599 for services, 998431 for assets)
+    // Purchase HSN (default SAC 998599 for services, 998431 for assets); bucket by the
+    // PI's ACTUAL rate rather than a hardcoded 18% so 0/5/12/28% purchases file correctly.
     gstr2.forEach(pi => {
       const hsn = pi.type === 'Asset' ? '998431' : '998599';
-      const key = `${hsn}_18`;
-      if (!hsnMap[key]) hsnMap[key] = { hsn, gstRate: 18, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
+      const rate = pi.taxable > 0 ? Math.round(((pi.cgst + pi.sgst + pi.igst) / pi.taxable) * 100) : 0;
+      const key = `${hsn}_${rate}`;
+      if (!hsnMap[key]) hsnMap[key] = { hsn, gstRate: rate, salesTaxable: 0, salesGst: 0, purchaseTaxable: 0, purchaseGst: 0 };
       hsnMap[key].purchaseTaxable += pi.taxable;
       hsnMap[key].purchaseGst += (pi.cgst + pi.sgst + pi.igst);
     });
     const hsnSummary = Object.values(hsnMap).sort((a, b) => a.hsn.localeCompare(b.hsn));
 
     return { gstr1, gstr2, gstr3b, hsnSummary };
-  }, [taxInvoices, purchaseInvoices, projects, clients, fyFilter, orgGstin]);
+  }, [taxInvoices, purchaseInvoices, projects, clients, fyFilter, orgGstin, manualJournalEntries]);
 
   // ── Excel Export ──
   const exportGstToExcel = (reportType) => exportGstToExcelImpl(reportType, { fyFilter, gstData, addToast });

@@ -32,7 +32,7 @@ const makeFixture = () => ({
           vendor_name: 'SoundWorks',
           status: 'Approved',
           date: '2025-06-01',
-          vendor_invoice: { invoice_no: 'VI-77', base_amount: 10000, gst_amount: 1800, total_amount: 11800, invoice_date: '2025-06-05' },
+          vendor_invoice: { invoice_no: 'VI-77', status: 'Accepted', base_amount: 10000, gst_amount: 1800, total_amount: 11800, invoice_date: '2025-06-05' },
         },
         {
           id: 'po2',

@@ -199,7 +199,7 @@ const getOutsourcingCost = (po, linkedPurchaseInvoice) => {
   }
 
   // Level 3b: Vendor Invoice embedded in PO (po.vendor_invoice)
-  if (po?.vendor_invoice && po.vendor_invoice.invoice_no) {
+  if (po?.vendor_invoice && po.vendor_invoice.invoice_no && (po.vendor_invoice.status === 'Accepted' || po.vendor_invoice.status === 'Verified')) {
     const taxable = round2(po.vendor_invoice.base_amount || 0);
     const gst = round2(po.vendor_invoice.gst_amount || 0);
     const total = round2(po.vendor_invoice.total_amount || (taxable + gst));
