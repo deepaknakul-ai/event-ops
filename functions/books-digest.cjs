@@ -1093,10 +1093,9 @@ const buildAccountingSnapshot = ({
   const trialDifference = round2(trialDebitTotal - trialCreditTotal);
   const isTrialBalanced = Math.abs(trialDifference) < 0.01;
 
+  const incomeRows = ledger.filter((row) => guessAccountType(row.account, coaByName) === 'Income');
   const incomeByLedger = round2(
-    ledger
-      .filter((row) => guessAccountType(row.account, coaByName) === 'Income')
-      .reduce((sum, row) => sum + Math.max(-row.balance, 0), 0)
+    incomeRows.reduce((sum, row) => sum + Math.max(-row.balance, 0), 0)
   );
   const expenseRows = ledger.filter((row) => guessAccountType(row.account, coaByName) === 'Expense');
   const cogsRows = expenseRows.filter((row) => /purchase|cogs|cost of goods/i.test(row.account));
@@ -1108,6 +1107,24 @@ const buildAccountingSnapshot = ({
 
   const grossProfit = round2(totalSalesTaxable - totalPurchaseTaxable);
   const netProfit = round2(grossProfit - totalOperatingExpenses);
+
+  // ── Abnormal-sign P&L accounts (diagnostic only) ────────────────────────────
+  // The Math.max clamps above DROP any P&L account sitting on the wrong side
+  // (an Income head with a Dr balance, an Expense head with a Cr balance) from the
+  // presented P&L; the residue is absorbed into balanceSheet.equity.otherEquity
+  // below, so the sheet still balances and the anomaly is invisible. Surface them
+  // instead of hiding them. Presentation is unchanged — this only reports.
+  const plExceptions = [
+    ...incomeRows.filter((row) => row.balance > 0.005).map((row) => ({
+      account: row.account, type: 'Income', balance: round2(row.balance),
+      side: 'Dr', excluded: round2(row.balance),
+    })),
+    ...expenseRows.filter((row) => row.balance < -0.005).map((row) => ({
+      account: row.account, type: 'Expense', balance: round2(row.balance),
+      side: 'Cr', excluded: round2(-row.balance),
+    })),
+  ];
+  const plExceptionsTotal = round2(plExceptions.reduce((s, r) => s + r.excluded, 0));
 
   // ── Balance sheet BY CONSTRUCTION (grey-area B2) ────────────────────────────
   // Every non-P&L ledger row is classified into exactly one named line; totals
@@ -1198,6 +1215,10 @@ const buildAccountingSnapshot = ({
     purchaseBook,
     journal,
     ledger,
+    // Diagnostic only: P&L rows clamped OUT of profitAndLoss by their abnormal sign.
+    // `total` is the amount thereby absorbed into balanceSheet.equity.otherEquity.
+    // Top-level (not nested in profitAndLoss) so existing consumers are untouched.
+    plExceptions: { rows: plExceptions, total: plExceptionsTotal },
     profitAndLoss: {
       revenue: totalSalesTaxable,
       costOfGoodsSold: totalPurchaseTaxable,

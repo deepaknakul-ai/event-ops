@@ -10,7 +10,7 @@ import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal, getFYFromDate, generateSecureToken, isProjectInvoiced, publicLink } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getProjectGST, getEffectivePOCost, toNum, getFYFromDate, generateSecureToken, isProjectInvoiced, publicLink } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
@@ -103,7 +103,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     // "Closed" status means project is fully done/invoiced per lifecycle (Closed = invoiced)
     const invoicedProjects = clientProjects.filter(p => isProjectInvoiced(p.invoice_status) || p.status === 'Closed');
     const totalBilled = invoicedProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0);
-    const totalReceived = clientPayments.reduce((s, p) => s + (p.amount || 0), 0);
+    const totalReceived = clientPayments.reduce((s, p) => s + toNum(p.amount), 0);
     const outstanding = totalBilled - totalReceived;
 
     // Overdue: invoiced project whose invoice_date > credit term days ago and not fully paid
@@ -115,7 +115,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       due.setDate(due.getDate() + termDays);
       return due < now;
     });
-    const overdueAmt = overdueProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0) - clientPayments.filter(p => overdueProjects.some(op => op.id === p.project_id)).reduce((s, p) => s + (p.amount || 0), 0);
+    const overdueAmt = overdueProjects.reduce((s, p) => s + getProjectGrandTotal(p), 0) - clientPayments.filter(p => overdueProjects.some(op => op.id === p.project_id)).reduce((s, p) => s + toNum(p.amount), 0);
 
     // Project pipeline
     const active = clientProjects.filter(p => ['Quoted', 'Confirmed', 'Ongoing'].includes(p.status));
@@ -123,12 +123,11 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     // "Not invoiced" = Completed status (not yet Closed) and not explicitly marked Invoiced
     const notInvoiced = completed.filter(p => p.status !== 'Closed' && !isProjectInvoiced(p.invoice_status));
 
-    // GST
-    const totalGST = invoicedProjects.reduce((s, p) => {
-      const grand = getProjectGrandTotal(p);
-      const net = grand / 1.18; // approx
-      return s + (grand - net);
-    }, 0);
+    // GST — exact and rate-wise. getProjectGST sums the STORED per-item gst_amount
+    // (falling back to amount × gst_rate) and routes package projects through
+    // getProjectGSTBreakdown, so 0% / 5% / 12% / 28% and mixed-rate packages are all
+    // correct. The old `grand − grand/1.18` hardcoded 18% for every project.
+    const totalGST = invoicedProjects.reduce((s, p) => s + getProjectGST(p), 0);
 
     // Lifetime revenue: only delivered (Completed + Closed) to avoid inflating with quotes
     const deliveredProjects = clientProjects.filter(p => ['Completed', 'Closed'].includes(p.status));
@@ -142,7 +141,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
     const catMap = {};
     clientProjects.forEach(p => (p.items || []).forEach(item => {
       const cat = item.category || 'Other';
-      catMap[cat] = (catMap[cat] || 0) + (item.total || 0);
+      catMap[cat] = (catMap[cat] || 0) + toNum(item.total);
     }));
     const topCategories = Object.entries(catMap).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
@@ -160,9 +159,12 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       }))
     ) : [];
 
-    // POs: all vendor_pos across all projects for this vendor
+    // POs: all purchase_orders across all projects for this vendor. The field is
+    // `purchase_orders` everywhere else in the app (App.jsx, Outsourcing.jsx,
+    // DocumentsHub.jsx, helpers.getProjectOutsourcing, accounting.js); the old
+    // `vendor_pos` matched nothing, so this register was permanently empty.
     const vendorPOs = isVendor ? projects.flatMap(p =>
-      (p.vendor_pos || []).filter(po => po.vendor_id === cid && (!isBranchView || (po.party_company_id || p.party_company_id || 'primary') === branchId)).map(po => ({
+      (p.purchase_orders || []).filter(po => po.vendor_id === cid && (!isBranchView || (po.party_company_id || p.party_company_id || 'primary') === branchId)).map(po => ({
         ...po,
         project_id: p.id,
         project_name: p.project_name,
@@ -193,7 +195,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       const branchPayments = payments.filter(p => p.client_id === cid && getPaymentCompanyId(p) === company.id);
       const branchInvoiced = branchProjects.filter(p => isProjectInvoiced(p.invoice_status) || p.status === 'Closed');
       const branchBilled = branchInvoiced.reduce((s, p) => s + getProjectGrandTotal(p), 0);
-      const branchReceived = branchPayments.reduce((s, p) => s + (p.amount || 0), 0);
+      const branchReceived = branchPayments.reduce((s, p) => s + toNum(p.amount), 0);
       const branchCompletedNotInvoiced = branchProjects.filter(p => ['Completed'].includes(p.status) && !isProjectInvoiced(p.invoice_status));
       return {
         ...company,
@@ -980,7 +982,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                       const linkedProject = projects.find(pr => pr.id === p.project_id);
                       return (p.party_company_id || linkedProject?.party_company_id || 'primary') === branchId;
                     })
-                    .reduce((s, p) => s + (p.amount || 0), 0);
+                    .reduce((s, p) => s + toNum(p.amount), 0);
                   const invoiced = cp.filter(p => isProjectInvoiced(p.invoice_status)).reduce((s, p) => s + getProjectGrandTotal(p), 0);
                   const outstanding = invoiced - clientPay;
                   return (
@@ -1501,7 +1503,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                   )}
                 </div>
                 <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-                  <div className="text-xs text-slate-400 font-semibold mb-2">GST BILLED (APPROX)</div>
+                  <div className="text-xs text-slate-400 font-semibold mb-2">GST BILLED</div>
                   <div className="text-xl font-bold text-slate-800">{formatCurrency(dashData.totalGST)}</div>
                   <div className="text-xs text-slate-400 mt-1">On invoiced projects only</div>
                 </div>
@@ -1536,7 +1538,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                         <tbody className="divide-y divide-slate-50">
                           {dashData.active.map(p => {
                             const grand = getProjectGrandTotal(p);
-                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + (py.amount || 0), 0);
+                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + toNum(py.amount), 0);
                             const projBalance = grand - projPaid;
                             const statusColor = { Quoted: 'bg-orange-100 text-orange-700', Confirmed: 'bg-green-100 text-green-700', Ongoing: 'bg-red-100 text-red-700', Completed: 'bg-blue-100 text-blue-700', Closed: 'bg-slate-200 text-slate-600' };
                             const itemCount = (p.items || []).length;
@@ -1589,7 +1591,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                         <tbody className="divide-y divide-slate-50">
                           {dashData.completed.map(p => {
                             const grand = getProjectGrandTotal(p);
-                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + (py.amount || 0), 0);
+                            const projPaid = dashData.clientPayments.filter(py => py.project_id === p.id).reduce((s, py) => s + toNum(py.amount), 0);
                             const projBalance = grand - projPaid;
                             const statusColor = { Quoted: 'bg-orange-100 text-orange-700', Confirmed: 'bg-green-100 text-green-700', Ongoing: 'bg-red-100 text-red-700', Completed: 'bg-blue-100 text-blue-700', Closed: 'bg-slate-200 text-slate-600' };
                             const venue = p.venue || p.location || '';
@@ -1782,8 +1784,13 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                           {dashData.vendorPOs.map((po, pi) => {
-                            const poVal = po.is_package ? (po.package_cost || 0) * (1 + (po.package_cost_gst ?? 18)/100)
-                              : ((po.equipment_cost||0)+(po.labour_cost||0)+(po.transport_cost||0)+(po.fnb_cost||0)+(po.travel_cost||0)+(po.accommodation_cost||0)+(po.misc_cost||0)) * (1 + (po.gst_rate||18)/100);
+                            // Single source of truth for a PO's value (vendor-invoice
+                            // actuals when Accepted/Verified, else the committed PO cost) —
+                            // the same basis the books and project P&L use. The previous
+                            // inline re-derivation re-applied a flat `|| 18` GST rate (a
+                            // 0%-rate trap) and read cost fields the PO form never writes;
+                            // it never ran only because this register was always empty.
+                            const poVal = getEffectivePOCost(po).total;
                             const stCol = { Draft: 'bg-slate-100 text-slate-600', Sent: 'bg-blue-100 text-blue-700', Approved: 'bg-green-100 text-green-700', Partial: 'bg-amber-100 text-amber-700', Paid: 'bg-green-100 text-green-800', Closed: 'bg-slate-200 text-slate-600', Cancelled: 'bg-red-100 text-red-600' };
                             return (
                               <tr key={pi} className="hover:bg-slate-50">

@@ -43,6 +43,17 @@ export const getProjectInvoiceReference = (project) => {
 // M-8 fix: round to paise to prevent float drift between line totals and grand total.
 export const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 
+// Money coercion for reduce/accumulator legs. Legacy + imported docs can carry a
+// STRING amount/total; `acc + '11800'` silently string-concatenates and corrupts
+// every downstream figure (grand total, margin, referral commission). Tolerant by
+// design: strips thousands separators / currency symbols, so a stored "1,500"
+// yields 1500 — plain Number() would give NaN→0 and parseFloat() would give 1.
+export const toNum = (v) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const n = Number(String(v ?? '').replace(/[,₹\s]/g, ''));
+  return Number.isFinite(n) ? n : 0;
+};
+
 export const getProjectGrandTotal = (project) => {
   if (!project) return 0;
 
@@ -54,7 +65,7 @@ export const getProjectGrandTotal = (project) => {
   }
 
   // Otherwise, calculate from items and logistics
-  const equipment = (project.items || []).reduce((acc, i) => acc + (i.total || 0), 0);
+  const equipment = (project.items || []).reduce((acc, i) => acc + toNum(i.total), 0);
   let logistics = 0;
   if (project.logistics_costs) {
     Object.values(project.logistics_costs).forEach(c => {
@@ -70,7 +81,7 @@ export const getProjectNetTotal = (project) => {
   if (project.package_cost && project.package_cost > 0) {
     return round2(project.package_cost);
   }
-  const equipment = (project.items || []).reduce((acc, i) => acc + (i.amount || 0), 0);
+  const equipment = (project.items || []).reduce((acc, i) => acc + toNum(i.amount), 0);
   let logistics = 0;
   if (project.logistics_costs) {
     Object.values(project.logistics_costs).forEach(c => {
@@ -1026,9 +1037,9 @@ export const projectDurationDays = (project) => {
  *  vendor allocations). exGst=true returns the taxable base (for GST-exclusive margin). */
 export const getProjectOutsourcing = (project, exGst = false) => {
   const activePOs = (project?.purchase_orders || []).filter((po) => po && po.status !== 'Cancelled');
-  const fromPOs = activePOs.reduce((acc, po) => { const c = getEffectivePOCost(po); return acc + ((exGst ? c.base : c.total) || 0); }, 0);
+  const fromPOs = activePOs.reduce((acc, po) => { const c = getEffectivePOCost(po); return acc + toNum(exGst ? c.base : c.total); }, 0);
   const unlinked = (project?.vendor_allocations || []).filter((a) => a && !a.po_id);
-  const fromAllocs = unlinked.reduce((acc, v) => acc + (Number(exGst ? v.amount : v.tax_amount) || 0), 0);
+  const fromAllocs = unlinked.reduce((acc, v) => acc + toNum(exGst ? v.amount : v.tax_amount), 0);
   return round2(fromPOs + fromAllocs);
 };
 
@@ -1046,10 +1057,10 @@ export const getProjectDirectCosts = (project, expenses = [], exGst = false) => 
       logistics += exGst ? s.amount : s.total; // exGst → taxable base (GST-exclusive margin)
     });
   }
-  const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + (Number(e?.amount) || 0), 0);
+  const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + toNum(e?.amount), 0);
   const arraySum = (expenses || [])
     .filter((e) => e.project_id === project?.id && e.status !== 'Rejected' && e.status !== 'Disapproved')
-    .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+    .reduce((s, e) => s + toNum(e.amount), 0);
   // When the caller cannot see the project's expense rows (a Coordinator's expenses
   // are self-scoped by security rules), the live array sums to ~0 and would inflate
   // net profit / commission. Fall back to direct_expense_total, denormalised on the
@@ -1073,7 +1084,7 @@ export const getProjectNetProfit = (project, expenses = []) => {
 
 /** Sum of recorded payments for a project (cash received to date). */
 export const getProjectPaidToDate = (projectId, payments = []) =>
-  round2((payments || []).filter((p) => p.project_id === projectId).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0));
+  round2((payments || []).filter((p) => p.project_id === projectId).reduce((s, p) => s + toNum(p.amount), 0));
 
 /** Realized referral commission for a project: rate% × net profit × fraction paid. */
 export const getProjectCommission = (project, expenses = [], payments = [], ratePct = 10) => {
