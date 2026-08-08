@@ -11,7 +11,7 @@ import { Modal } from '../components/Shared';
 import { useNavigate } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { doc, getDoc, updateDoc, arrayRemove, arrayUnion } from 'firebase/firestore';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const DOC_TYPES = [
@@ -260,11 +260,15 @@ const DocumentsHub = ({ projects = [], clients = [], role, currentEmpId = null, 
       const projSnap  = await getDoc(projRef);
       if (!projSnap.exists()) return;
       const pData     = projSnap.data();
-      const oldPO     = (pData.purchase_orders || []).find(p => p.id === docEntry.id);
-      if (!oldPO) return;
-      const updatedPO = { ...oldPO, status: newStatus };
-      await updateDoc(projRef, { purchase_orders: arrayRemove(oldPO) });
-      await updateDoc(projRef, { purchase_orders: arrayUnion(updatedPO) });
+      // purchase_orders is stripped OFF the base doc (mirrored to project_financials
+      // by onProjectWritten), so getDoc sees it undefined — fall back to the merged
+      // in-memory project. The old arrayRemove/arrayUnion pair could not match the
+      // stripped base and risked wiping the sibling's list; write the full array.
+      const mergedProj = projects.find(p => String(p.id) === String(docEntry.projectId));
+      const basePOs    = pData.purchase_orders ?? mergedProj?.purchase_orders ?? [];
+      if (!basePOs.find(p => p.id === docEntry.id)) return;
+      const updatedPOs = basePOs.map(p => p.id === docEntry.id ? { ...p, status: newStatus } : p);
+      await updateDoc(projRef, { purchase_orders: updatedPOs });
       logAction('projects', 'update_po_status', docEntry.projectId, { po_no: docEntry.ref, status: newStatus }, docEntry.projectName);
       // reflect in detailDoc
       if (detailDoc?.id === docEntry.id) setDetailDoc(d => ({ ...d, status: newStatus }));

@@ -2468,10 +2468,26 @@ const itemsHaveMoney = (data) => Array.isArray(data.items)
 // PARTIAL money write (e.g. package_cost only) the base items may already be stripped,
 // and mirroring them would overwrite the sibling's full items with a stripped copy.
 // Scalars use merge-if-present, so already-stripped (undefined) scalars are left as-is.
-function buildProjectFin(data) {
+// prevFin (the sibling's current data) enables per-item money backfill: a client that
+// appends ONE new money-carrying item onto the scrubbed base array (arrayUnion) sends
+// its OLDER elements stripped — mirroring that verbatim would zero their rates in the
+// sibling forever. Items without money get their money restored from the sibling by id.
+function buildProjectFin(data, prevFin = null) {
   const fin = { client_owner_id: data.client_owner_id || '', created_by: data.created_by || '' };
   for (const k of PROJECT_FINANCIAL_FIELDS) { if (data[k] !== undefined) fin[k] = data[k]; }
-  if (itemsHaveMoney(data)) fin.items = data.items;
+  if (itemsHaveMoney(data)) {
+    const prevItems = (prevFin && Array.isArray(prevFin.items)) ? prevFin.items : [];
+    const prevById = new Map(prevItems.filter((it) => it && it.id !== undefined).map((it) => [it.id, it]));
+    fin.items = data.items.map((it) => {
+      if (!it || typeof it !== 'object') return it;
+      if (ITEM_MONEY_FIELDS.some((f) => it[f] !== undefined)) return it; // fresh money wins
+      const prev = prevById.get(it.id);
+      if (!prev) return it;
+      const restored = { ...it };
+      for (const f of ITEM_MONEY_FIELDS) { if (prev[f] !== undefined) restored[f] = prev[f]; }
+      return restored;
+    });
+  }
   return fin;
 }
 
@@ -2511,8 +2527,10 @@ exports.onProjectWritten = onDocumentWritten(
     // Only act when the base doc actually carries money. The trigger's OWN strip write
     // re-fires this; by then money is gone (guard false) → skip. No loop, no sibling wipe.
     if (!projectHasEmbeddedMoney(after)) return;
-    // 1) Mirror the FULL money (incl items with money) → gated sibling.
-    const finAfter = buildProjectFin(after);
+    // 1) Mirror the FULL money (incl items with money) → gated sibling. Read the
+    // sibling first so stripped items can inherit their existing mirrored money.
+    const prevSnap = await finRef.get().catch(() => null);
+    const finAfter = buildProjectFin(after, prevSnap && prevSnap.exists ? prevSnap.data() : null);
     finAfter.updated_at = new Date().toISOString();
     await finRef.set(finAfter, { merge: true });
     // 2) Strip the money from the base doc (the leak closure); new edits self-heal here.
