@@ -715,7 +715,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       invoice_no: proj.invoice_no || '', 
       invoice_date: proj.invoice_date || '',
       items: proj.items || [], assigned_employees: proj.assigned_employees || [], logistics_costs: proj.logistics_costs || {},
-      package_cost: proj.package_cost || 0, package_cost_gst: proj.package_cost_gst || 18,
+      package_cost: proj.package_cost || 0, package_cost_gst: proj.package_cost_gst ?? 18,
       party_company_id: proj.party_company_id || 'primary',
       party_company_name: proj.party_company_name || (clients.find(c => c.id === proj.client_id)?.name || ''),
       party_company_gstin: proj.party_company_gstin || (clients.find(c => c.id === proj.client_id)?.gstin || ''),
@@ -1026,7 +1026,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
       venue: project.venue, status: 'Quoted', 
       invoice_status: 'Not Invoiced', invoice_no: '', invoice_date: '',
       items: itemsCopy, assigned_employees: [], logistics_costs: project.logistics_costs || {},
-      package_cost: project.package_cost || 0, package_cost_gst: project.package_cost_gst || 18
+      package_cost: project.package_cost || 0, package_cost_gst: project.package_cost_gst ?? 18
     });
     setEditingId(null);
     setIsCreateOpen(true);
@@ -1529,7 +1529,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
         items_snapshot: selectedProject.items || [],
         logistics_snapshot: selectedProject.logistics_costs || {},
         package_cost: selectedProject.package_cost || 0,
-        package_cost_gst: selectedProject.package_cost_gst || 18,
+        package_cost_gst: selectedProject.package_cost_gst ?? 18,
       };
 
       // Full-array write (not arrayUnion): proforma_invoices is stripped OFF the base
@@ -4026,7 +4026,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               </div>
               <div>
                 <label className="text-sm font-bold text-slate-800">GST %</label>
-                <input type="number" min="0" max="100" step="0.01" className="w-full rounded border p-2 text-slate-800" value={newProj.package_cost_gst || 18} onChange={e => setNewProj({...newProj, package_cost_gst: parseFloat(e.target.value) || 18})} placeholder="18" />
+                <input type="number" min="0" max="100" step="0.01" className="w-full rounded border p-2 text-slate-800" value={newProj.package_cost_gst ?? 18} onChange={e => setNewProj({...newProj, package_cost_gst: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 18})} placeholder="18" />
               </div>
             </div>
             {newProj.package_cost > 0 && (
@@ -4168,7 +4168,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               const p = projects.find(x => x.id === id);
               if (!p) continue;
               if (p.package_cost && p.package_cost > 0) {
-                const gstRate = p.package_cost_gst || 18;
+                const gstRate = p.package_cost_gst ?? 18;
                 const base = p.package_cost;
                 taxable += base;
                 gstAmt += base * gstRate / 100;

@@ -145,7 +145,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
       weight: parseFloat(formData.weight) || 0,
       power_watts: parseFloat(formData.power_watts) || 0,
       current_amps: parseFloat(formData.current_amps) || 0,
-      gst_rate: parseFloat(formData.gst_rate) || 18,
+      gst_rate: Number.isFinite(parseFloat(formData.gst_rate)) ? parseFloat(formData.gst_rate) : 18, // 0% exempt must persist as 0, not fall back to 18
       reorder_level: parseInt(formData.reorder_level) || 0,
       is_composite: formData.is_composite || false,
       composition: formData.composition || [],

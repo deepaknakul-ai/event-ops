@@ -156,9 +156,9 @@ const QuoteApproval = () => {
                   <div className="text-2xl font-bold text-slate-800">{formatCurrency(project.package_cost)}</div>
                 </div>
                 <div>
-                  <div className="text-slate-500 text-xs uppercase font-semibold mb-1">GST @ {project.package_cost_gst || 18}%</div>
+                  <div className="text-slate-500 text-xs uppercase font-semibold mb-1">GST @ {project.package_cost_gst ?? 18}%</div>
                   <div className="text-2xl font-bold text-slate-500">
-                    {formatCurrency(project.package_cost * ((project.package_cost_gst || 18) / 100))}
+                    {formatCurrency(project.package_cost * ((project.package_cost_gst ?? 18) / 100))}
                   </div>
                 </div>
               </div>

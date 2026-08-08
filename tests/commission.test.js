@@ -3,8 +3,12 @@ import {
   getProjectDirectCosts, getProjectNetProfit, getProjectPaidToDate, getProjectCommission,
 } from '../src/utils/helpers.js';
 
-// Revenue 118000 (100000 + 18% GST); direct 18800 (11800 logistics + 2000 reimbursable
-// + 5000 approved expense, 999 rejected excluded); outsourcing 11800 → net profit 87400.
+// getProjectDirectCosts (default, GST-INCLUSIVE) = 18800 (11800 logistics + 2000
+// reimbursable + 5000 approved expense; 999 rejected excluded).
+// Commission net profit is GST-EXCLUSIVE (GST is not profit): revenue-ex 100000 −
+// direct-ex 17000 (10000 logistics base + 2000 + 5000) − outsourcing-ex 10000 (PO
+// subtotal) = 73000. (Was 87400 when GST-inclusive; the 14400 delta = output GST
+// 18000 − input GST 3600 is government money, not margin.)
 const project = {
   id: 'p1',
   package_cost: 100000, package_cost_gst: 18,
@@ -26,8 +30,8 @@ describe('getProjectDirectCosts', () => {
 });
 
 describe('getProjectNetProfit', () => {
-  it('is revenue − direct − outsourcing (no manpower)', () => {
-    expect(getProjectNetProfit(project, expenses)).toBe(87400);
+  it('is GST-exclusive revenue − direct − outsourcing (no manpower, no net GST)', () => {
+    expect(getProjectNetProfit(project, expenses)).toBe(73000);
   });
   it('is 0 for a null project', () => {
     expect(getProjectNetProfit(null, expenses)).toBe(0);
@@ -44,19 +48,19 @@ describe('getProjectPaidToDate', () => {
 describe('getProjectCommission', () => {
   it('accrues rate% × net profit × fraction paid (half paid)', () => {
     const r = getProjectCommission(project, expenses, [{ project_id: 'p1', amount: 59000 }], 10);
-    expect(r.netProfit).toBe(87400);
+    expect(r.netProfit).toBe(73000);
     expect(r.paidFraction).toBe(0.5);
-    expect(r.commission).toBe(4370); // 87400 * 10% * 0.5
+    expect(r.commission).toBe(3650); // 73000 * 10% * 0.5
   });
   it('reaches full commission when fully paid', () => {
     const r = getProjectCommission(project, expenses, [{ project_id: 'p1', amount: 118000 }], 10);
     expect(r.paidFraction).toBe(1);
-    expect(r.commission).toBe(8740); // 87400 * 10%
+    expect(r.commission).toBe(7300); // 73000 * 10%
   });
   it('caps the paid fraction at 1 on overpayment', () => {
     const r = getProjectCommission(project, expenses, [{ project_id: 'p1', amount: 200000 }], 10);
     expect(r.paidFraction).toBe(1);
-    expect(r.commission).toBe(8740);
+    expect(r.commission).toBe(7300);
   });
   it('is 0 when nothing is paid', () => {
     const r = getProjectCommission(project, expenses, [], 10);

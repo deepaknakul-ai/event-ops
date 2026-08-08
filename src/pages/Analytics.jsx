@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, BarChart,
 } from 'recharts';
 import { LineChart as LineIcon, TrendingUp, Percent, IndianRupee } from 'lucide-react';
-import { formatCurrency, getProjectGrandTotal, getEffectivePOCost } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getEffectivePOCost, sumLogisticsRecord } from '../utils/helpers';
 import { can } from '../utils/permissions';
 
 const isExcluded = (s) => s === 'Rejected' || s === 'Disapproved';
@@ -20,7 +20,7 @@ const compact = (n) => {
 const Analytics = ({ projects = [], clients = [], expenses = [], payments = [], role = 'manager' }) => {
   const projectCost = (p) => {
     let logistics = 0;
-    if (p.logistics_costs) Object.values(p.logistics_costs).forEach((c) => { logistics += (c.amount || 0) * (1 + (c.gst || 0) / 100); });
+    if (p.logistics_costs) Object.values(p.logistics_costs).forEach((c) => { logistics += sumLogisticsRecord(c).total; });
     const reimb = (p.reimbursable_expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
     const exp = expenses.filter((e) => e.project_id === p.id && !isExcluded(e.status)).reduce((s, e) => s + parseFloat(e.amount || 0), 0);
     const outPO = (p.purchase_orders || []).filter((po) => po.status !== 'Cancelled').reduce((a, po) => a + getEffectivePOCost(po).total, 0);

@@ -5,7 +5,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
   formatCurrencyPDF, getProjectGrandTotal, getEffectivePOCost, fmtDate,
-  getLogHours, getHourlyRateForDate, isProjectInvoiced,
+  getLogHours, getHourlyRateForDate, isProjectInvoiced, sumLogisticsRecord,
 } from "../helpers";
 
 const isExcludedExpense = (s) => s === 'Rejected' || s === 'Disapproved';
@@ -54,7 +54,7 @@ export const generateClientManagementReportPDF = async (ctx) => {
     // ── Per-project cost (mirrors Business Report) ──
     const projectCost = (p) => {
       let logistics = 0;
-      if (p.logistics_costs) Object.values(p.logistics_costs).forEach(c => { logistics += (c.amount || 0) * (1 + (c.gst || 0) / 100); });
+      if (p.logistics_costs) Object.values(p.logistics_costs).forEach(c => { logistics += sumLogisticsRecord(c).total; });
       const reimb = (p.reimbursable_expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
       const exp = expenses.filter(e => e.project_id === p.id && !isExcludedExpense(e.status)).reduce((s, e) => s + parseFloat(e.amount || 0), 0);
       const activePOs = (p.purchase_orders || []).filter(po => po.status !== 'Cancelled');

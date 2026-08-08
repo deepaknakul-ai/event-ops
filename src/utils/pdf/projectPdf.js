@@ -267,7 +267,7 @@ export const generateQuotationPDF = async (ctx) => {
         data.push({}); // Spacer
         data.push({ 'Item Description': 'Package Cost (excl. GST)', 'Amount': totals.package_cost });
         data.push({
-            'Item Description': `GST (${selectedProject.package_cost_gst || 18}%)`, 'Amount': totals.total_revenue - totals.package_cost
+            'Item Description': `GST (${selectedProject.package_cost_gst ?? 18}%)`, 'Amount': totals.total_revenue - totals.package_cost
         });
     } else {
         (selectedProject.items || []).forEach((item, idx) => {
@@ -792,7 +792,7 @@ export const generateQuotationPDF = async (ctx) => {
         snapshotItems.forEach((item, idx) => {
           tableBody.push([idx + 1, item.item_name + (item.description ? `\n(${item.description})` : ''), item.qty, item.days, '—', '—', 'Included']);
         });
-        const pkgGst = (piData.package_cost * (piData.package_cost_gst || 18)) / 100;
+        const pkgGst = (piData.package_cost * (piData.package_cost_gst ?? 18)) / 100;
         grandTotal = piData.package_cost + pkgGst;
       } else {
         snapshotItems.forEach((item, idx) => {
@@ -824,10 +824,10 @@ export const generateQuotationPDF = async (ctx) => {
       // Totals summary
       let summaryBody;
       if (usePkgCost) {
-        const pkgGst = (piData.package_cost * (piData.package_cost_gst || 18)) / 100;
+        const pkgGst = (piData.package_cost * (piData.package_cost_gst ?? 18)) / 100;
         summaryBody = [
           ['Package Cost (excl. GST)', formatCurrencyPDF(piData.package_cost)],
-          [`GST (${piData.package_cost_gst || 18}%)`, formatCurrencyPDF(pkgGst)],
+          [`GST (${piData.package_cost_gst ?? 18}%)`, formatCurrencyPDF(pkgGst)],
           ['Grand Total', formatCurrencyPDF(grandTotal)]
         ];
       } else {

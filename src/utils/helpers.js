@@ -48,7 +48,7 @@ export const getProjectGrandTotal = (project) => {
 
   // If package cost is specified, it supersedes all other costs
   if (project.package_cost && project.package_cost > 0) {
-    const gstRate = project.package_cost_gst || 18;
+    const gstRate = project.package_cost_gst ?? 18;
     return round2(project.package_cost * (1 + gstRate / 100));
   }
 
@@ -85,7 +85,7 @@ export const getProjectGST = (project) => {
   if (!project) return 0;
 
   if (project.package_cost && project.package_cost > 0) {
-    const gstRate = project.package_cost_gst || 18;
+    const gstRate = project.package_cost_gst ?? 18;
     return round2(project.package_cost * (gstRate / 100));
   }
 
@@ -461,7 +461,7 @@ export const getProjectGSTBreakdown = (project, orgGSTIN, clientGSTIN) => {
     }
     const rateEntries = mixBase > 0
       ? Object.entries(buckets).map(([r, b]) => ({ rate: parseFloat(r), base: b })).sort((a, b) => b.rate - a.rate)
-      : [{ rate: parseFloat(project.package_cost_gst || 18), base: pkg }];
+      : [{ rate: parseFloat(project.package_cost_gst ?? 18), base: pkg }];
     const totalBase = rateEntries.reduce((s, e) => s + e.base, 0) || 1;
     const multiRate = rateEntries.length > 1;
     let allocated = 0;
@@ -1021,26 +1021,28 @@ export const projectDurationDays = (project) => {
   return Math.max(1, Math.floor((new Date(endKey) - new Date(startKey)) / 86400000) + 1);
 };
 
-/** Total outsourcing cost for a project (active POs by effective cost + unlinked vendor allocations). */
-export const getProjectOutsourcing = (project) => {
+/** Total outsourcing cost for a project (active POs by effective cost + unlinked
+ *  vendor allocations). exGst=true returns the taxable base (for GST-exclusive margin). */
+export const getProjectOutsourcing = (project, exGst = false) => {
   const activePOs = (project?.purchase_orders || []).filter((po) => po && po.status !== 'Cancelled');
-  const fromPOs = activePOs.reduce((acc, po) => acc + (getEffectivePOCost(po).total || 0), 0);
+  const fromPOs = activePOs.reduce((acc, po) => { const c = getEffectivePOCost(po); return acc + ((exGst ? c.base : c.total) || 0); }, 0);
   const unlinked = (project?.vendor_allocations || []).filter((a) => a && !a.po_id);
-  const fromAllocs = unlinked.reduce((acc, v) => acc + (Number(v.tax_amount) || 0), 0);
+  const fromAllocs = unlinked.reduce((acc, v) => acc + (Number(exGst ? v.amount : v.tax_amount) || 0), 0);
   return round2(fromPOs + fromAllocs);
 };
 
 // ── Project net profit (for referral commission) ────────────────────────────
 // Direct costs = logistics (incl GST) + reimbursable expenses + dated project
 // expenses (excluding rejected/disapproved). Mirrors BusinessReport.jsx exactly.
-export const getProjectDirectCosts = (project, expenses = []) => {
+export const getProjectDirectCosts = (project, expenses = [], exGst = false) => {
   let logistics = 0;
   if (project?.logistics_costs) {
     Object.values(project.logistics_costs).forEach((c) => {
       // Split-line aware (like every other logistics helper): the legacy top-level
       // amount/gst is undefined for split-line records, so this previously
       // under-counted logistics cost → overstated net profit & referral commission.
-      logistics += sumLogisticsRecord(c).total;
+      const s = sumLogisticsRecord(c);
+      logistics += exGst ? s.amount : s.total; // exGst → taxable base (GST-exclusive margin)
     });
   }
   const reimbursable = (project?.reimbursable_expenses || []).reduce((s, e) => s + (Number(e?.amount) || 0), 0);
@@ -1062,7 +1064,10 @@ export const getProjectDirectCosts = (project, expenses = []) => {
  *  basis for the referral commission. */
 export const getProjectNetProfit = (project, expenses = []) => {
   if (!project) return 0;
-  return round2(getProjectGrandTotal(project) - getProjectDirectCosts(project, expenses) - getProjectOutsourcing(project));
+  // GST-EXCLUSIVE margin: output − input GST is government money, not profit. Revenue
+  // and costs are compared on their taxable base so the referral commission is not
+  // inflated by the net GST. (Previously used GST-inclusive figures on both sides.)
+  return round2(getProjectNetTotal(project) - getProjectDirectCosts(project, expenses, true) - getProjectOutsourcing(project, true));
 };
 
 /** Sum of recorded payments for a project (cash received to date). */
@@ -1076,7 +1081,7 @@ export const getProjectCommission = (project, expenses = [], payments = [], rate
   const grand = getProjectGrandTotal(project);
   const paid = getProjectPaidToDate(project.id, payments);
   const paidFraction = grand > 0 ? Math.min(1, paid / grand) : 0;
-  const commission = round2(netProfit * (Number(ratePct) || 0) / 100 * paidFraction);
+  const commission = round2(Math.max(0, netProfit) * (Number(ratePct) || 0) / 100 * paidFraction); // no negative commission on a loss-making project
   return { netProfit, paid, grand, paidFraction, commission };
 };
 

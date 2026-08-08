@@ -1637,7 +1637,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       let finalGstRate = poForm.gst_rate || 0;
       if (poForm.package_cost && poForm.package_cost > 0) {
         subtotal = poForm.package_cost;
-        finalGstRate = poForm.package_cost_gst || 18;
+        finalGstRate = poForm.package_cost_gst ?? 18;
       } else {
         subtotal = (poForm.equipment_cost || 0) + (poForm.labour_cost || 0) + (poForm.transport_cost || 0) + (poForm.fnb_cost || 0) + (poForm.travel_cost || 0) + (poForm.accommodation_cost || 0) + (poForm.misc_cost || 0);
       }
@@ -1670,7 +1670,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           gst_rate_applied: finalGstRate,
           is_package: poForm.is_package,
           package_cost: poForm.package_cost || 0,
-          package_cost_gst: poForm.package_cost_gst || 18,
+          package_cost_gst: poForm.package_cost_gst ?? 18,
           gst_amount: gstAmount,
           created_at: new Date().toISOString(),
           items: poItems, // Use edited items
@@ -1692,7 +1692,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                       if (newPO.package_cost && newPO.package_cost > 0) {
                           // If PO has package cost, sync it to allocation
                           updatedAlloc.package_cost = newPO.package_cost;
-                          updatedAlloc.package_cost_gst = newPO.package_cost_gst || 18;
+                          updatedAlloc.package_cost_gst = newPO.package_cost_gst ?? 18;
                           updatedAlloc.gst_rate_applied = newPO.gst_rate_applied;
                           updatedAlloc.amount = newPO.amount; // Store the calculated total
                       }
@@ -1728,7 +1728,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
       let finalGstRate = poForm.gst_rate || 0;
       if (poForm.package_cost && poForm.package_cost > 0) {
         subtotal = poForm.package_cost;
-        finalGstRate = poForm.package_cost_gst || 18;
+        finalGstRate = poForm.package_cost_gst ?? 18;
       } else {
         subtotal = (poForm.equipment_cost || 0) + (poForm.labour_cost || 0) + (poForm.transport_cost || 0) + (poForm.fnb_cost || 0) + (poForm.travel_cost || 0) + (poForm.accommodation_cost || 0) + (poForm.misc_cost || 0);
       }
@@ -1757,7 +1757,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           gst_rate_applied: finalGstRate,
           is_package: poForm.is_package,
           package_cost: poForm.package_cost || 0,
-          package_cost_gst: poForm.package_cost_gst || 18,
+          package_cost_gst: poForm.package_cost_gst ?? 18,
           gst_amount: gstAmount,
           items: poItems, // Updated items
           attachments: poForm.attachments
@@ -1784,7 +1784,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                       if (updatedPO.package_cost && updatedPO.package_cost > 0) {
                           // If PO has package cost, sync it to allocation
                           updatedAlloc.package_cost = updatedPO.package_cost;
-                          updatedAlloc.package_cost_gst = updatedPO.package_cost_gst || 18;
+                          updatedAlloc.package_cost_gst = updatedPO.package_cost_gst ?? 18;
                           updatedAlloc.gst_rate_applied = updatedPO.gst_rate_applied;
                           updatedAlloc.amount = updatedPO.amount; // Store the calculated total
                       } else {
@@ -2695,7 +2695,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               <div className="flex items-center gap-2 mb-4 p-3 bg-slate-50 rounded border border-slate-200">
                   <input type="checkbox" id="isPackageCost" checked={poForm.package_cost > 0} onChange={e => {
                     if (e.target.checked) {
-                      setPoForm({...poForm, package_cost: 1000, package_cost_gst: parseFloat(poForm.gst_rate) || 18});
+                      setPoForm({...poForm, package_cost: 1000, package_cost_gst: Number.isFinite(parseFloat(poForm.gst_rate)) ? parseFloat(poForm.gst_rate) : 18});
                     } else {
                       setPoForm({...poForm, package_cost: 0, package_cost_gst: 18});
                     }
@@ -2711,14 +2711,14 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                   </div>
                   <div>
                     <label className="text-xs font-bold text-slate-700">GST Rate (%)</label>
-                    <select className="w-full rounded border border-slate-300 p-2 text-slate-800" value={poForm.package_cost_gst || 18} onChange={e => setPoForm({...poForm, package_cost_gst: parseFloat(e.target.value) || 18})}>
+                    <select className="w-full rounded border border-slate-300 p-2 text-slate-800" value={poForm.package_cost_gst ?? 18} onChange={e => setPoForm({...poForm, package_cost_gst: Number.isFinite(parseFloat(e.target.value)) ? parseFloat(e.target.value) : 18})}>
                         <option value="0">0%</option><option value="5">5%</option><option value="12">12%</option><option value="18">18%</option><option value="28">28%</option>
                     </select>
                   </div>
                   <div className="bg-indigo-50 p-3 rounded-lg text-right border border-indigo-200">
                     <div className="text-xs text-slate-600 font-semibold">Package Total</div>
-                    <div className="text-lg font-bold text-indigo-700">{formatCurrency(poForm.package_cost * (1 + (poForm.package_cost_gst || 18) / 100))}</div>
-                    <div className="text-xs text-slate-500">GST: {formatCurrency(poForm.package_cost * ((poForm.package_cost_gst || 18) / 100))}</div>
+                    <div className="text-lg font-bold text-indigo-700">{formatCurrency(poForm.package_cost * (1 + (poForm.package_cost_gst ?? 18) / 100))}</div>
+                    <div className="text-xs text-slate-500">GST: {formatCurrency(poForm.package_cost * ((poForm.package_cost_gst ?? 18) / 100))}</div>
                   </div>
                 </div>
               ) : (

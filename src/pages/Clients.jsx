@@ -1782,7 +1782,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                           {dashData.vendorPOs.map((po, pi) => {
-                            const poVal = po.is_package ? (po.package_cost || 0) * (1 + (po.package_cost_gst || 18)/100)
+                            const poVal = po.is_package ? (po.package_cost || 0) * (1 + (po.package_cost_gst ?? 18)/100)
                               : ((po.equipment_cost||0)+(po.labour_cost||0)+(po.transport_cost||0)+(po.fnb_cost||0)+(po.travel_cost||0)+(po.accommodation_cost||0)+(po.misc_cost||0)) * (1 + (po.gst_rate||18)/100);
                             const stCol = { Draft: 'bg-slate-100 text-slate-600', Sent: 'bg-blue-100 text-blue-700', Approved: 'bg-green-100 text-green-700', Partial: 'bg-amber-100 text-amber-700', Paid: 'bg-green-100 text-green-800', Closed: 'bg-slate-200 text-slate-600', Cancelled: 'bg-red-100 text-red-600' };
                             return (

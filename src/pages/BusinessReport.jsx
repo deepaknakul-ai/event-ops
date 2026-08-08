@@ -7,7 +7,7 @@ import {
   Users, Receipt, BarChart3, Building2
 } from 'lucide-react';
 import {
-  formatCurrency, formatCurrencyPDF, getProjectGrandTotal, getEffectivePOCost, fmtDate
+  formatCurrency, formatCurrencyPDF, getProjectGrandTotal, getEffectivePOCost, fmtDate, sumLogisticsRecord
 } from '../utils/helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ const BusinessReport = ({
         let logisticsCosts = 0;
         if (p.logistics_costs) {
           Object.values(p.logistics_costs).forEach(c => {
-            logisticsCosts += (c.amount || 0) * (1 + (c.gst || 0) / 100);
+            logisticsCosts += sumLogisticsRecord(c).total;
           });
         }
         const reimbursable   = (p.reimbursable_expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
@@ -291,7 +291,7 @@ const BusinessReport = ({
       Object.entries(full.logistics_costs).forEach(([type, c]) => {
         if (!c.amount) return;
         const cat   = logisticsLabels[type] || type;
-        const total = (c.amount || 0) * (1 + (c.gst || 0) / 100);
+        const total = sumLogisticsRecord(c).total;
         catMap[cat] = (catMap[cat] || 0) + total;
       });
     });

@@ -52,6 +52,14 @@ describe('getProjectGSTBreakdown — 0% lines must not be coerced to 18% (regres
     expect(round2(bd.totals.total)).toBe(233721.60);   // subtotal + correct IGST reconciles
   });
 
+  it('a 0% pure PACKAGE (no item mix) is not taxed at 18%', () => {
+    const p = { package_cost: 100000, package_cost_gst: 0 }; // exempt lump-sum, no items to learn a rate from
+    const bd = getProjectGSTBreakdown(p, ORG_DELHI, CLIENT_MH);
+    expect(round2(bd.totals.taxable)).toBe(100000);
+    expect(round2(bd.totals.igstAmt)).toBe(0);     // NOT 18000
+    expect(round2(bd.totals.total)).toBe(100000);
+  });
+
   it('does not tax a 0% equipment item, and honours an explicit stored gst_amount of 0', () => {
     const p = {
       items: [

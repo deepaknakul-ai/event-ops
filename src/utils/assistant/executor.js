@@ -6,7 +6,7 @@
 // `pendingAction` descriptors the UI executes after user confirmation and
 // RBAC checks.
 
-import { getProjectGrandTotal, getEffectivePOCost, isProjectInvoiced } from '../helpers';
+import { getProjectGrandTotal, getEffectivePOCost, isProjectInvoiced, sumLogisticsRecord } from '../helpers';
 
 // Fallback to stored totals when items/logistics are not present in memory
 // (e.g. legacy or import-sourced projects). getProjectGrandTotal does the
@@ -207,7 +207,7 @@ function projectMarginRows(ctx) {
     .map((p) => {
       const revenue = projectTotal(p);
       let cost = 0;
-      if (p.logistics_costs) Object.values(p.logistics_costs).forEach((c) => { cost += (c.amount || 0) * (1 + (c.gst || 0) / 100); });
+      if (p.logistics_costs) Object.values(p.logistics_costs).forEach((c) => { cost += sumLogisticsRecord(c).total; });
       cost += (p.reimbursable_expenses || []).reduce((s, e) => s + (e.amount || 0), 0);
       cost += exp.filter((e) => e.project_id === p.id && e.status !== 'Rejected' && e.status !== 'Disapproved').reduce((s, e) => s + parseFloat(e.amount || 0), 0);
       cost += (p.purchase_orders || []).filter((po) => po.status !== 'Cancelled').reduce((a, po) => a + getEffectivePOCost(po).total, 0);

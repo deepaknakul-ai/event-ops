@@ -8,7 +8,7 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2, isProjectInvoiced } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2, isProjectInvoiced, sumLogisticsRecord } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { purchaseGstSplit } from '../utils/aiAccountant';
@@ -856,7 +856,7 @@ const Reports = ({
 
         if (hasPackageCost) {
             // Use package cost as the sole revenue
-            const gstRate = selectedProject.package_cost_gst || 18;
+            const gstRate = selectedProject.package_cost_gst ?? 18;
             const gstAmount = (selectedProject.package_cost * gstRate) / 100;
             totalRevenue = selectedProject.package_cost + gstAmount;
             revenueItems = [
@@ -869,8 +869,7 @@ const Reports = ({
             let logisticsRevenue = 0;
             if (selectedProject.logistics_costs) {
                 Object.values(selectedProject.logistics_costs).forEach(c => {
-                   const base = c.amount || 0;
-                   logisticsRevenue += base * (1 + (c.gst || 0)/100);
+                   logisticsRevenue += sumLogisticsRecord(c).total; // split-line aware (amount + GST)
                 });
             }
             totalRevenue = equipmentRevenue + logisticsRevenue;

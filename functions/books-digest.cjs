@@ -212,7 +212,7 @@ const getOutsourcingCost = (po, linkedPurchaseInvoice) => {
   if (po.package_cost && parseFloat(po.package_cost) > 0) {
     const base = round2(parseFloat(po.package_cost));
     const gstRate = parseFloat(po.package_cost_gst || 0);
-    const gst = round2(parseFloat(po.gst_amount) || (base * (gstRate / 100)));
+    const gst = round2(po.gst_amount != null ? parseFloat(po.gst_amount) : base * (gstRate / 100));
     return { taxable: base, gst, total: round2(base + gst), source: 'po_package' };
   }
 
