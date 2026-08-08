@@ -22,7 +22,7 @@ import { CATEGORIES, EXPENSE_CATS, LOGISTICS_TYPES, STATUS_COLORS, GST_STATE_COD
 import { generateQuotationPDF as generateQuotationPDFImpl, generateQuotationExcel as generateQuotationExcelImpl, generateFinalReportPDF as generateFinalReportPDFImpl, generateTaxInvoicePDF as generateTaxInvoicePDFImpl, generateProformaInvoicePDF as generateProformaInvoicePDFImpl, printChallanPDF as printChallanPDFImpl, downloadEWayBillJSON as downloadEWayBillJSONImpl, generateManagementReportPDF as generateManagementReportPDFImpl } from '../utils/pdf/projectPdf';
 import {
   calculateLEDSignalPorts, calculateWallSpecs, formatCurrency, formatCurrencyPDF,
-  getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
+  getDaysDifference, getFinancialYear, getFYFromDate, getProjectGrandTotal, isDateOverlap, projectOccupancyWindow, LEDTileModel, getEffectivePOCost, fmtDate, getProjectGSTBreakdown, round2,
   getLogisticsLines, sumLogisticsRecord, getDistance, generateSecureToken, isProjectInvoiced, publicLink
 } from '../utils/helpers';
 import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
@@ -668,8 +668,15 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     // External / vendor-supplied items: treated as virtually unlimited (G-16);
     // physical stock lives at the vendor.
     if (item.is_external) return Number.MAX_SAFE_INTEGER;
-    if (!selectedProject?.start_date || !selectedProject?.end_date) return item.total;
-    const overlappingProjs = projects.filter(p => p.id !== selectedProject.id && ['Confirmed', 'Ongoing'].includes(p.status) && isDateOverlap(selectedProject.start_date, selectedProject.end_date, p.start_date, p.end_date));
+    // Occupancy runs from SETUP (kit leaves the warehouse) to end, not from the
+    // event start — otherwise gear in transit/setup could be double-allocated.
+    const myWindow = projectOccupancyWindow(selectedProject);
+    if (!myWindow) return item.total;
+    const overlappingProjs = projects.filter(p => {
+      if (p.id === selectedProject.id || !['Confirmed', 'Ongoing'].includes(p.status)) return false;
+      const w = projectOccupancyWindow(p);
+      return w ? isDateOverlap(myWindow.start, myWindow.end, w.start, w.end) : false;
+    });
     // For composite kits we need to check leaf-component conflicts, not the kit id.
     const usedQty = overlappingProjs.reduce((acc, p) => {
       let consumed = 0;
@@ -686,8 +693,15 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
   };
 
   const isEmployeeBusy = (empId) => {
-    if (!selectedProject?.start_date || !selectedProject?.end_date) return false;
-    const overlappingProjs = projects.filter(p => p.id !== selectedProject.id && ['Confirmed', 'Ongoing'].includes(p.status) && isDateOverlap(selectedProject.start_date, selectedProject.end_date, p.start_date, p.end_date));
+    // Same occupancy window as equipment: crew are committed from setup, not from
+    // the event start.
+    const myWindow = projectOccupancyWindow(selectedProject);
+    if (!myWindow) return false;
+    const overlappingProjs = projects.filter(p => {
+      if (p.id === selectedProject.id || !['Confirmed', 'Ongoing'].includes(p.status)) return false;
+      const w = projectOccupancyWindow(p);
+      return w ? isDateOverlap(myWindow.start, myWindow.end, w.start, w.end) : false;
+    });
     return overlappingProjs.some(p => (p.assigned_employees || []).includes(empId));
   };
 

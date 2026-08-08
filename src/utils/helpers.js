@@ -1033,6 +1033,23 @@ export const projectDurationDays = (project) => {
   return Math.max(1, Math.floor((new Date(endKey) - new Date(startKey)) / 86400000) + 1);
 };
 
+/**
+ * The window during which a project physically OCCUPIES its equipment.
+ * Setup happens before the event runs, and the kit is committed from the moment it
+ * leaves the warehouse — so occupancy starts at setup_date when that is earlier than
+ * start_date (this mirrors projectDurationDays, which already prorates from setup).
+ * Availability checks that used start_date alone let kit in transit/setup be
+ * double-allocated. Returns null when the project has no usable dates.
+ */
+export const projectOccupancyWindow = (project) => {
+  if (!project) return null;
+  const startCandidates = [project.setup_date, project.start_date].filter(Boolean).map(_ymd).filter(Boolean);
+  const endKey = _ymd(project.end_date || project.start_date);
+  if (!startCandidates.length || !endKey) return null;
+  const startKey = startCandidates.sort()[0]; // earliest of setup/start
+  return { start: startKey, end: endKey < startKey ? startKey : endKey };
+};
+
 /** Total outsourcing cost for a project (active POs by effective cost + unlinked
  *  vendor allocations). exGst=true returns the taxable base (for GST-exclusive margin). */
 export const getProjectOutsourcing = (project, exGst = false) => {
