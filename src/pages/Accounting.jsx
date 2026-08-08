@@ -358,14 +358,52 @@ const Accounting = ({
   // ── Ageing Analysis (FIFO-based) ──
   const ageingData = useMemo(() => {
     const today = new Date();
+    // Age from the DUE date, not the posting date. Bucketing an invoice from the day
+    // it was raised overstates overdue exposure for every party with credit terms
+    // (a Net-45 invoice raised 40 days ago is not overdue at all). Resolution order:
+    //   1. the invoice's own stored due_date (matched on refNo === invoice_no)
+    //   2. posting date + the party's credit terms ("Net N" on the client)
+    //   3. the posting date itself — i.e. exactly the previous behaviour
+    // Bucket KEYS are unchanged (0_30/31_60/61_90/90_plus) so every downstream
+    // consumer — the stacked bars, the Excel export, booksAudit — is untouched.
+    const dueByRef = new Map();
+    (taxInvoices || []).forEach((inv) => {
+      if (inv && inv.invoice_no && inv.due_date && inv.status !== 'Cancelled') dueByRef.set(String(inv.invoice_no), inv.due_date);
+    });
+    const parseTermDays = (terms) => {
+      const m = /(\d+)/.exec(String(terms || ''));
+      const n = m ? parseInt(m[1], 10) : NaN;
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const termsByParty = new Map();
+    (clients || []).forEach((c) => {
+      if (!c || !c.name) return;
+      const t = parseTermDays(c.billing_terms);
+      if (t != null) termsByParty.set(`Party: ${c.name}`, t);
+    });
+    // Effective due date for one ledger entry. Falls back to the posting date, so an
+    // entry we cannot resolve ages exactly as it does today (never later, so overdue
+    // is never silently understated).
+    const dueDateOf = (entry, partyAccount) => {
+      const ref = entry.refNo != null ? String(entry.refNo) : '';
+      const explicit = ref && dueByRef.get(ref);
+      if (explicit) return explicit;
+      const terms = termsByParty.get(partyAccount);
+      if (entry.date && terms != null) {
+        const d = new Date(entry.date);
+        if (!isNaN(d.getTime())) { d.setDate(d.getDate() + terms); return d.toISOString().slice(0, 10); }
+      }
+      return entry.date;
+    };
+
     const receivableRows = [];
     const payableRows = [];
     snapshot.ledger
       .filter(r => r.account.startsWith('Party:'))
       .forEach(ledgerRow => {
         const entries = [...(ledgerRow.entries || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-        const debits = entries.filter(e => e.side === 'Dr').map(e => ({ date: e.date, remaining: e.amount }));
-        const credits = entries.filter(e => e.side === 'Cr').map(e => ({ date: e.date, remaining: e.amount }));
+        const debits = entries.filter(e => e.side === 'Dr').map(e => ({ date: dueDateOf(e, ledgerRow.account), remaining: e.amount }));
+        const credits = entries.filter(e => e.side === 'Cr').map(e => ({ date: dueDateOf(e, ledgerRow.account), remaining: e.amount }));
         credits.forEach(cr => {
           let toMatch = cr.remaining;
           for (const dr of debits) {
@@ -392,7 +430,7 @@ const Accounting = ({
       });
     const sumB = (rows) => rows.reduce((a, r) => ({ '0_30': a['0_30'] + r['0_30'], '31_60': a['31_60'] + r['31_60'], '61_90': a['61_90'] + r['61_90'], '90_plus': a['90_plus'] + r['90_plus'], total: a.total + r.total }), { '0_30': 0, '31_60': 0, '61_90': 0, '90_plus': 0, total: 0 });
     return { receivable: receivableRows.sort((a, b) => b.total - a.total), payable: payableRows.sort((a, b) => b.total - a.total), receivableTotals: sumB(receivableRows), payableTotals: sumB(payableRows) };
-  }, [snapshot.ledger]);
+  }, [snapshot.ledger, taxInvoices, clients]);
 
   // ── Export Reports to Excel / Tally ──
   const exportReport = (type) => exportReportImpl(type, { fyFilter, snapshot, ageingData, addToast });
