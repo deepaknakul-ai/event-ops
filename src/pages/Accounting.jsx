@@ -2936,6 +2936,21 @@ const Accounting = ({
               : `⚠️ Your books have a difference of ${formatCurrency(Math.abs(snapshot.trialBalance.difference))}. Check Trial Balance tab for details.`
             }
           </div>
+
+          {/* Integrity advisories. A balanced trial balance cannot detect these
+              (the journal balances by construction), so they are checked
+              independently. Shown ONLY when something actually needs a look —
+              deliberately advisory, never a "do not file" alarm. */}
+          {snapshot.integrity && !snapshot.integrity.ok && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <div className="font-semibold">Your books balance, but {snapshot.integrity.checks.filter((c) => !c.ok).length} integrity check(s) need a look:</div>
+              <ul className="mt-1 list-disc pl-5 space-y-0.5">
+                {snapshot.integrity.checks.filter((c) => !c.ok).map((c) => (
+                  <li key={c.id}>{c.label} — <span className="text-amber-700">{c.detail}</span></li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

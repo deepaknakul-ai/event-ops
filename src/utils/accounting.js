@@ -1134,6 +1134,53 @@ export const buildAccountingSnapshot = ({
   const trialDifference = round2(trialDebitTotal - trialCreditTotal);
   const isTrialBalanced = Math.abs(trialDifference) < 0.01;
 
+  // ── Integrity checks (ADVISORY — independent of the balancing identities) ────
+  // isTrialBalanced above can never be false for engine-generated data: the journal
+  // is balanced BY CONSTRUCTION (every pushDoubleEntry line carries one amount to a
+  // Dr and a Cr account), so it is not evidence of anything. These checks are
+  // deliberately INDEPENDENT — they re-derive from the raw journal and can genuinely
+  // fail. They are reported, never used to block or to claim the books are wrong.
+  const integrityChecks = [];
+  const addCheck = (id, label, ok, detail) => integrityChecks.push({ id, label, ok, detail });
+
+  // 1. Ledger aggregation reconciles to the raw journal: every leg must land in
+  //    exactly one ledger row on each side. Catches a dropped/duplicated leg
+  //    (e.g. a blank account name collapsing rows) inside toLedger.
+  const journalTotal = round2(journal.reduce((s, r) => s + (Number(r.amount) || 0), 0));
+  const ledgerDebitTotal = round2(ledger.reduce((s, r) => s + r.debit, 0));
+  const ledgerCreditTotal = round2(ledger.reduce((s, r) => s + r.credit, 0));
+  addCheck(
+    'ledger_reconciles_to_journal',
+    'Ledger totals reconcile to the raw journal',
+    Math.abs(ledgerDebitTotal - journalTotal) < 0.01 && Math.abs(ledgerCreditTotal - journalTotal) < 0.01,
+    `journal ${journalTotal} vs ledger Dr ${ledgerDebitTotal} / Cr ${ledgerCreditTotal}`,
+  );
+
+  // 2. No self-posting: a leg whose Dr and Cr are the SAME account is a no-op that
+  //    silently inflates both trial-balance totals while leaving the balance at 0.
+  const selfPostings = journal.filter((r) => r.debitAccount && r.debitAccount === r.creditAccount);
+  addCheck('no_self_postings', 'No entry debits and credits the same account',
+    selfPostings.length === 0, `${selfPostings.length} self-posting leg(s)`);
+
+  // 3. Every leg names both accounts — a blank account name merges unrelated legs.
+  const namelessLegs = journal.filter((r) => !r.debitAccount || !r.creditAccount);
+  addCheck('all_legs_named', 'Every entry names both a debit and a credit account',
+    namelessLegs.length === 0, `${namelessLegs.length} leg(s) missing an account`);
+
+  // 4. No negative leg amounts (a reversal flips Dr/Cr, it does not negate).
+  const negativeLegs = journal.filter((r) => (Number(r.amount) || 0) < 0);
+  addCheck('no_negative_amounts', 'No entry carries a negative amount',
+    negativeLegs.length === 0, `${negativeLegs.length} negative leg(s)`);
+
+  // 5. Each ledger row's stored totals match its own entries (catches aggregation drift).
+  const driftedRows = ledger.filter((row) => {
+    let dr = 0; let cr = 0;
+    (row.entries || []).forEach((e) => { if (e.side === 'Dr') dr += (Number(e.amount) || 0); else if (e.side === 'Cr') cr += (Number(e.amount) || 0); });
+    return Math.abs(round2(dr) - row.debit) > 0.01 || Math.abs(round2(cr) - row.credit) > 0.01;
+  });
+  addCheck('ledger_rows_match_entries', 'Each ledger balance matches the sum of its own entries',
+    driftedRows.length === 0, `${driftedRows.length} row(s) drifted`);
+
   const incomeRows = ledger.filter((row) => guessAccountType(row.account, coaByName) === 'Income');
   const incomeByLedger = round2(
     incomeRows.reduce((sum, row) => sum + Math.max(-row.balance, 0), 0)
@@ -1234,6 +1281,14 @@ export const buildAccountingSnapshot = ({
   // so the identity survives (currentYearProfit + residue = actual P&L net).
   bs.equity.otherEquity = round2(bs.equity.otherEquity + (round2(plRowsNet) - netProfit));
 
+  // 6. The P&L residue parked in equity must be fully explained by the abnormal-sign
+  //    accounts. If these diverge, money is being silently absorbed into equity for
+  //    some OTHER reason — the one failure the balancing identity can never reveal.
+  const plResidue = round2(round2(plRowsNet) - netProfit);
+  addCheck('pl_residue_explained', 'P&L residue parked in equity is fully explained',
+    Math.abs(plResidue - plExceptionsTotal) < 0.01,
+    `residue ${plResidue} vs abnormal-sign total ${plExceptionsTotal}`);
+
   const cashBalance = bs.assets.cashAndBank;
   const receivableTotal = bs.assets.accountsReceivable;
   const advanceAsset = bs.assets.employeeAdvances;
@@ -1260,6 +1315,9 @@ export const buildAccountingSnapshot = ({
     // `total` is the amount thereby absorbed into balanceSheet.equity.otherEquity.
     // Top-level (not nested in profitAndLoss) so existing consumers are untouched.
     plExceptions: { rows: plExceptions, total: plExceptionsTotal },
+    // ADVISORY integrity report. `ok` false means a check that CAN fail did fail —
+    // it flags something worth investigating, it does not assert the books are wrong.
+    integrity: { ok: integrityChecks.every((c) => c.ok), checks: integrityChecks },
     profitAndLoss: {
       revenue: totalSalesTaxable,
       costOfGoodsSold: totalPurchaseTaxable,
