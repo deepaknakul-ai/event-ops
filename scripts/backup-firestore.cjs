@@ -33,6 +33,10 @@ const COLLECTIONS = [
   'settings',
   'journal_entries',
   'opening_balances',
+  // FY-close writes fiscal_year_closings + opening_balances + a closing voucher in
+  // journal_entries. All three must be in the dump for a close to be reversible.
+  'fiscal_year_closings',
+  'configurations',
   'tax_invoices',
   'purchase_invoices',
   'audit_logs',

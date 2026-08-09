@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
+import { computeFyRolloverRows } from '../utils/fyRollover';
 import * as XLSX from '@e965/xlsx';
 import {
   buildAccountingSnapshot,
@@ -2430,12 +2431,18 @@ const Accounting = ({
       // included in final amount" — the rolled-forward party receivable from
       // unbilled projects sat in a separate ledger row from the new invoice
       // posted next year.
-      const rolloverRows = (snapshot.ledger || [])
-        .filter((row) => Math.abs(row.balance) > 0.009)
-        .filter((row) => {
-          const type = guessAccountType(row.account, chartByName);
-          return type === 'Asset' || type === 'Liability' || type === 'Equity';
-        });
+      // Pure + unit-tested (src/utils/fyRollover.js): carries A/L/E balances, drops
+      // the 'Profit And Loss Closing' clearing account, and folds the closing
+      // transfer into Retained Earnings — the transfer voucher is written in THIS
+      // batch, so snapshot.ledger does not yet contain it and the year's profit
+      // was previously never carried forward at all (it was silently absorbed by
+      // the 'Opening Balance Equity' contra instead).
+      const rolloverRows = computeFyRolloverRows({
+        ledger: snapshot.ledger || [],
+        typeOf: (account) => guessAccountType(account, chartByName),
+        netProfit,
+        hasTransfer: !!transferEntry,
+      });
 
       rolloverRows.forEach((row) => {
         const side = row.balance >= 0 ? 'Dr' : 'Cr';
