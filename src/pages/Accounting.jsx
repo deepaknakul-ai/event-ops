@@ -37,6 +37,7 @@ import {
 import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { computeFyRolloverRows } from '../utils/fyRollover';
+import { resolvePurchaseGst } from '../utils/gstSupply';
 import * as XLSX from '@e965/xlsx';
 import {
   buildAccountingSnapshot,
@@ -752,15 +753,11 @@ const Accounting = ({
       .map((pi) => {
         const vendor = clientById[pi.vendor_id];
         const vendorGstin = pi.vendor_company_gstin || vendor?.gstin || '';
-        const taxable = parseFloat(pi.amount || 0);
-        const gstAmt = parseFloat(pi.gst_amount || 0);
-        // Prefer the STORED supply_type (as booked) over re-deriving from live state codes.
-        const isIntra = pi.supply_type
-          ? pi.supply_type !== 'IGST'
-          : (() => { const os = (orgGstin || '').substring(0, 2); const vs = (vendorGstin || '').substring(0, 2); return !!(os && vs && os === vs); })();
-        const cgst = isIntra ? (pi.cgst_amount != null ? parseFloat(pi.cgst_amount) : gstAmt / 2) : 0;
-        const sgst = isIntra ? (pi.sgst_amount != null ? parseFloat(pi.sgst_amount) : gstAmt / 2) : 0;
-        const igst = isIntra ? 0 : (pi.igst_amount != null ? parseFloat(pi.igst_amount) : gstAmt);
+        // Purchases use their OWN supply-type vocabulary ('intra'/'inter'/'unknown'
+        // with the split under gst_cgst/gst_sgst/gst_igst) — NOT the sales one
+        // ('IGST'/'CGST_SGST' with cgst_amount/...). Resolved centrally in
+        // src/utils/gstSupply.js so the two can never be crossed again.
+        const { isIntra, taxable, gst: gstAmt, cgst, sgst, igst } = resolvePurchaseGst(pi, orgGstin, vendorGstin);
         return {
           date: pi.invoice_date,
           piNo: pi.pi_no,
