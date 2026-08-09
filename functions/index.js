@@ -54,6 +54,14 @@ const {
 } = require('./backup');
 const { createWhatsApp } = require('./whatsapp');
 const { createPlatform } = require('./platform');
+// One definition of "what has this client been billed?", shared with the public
+// ledger via src/utils/clientBilling.js (parity-tested). Used by getPortalData and
+// processDueReminders so the portal, the ledger and the reminder emails agree.
+const {
+  buildClientBillingRows,
+  buildClientInvoiceList,
+  summariseClientBilling,
+} = require('./client-billing.cjs');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -1368,23 +1376,54 @@ async function processDueReminders(appId, today) {
   const overdueDays = Number(cfg.reminder_overdue_days) || 7;
   const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - overdueDays);
 
-  const [invSnap, paySnap, cliSnap, orgSnap] = await Promise.all([
+  const [invSnap, paySnap, cliSnap, orgSnap, projSnap] = await Promise.all([
     db.collection(`artifacts/${appId}/public/data/tax_invoices`).get(),
     db.collection(`artifacts/${appId}/public/data/payments`).get(),
     db.collection(`artifacts/${appId}/public/data/clients`).get(),
     db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
+    db.collection(`artifacts/${appId}/public/data/projects`).get(),
   ]);
   const org = (orgSnap && orgSnap.exists) ? orgSnap.data() : {};
   const invoices = invSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => isActiveTaxInvoice(i.status));
   const clients = {}; cliSnap.forEach((d) => { clients[d.id] = d.data(); });
 
+  // Same basis as the public ledger and the client portal (client-billing.cjs).
+  // Summing tax_invoices alone left clients who were invoiced through the project
+  // bulk/group flow showing 0 billed, so they were never chased at all — and it
+  // under-stated the amount for clients who had a mix of both routes.
+  const projectsById = new Map();
+  await Promise.all(projSnap.docs.map(async (d) => {
+    projectsById.set(d.id, { id: d.id, ...(await mergeProjectFin(appId, d.id, d.data())) });
+  }));
+  const allProjects = [...projectsById.values()];
+  const invoicesByClient = invoices.reduce((acc, i) => {
+    if (i.client_id) (acc[i.client_id] = acc[i.client_id] || []).push(i);
+    return acc;
+  }, {});
+
   const byClient = {};
-  invoices.forEach((i) => {
-    const cid = i.client_id; if (!cid) return;
-    if (!byClient[cid]) byClient[cid] = { billed: 0, overdue: [] };
-    byClient[cid].billed += Number(i.final_amount || 0);
-    const idt = i.invoice_date ? new Date(i.invoice_date) : null;
-    if (idt && idt < cutoff) byClient[cid].overdue.push(i);
+  const clientIds = new Set([
+    ...Object.keys(invoicesByClient),
+    ...allProjects.map((p) => p.client_id).filter(Boolean),
+  ]);
+  clientIds.forEach((cid) => {
+    const rows = buildClientBillingRows({
+      clientId: cid,
+      projects: allProjects,
+      taxInvoices: invoicesByClient[cid] || [],
+    });
+    // INVOICED only — deliberately NOT the ledger's full `billed`. A reminder names
+    // the invoices it is chasing, so every rupee it claims must be backed by one of
+    // them; delivered-but-un-invoiced work and outstanding reimbursables belong on
+    // the ledger, not in a demand for payment.
+    const billed = summariseClientBilling(rows, []).invoiced;
+    if (billed <= 0) return;
+    // An invoice is chaseable once its own date is older than the cutoff. Stamped
+    // invoices are grouped so a 33-project bulk invoice is listed once, not 33 times.
+    const overdue = buildClientInvoiceList(rows)
+      .filter((i) => { const d = i.date ? new Date(i.date) : null; return d && !isNaN(d.getTime()) && d < cutoff; })
+      .map((i) => ({ invoice_no: i.invoice_no, invoice_date: i.date, final_amount: i.amount }));
+    byClient[cid] = { billed, overdue };
   });
   const recv = {};
   paySnap.forEach((d) => { const p = d.data(); if (p.client_id) recv[p.client_id] = (recv[p.client_id] || 0) + Number(p.amount || 0); });
@@ -1483,14 +1522,35 @@ exports.getPortalData = onCall(
     const projects = projSnap.docs
       .map((d) => { const p = d.data(); return { id: d.id, name: p.project_name || '', status: p.status || '', start_date: p.start_date || '', end_date: p.end_date || '', venue: p.venue || '', invoice_status: p.invoice_status || '', quote_status: p.quote_status || '' }; })
       .sort((a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0));
-    const invoices = invSnap.docs.map((d) => d.data()).filter((i) => isActiveTaxInvoice(i.status))
-      .map((i) => ({ invoice_no: i.invoice_no || '', date: i.invoice_date || '', amount: Number(i.final_amount || 0) }))
-      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
     const payments = paySnap.docs.map((d) => d.data())
       .map((p) => ({ date: p.date || p.payment_date || '', amount: Number(p.amount || 0), mode: p.mode || p.method || p.payment_mode || '', ref: p.reference || p.ref || '' }))
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-    const billed = invoices.reduce((s, i) => s + i.amount, 0);
-    const received = payments.reduce((s, p) => s + p.amount, 0);
+
+    // Billed is computed on the SAME basis as the public ledger (see
+    // functions/client-billing.cjs ← src/utils/clientBilling.js). Summing
+    // tax_invoices alone — what this did before — misses every invoice raised
+    // through the project bulk/group flow, which is stamped on the project as
+    // invoice_no with no invoice document behind it. Six clients were shown a
+    // NEGATIVE outstanding (their payments counted, their invoices did not) or a
+    // silent zero while lakhs were due.
+    //
+    // Money lives in the gated project_financials sibling post-field-split, so it
+    // is merged here FOR COMPUTATION ONLY — the `projects` payload above keeps its
+    // existing narrow projection and gains no money fields.
+    const billingProjects = await Promise.all(projSnap.docs.map(async (d) => {
+      const merged = await mergeProjectFin(appId, d.id, d.data());
+      return { id: d.id, ...merged };
+    }));
+    const billingRows = buildClientBillingRows({
+      clientId: cid,
+      projects: billingProjects,
+      taxInvoices: invSnap.docs.map((d) => d.data()),
+    });
+    const invoices = buildClientInvoiceList(billingRows)
+      .map((i) => ({ invoice_no: i.invoice_no, date: i.date || '', amount: i.amount, projects: i.projects }));
+    const totals = summariseClientBilling(billingRows, payments);
+    const billed = totals.billed;
+    const received = totals.received;
 
     const isVendor = client.type === 'Vendor' || client.type === 'Both';
     let vendor = null;
@@ -1534,7 +1594,17 @@ exports.getPortalData = onCall(
       party: { name: client.name || '', gstin: client.gstin || '', type: client.type || 'Client', address: client.address || '' },
       org: { name: org.name || '', address: org.address || '', gstin: org.gstin || '', phone: org.phone || '', email: org.email || '', logo: org.logo || '' },
       isVendor,
-      summary: { billed, received, outstanding: billed - received, projectCount: projects.length },
+      // invoiced / unbilled / reimbursable are the same total split three ways, so a
+      // caller can show "delivered, awaiting invoice" separately without recomputing.
+      summary: {
+        billed,
+        received,
+        outstanding: totals.outstanding,
+        invoiced: totals.invoiced,
+        unbilled: totals.unbilled,
+        reimbursable: totals.reimbursable,
+        projectCount: projects.length,
+      },
       projects, invoices, payments, vendor,
     };
   }

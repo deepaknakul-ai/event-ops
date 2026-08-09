@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId, isActiveTaxInvoice, getProjectReimbursableTotal, reimbursablesInvoicedFor } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, isProjectInvoiced, publicAppId, isActiveTaxInvoice } from '../utils/helpers';
+import { buildClientBillingRows } from '../utils/clientBilling';
 import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
@@ -101,95 +102,26 @@ const PublicLedger = () => {
     const raw = [];
 
     if (includeClientLedger) {
-      // PRECEDENCE: a raised tax invoice is the source of truth for the amount
-      // due. An invoice debits the client at its FINAL (agreed, tax-inclusive)
-      // amount and SUPERSEDES the per-project quote(s) it covers — so a clubbed
-      // invoice shows as ONE line, not N quote lines. Only completed/closed
-      // projects NOT yet covered by any invoice show as an "unbilled" quote.
-      const activeClientInvoices = (taxInvoices || []).filter(inv => isActiveTaxInvoice(inv.status));
-      const invoicedPids = new Set();
-      activeClientInvoices.forEach(inv => {
-        const pids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
-        pids.forEach(pid => pid && invoicedPids.add(pid));
-      });
-
-      // Projects not linked through a tax-invoice document may still be invoiced
-      // through the project bulk/group flow. Honour that project-side stamp so
-      // the public ledger shows its invoice number/date instead of "Unbilled".
-      projects
-        .filter(p => p.client_id === client.id && ['Completed', 'Closed'].includes(p.status) && !invoicedPids.has(p.id))
-        .forEach(p => {
-          const company = resolveCompany(p.party_company_id);
-          const invoiceRef = getProjectInvoiceReference(p);
-          raw.push({
-            date: invoiceRef ? (invoiceRef.invoiceDate || p.end_date) : p.end_date,
-            desc: invoiceRef
-              ? `Invoice ${invoiceRef.invoiceNo}: ${p.project_name}`
-              : `Unbilled: ${p.project_name} (completed — awaiting invoice)`,
-            debit: getProjectGrandTotal(p),
-            credit: 0,
-            invoice_status: invoiceRef ? 'Invoiced' : 'Unbilled',
-            invoice_no: invoiceRef?.invoiceNo || '—',
-            invoice_date: invoiceRef?.invoiceDate || '—',
-            project_id: p.id,
-            company_key: company.id,
-            company_name: company.name,
-            company_gstin: company.gstin,
-          });
-        });
-
-      // Client reimbursables → their OWN debit rows, dated by when the expense was
-      // incurred. These are amounts the client repays ON TOP of the project's billing
-      // value, so they are never folded into it. Anything an invoice already absorbed
-      // (its "Include Client Reimbursable Expense" box) is subtracted here, so a
-      // reimbursable can appear in the invoice OR on the ledger — never both.
-      projects
-        .filter(p => p.client_id === client.id && (p.reimbursable_expenses || []).length > 0)
-        .forEach(p => {
-          const invoiced = reimbursablesInvoicedFor(p.id, activeClientInvoices);
-          if (invoiced > 0 && invoiced >= getProjectReimbursableTotal(p) - 0.005) return; // fully billed on an invoice
-          const company = resolveCompany(p.party_company_id);
-          let absorbed = invoiced; // consume the invoiced portion oldest-first
-          (p.reimbursable_expenses || []).forEach((e, i) => {
-            const amt = parseFloat(e?.amount || 0);
-            if (!(amt > 0)) return;
-            const net = Math.max(0, amt - Math.min(absorbed, amt));
-            absorbed = Math.max(0, absorbed - amt);
-            if (net <= 0.005) return;
-            raw.push({
-              date: e.date || p.end_date,
-              desc: `Reimbursable: ${e.description || e.category || 'Expense'} (${p.project_name})`,
-              debit: net,
-              credit: 0,
-              invoice_status: 'Reimbursable',
-              invoice_no: '—',
-              invoice_date: '—',
-              project_id: p.id,
-              reimbursable_id: e.id || `${p.id}_${i}`,
-              proof_url: e.proof_url || '',
-              proof_name: e.proof_name || '',
-              company_key: company.id,
-              company_name: company.name,
-              company_gstin: company.gstin,
-            });
-          });
-        });
-
-      // Raised tax invoices → one debit line each at the billed (final) amount
-      activeClientInvoices.forEach(inv => {
-        const company = resolveCompany(inv.sale_company_id);
-        const amount = parseFloat(inv.final_amount != null ? inv.final_amount : (inv.computed_total || 0));
-        const projNames = (Array.isArray(inv.project_names) && inv.project_names.length)
-          ? inv.project_names.join(', ')
-          : (inv.project_name || '');
+      // PRECEDENCE now lives in ../utils/clientBilling — the SAME module the client
+      // portal and the payment reminders use, so all three agree by construction
+      // instead of by coincidence. It honours BOTH routes an invoice reaches a
+      // project by (a tax_invoices document, and the project-side invoice_no stamp
+      // the bulk/group flow writes); reading only the former is what left the portal
+      // showing a negative outstanding while this page was right.
+      buildClientBillingRows({ clientId: client.id, projects, taxInvoices }).forEach(r => {
+        const company = resolveCompany(r.company_source_id);
         raw.push({
-          date: inv.invoice_date,
-          desc: `Invoice ${inv.invoice_no || '—'}${projNames ? `: ${projNames}` : ''}`,
-          debit: amount,
+          date: r.date,
+          desc: r.desc,
+          debit: r.amount,
           credit: 0,
-          invoice_status: 'Invoiced',
-          invoice_no: inv.invoice_no || '—',
-          invoice_date: inv.invoice_date || '—',
+          invoice_status: r.invoice_status,
+          invoice_no: r.invoice_no,
+          invoice_date: r.invoice_date,
+          ...(r.project_id ? { project_id: r.project_id } : {}),
+          ...(r.reimbursable_id
+            ? { reimbursable_id: r.reimbursable_id, proof_url: r.proof_url, proof_name: r.proof_name }
+            : {}),
           company_key: company.id,
           company_name: company.name,
           company_gstin: company.gstin,
