@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId, isActiveTaxInvoice } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId, isActiveTaxInvoice, getProjectReimbursableTotal, reimbursablesInvoicedFor } from '../utils/helpers';
 import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
@@ -135,6 +135,43 @@ const PublicLedger = () => {
             company_key: company.id,
             company_name: company.name,
             company_gstin: company.gstin,
+          });
+        });
+
+      // Client reimbursables → their OWN debit rows, dated by when the expense was
+      // incurred. These are amounts the client repays ON TOP of the project's billing
+      // value, so they are never folded into it. Anything an invoice already absorbed
+      // (its "Include Client Reimbursable Expense" box) is subtracted here, so a
+      // reimbursable can appear in the invoice OR on the ledger — never both.
+      projects
+        .filter(p => p.client_id === client.id && (p.reimbursable_expenses || []).length > 0)
+        .forEach(p => {
+          const invoiced = reimbursablesInvoicedFor(p.id, activeClientInvoices);
+          if (invoiced > 0 && invoiced >= getProjectReimbursableTotal(p) - 0.005) return; // fully billed on an invoice
+          const company = resolveCompany(p.party_company_id);
+          let absorbed = invoiced; // consume the invoiced portion oldest-first
+          (p.reimbursable_expenses || []).forEach((e, i) => {
+            const amt = parseFloat(e?.amount || 0);
+            if (!(amt > 0)) return;
+            const net = Math.max(0, amt - Math.min(absorbed, amt));
+            absorbed = Math.max(0, absorbed - amt);
+            if (net <= 0.005) return;
+            raw.push({
+              date: e.date || p.end_date,
+              desc: `Reimbursable: ${e.description || e.category || 'Expense'} (${p.project_name})`,
+              debit: net,
+              credit: 0,
+              invoice_status: 'Reimbursable',
+              invoice_no: '—',
+              invoice_date: '—',
+              project_id: p.id,
+              reimbursable_id: e.id || `${p.id}_${i}`,
+              proof_url: e.proof_url || '',
+              proof_name: e.proof_name || '',
+              company_key: company.id,
+              company_name: company.name,
+              company_gstin: company.gstin,
+            });
           });
         });
 

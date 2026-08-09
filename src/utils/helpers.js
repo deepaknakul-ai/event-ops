@@ -63,6 +63,36 @@ export const isActiveTaxInvoice = (status) => {
   return v !== 'cancelled' && v !== 'voided' && v !== 'void' && v !== 'rejected';
 };
 
+/**
+ * Client reimbursables for one project — expenses the CLIENT is expected to repay,
+ * over and above the project's own billing value. Never folded into the project
+ * total: they are either absorbed into an invoice (see reimbursablesInvoicedFor)
+ * or carried separately on the client's ledger, and never both.
+ */
+export const getProjectReimbursableTotal = (project) =>
+  round2((project?.reimbursable_expenses || []).reduce((s, e) => s + toNum(e?.amount), 0));
+
+/**
+ * How much of a project's reimbursables has already been absorbed into an issued
+ * tax invoice (the "Include Client Reimbursable Expense" box on that invoice).
+ *
+ * The AMOUNT is stored on the invoice rather than a flag on each expense, so a
+ * reimbursable added AFTER the invoice was raised is correctly still outstanding
+ * instead of being silently treated as billed. Cancelled invoices don't count.
+ */
+export const reimbursablesInvoicedFor = (projectId, taxInvoices = []) =>
+  round2((taxInvoices || []).reduce((sum, inv) => {
+    if (!inv || !inv.reimbursables_included || !isActiveTaxInvoice(inv.status)) return sum;
+    const ids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
+    if (!ids.includes(projectId)) return sum;
+    const per = inv.reimbursable_by_project && inv.reimbursable_by_project[projectId];
+    return sum + toNum(per != null ? per : 0);
+  }, 0));
+
+/** Reimbursables still recoverable from the client (total less whatever an invoice absorbed). */
+export const getProjectUnbilledReimbursable = (project, taxInvoices = []) =>
+  round2(Math.max(0, getProjectReimbursableTotal(project) - reimbursablesInvoicedFor(project?.id, taxInvoices)));
+
 // Money coercion for reduce/accumulator legs. Legacy + imported docs can carry a
 // STRING amount/total; `acc + '11800'` silently string-concatenates and corrupts
 // every downstream figure (grand total, margin, referral commission). Tolerant by

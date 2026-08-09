@@ -15,7 +15,7 @@ import { Modal, ConfirmDeleteModal, SendMenu } from '../components/Shared';
 import {
   formatCurrency, formatCurrencyPDF, fmtDate,
   getFYFromDate, getProjectGSTBreakdown, sumLogisticsRecord, getProjectGrandTotal, amountToWordsINR, round2,
-  isProjectInvoiced
+  isProjectInvoiced, getProjectReimbursableTotal
 } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { generateClassicInvoicePDF, generateGSTFormatInvoicePDF } from '../utils/pdf/taxInvoicePdf';
@@ -101,7 +101,7 @@ const TaxInvoices = ({
   const initialForm = {
     client_id: '', project_ids: [], invoice_no: '',
     invoice_date: new Date().toISOString().split('T')[0],
-    due_date: '', remarks: '', final_amount: '', sale_mode: 'Credit',
+    due_date: '', remarks: '', final_amount: '', sale_mode: 'Credit', include_reimbursables: false,
     sale_company_id: 'primary', sale_company_name: '', sale_company_gstin: '', sale_company_address: '',
     // Optional Transportation / PO details (GST-format invoice; render only when filled)
     po_number: '', po_date: '', transport_name: '', vehicle_number: '', delivery_date: '', delivery_location: '',
@@ -173,6 +173,26 @@ const TaxInvoices = ({
     () => computeProjectsTotals(form.project_ids, projects),
     [form.project_ids, projects]
   );
+
+  // Client reimbursables on the selected projects. Kept OUT of computeProjectsTotals
+  // so the project's own billing value never silently absorbs them — they are added
+  // only when the user ticks "Include Client Reimbursable Expense".
+  const reimbursableByProject = useMemo(() => {
+    const map = {};
+    (form.project_ids || []).forEach((pid) => {
+      const p = projects.find((x) => x.id === pid);
+      if (!p) return;
+      const amt = getProjectReimbursableTotal(p);
+      if (amt > 0) map[pid] = amt;
+    });
+    return map;
+  }, [form.project_ids, projects]);
+  const reimbursableTotal = useMemo(
+    () => round2(Object.values(reimbursableByProject).reduce((s, v) => s + v, 0)),
+    [reimbursableByProject],
+  );
+  // What the invoice should come to, incl. reimbursables when the box is ticked.
+  const invoiceComputedTotal = round2(computedTotals.total + (form.include_reimbursables ? reimbursableTotal : 0));
 
   const invoiceType = useMemo(
     () => getInvoiceType(form.project_ids, projects),
@@ -295,6 +315,7 @@ const TaxInvoices = ({
       due_date: inv.due_date || '',
       remarks: inv.remarks || '',
       final_amount: inv.final_amount != null ? String(inv.final_amount) : '',
+      include_reimbursables: !!inv.reimbursables_included,
       sale_mode: inv.sale_mode || 'Credit',
       sale_company_id: inv.sale_company_id || 'primary',
       sale_company_name: inv.sale_company_name || '',
@@ -349,7 +370,7 @@ const TaxInvoices = ({
       const companies = getPartyCompanies(client);
       const selectedCompany = companies.find(c => c.id === (form.sale_company_id || 'primary')) || companies[0] || null;
       const totals = computedTotals;
-      const finalAmt = form.final_amount !== '' ? parseFloat(form.final_amount) : totals.total;
+      const finalAmt = form.final_amount !== '' ? parseFloat(form.final_amount) : round2(totals.total + (form.include_reimbursables ? reimbursableTotal : 0));
       const type = invoiceType;
 
       const linked = projects.filter(p => form.project_ids.includes(p.id));
@@ -483,6 +504,13 @@ const TaxInvoices = ({
         bill_to_gstin_at_issue: gstSplit.bill_to_gstin,
         computed_total: totals.total,
         final_amount: finalAmt,
+        // Client reimbursables absorbed into THIS invoice (the "Include Client
+        // Reimbursable Expense" box). Stored as AMOUNTS, not a flag, so a
+        // reimbursable added AFTER this invoice stays outstanding rather than
+        // being silently treated as billed. The client ledger subtracts these.
+        reimbursables_included: !!form.include_reimbursables,
+        reimbursable_amount: form.include_reimbursables ? reimbursableTotal : 0,
+        reimbursable_by_project: form.include_reimbursables ? reimbursableByProject : {},
         sale_mode: form.sale_mode || 'Credit',
         remarks: form.remarks,
         // Optional Transportation / PO details (GST-format invoice)
@@ -1097,6 +1125,31 @@ const TaxInvoices = ({
               />
             </div>
 
+            {/* Client reimbursables — include in this invoice, or leave on the ledger */}
+            {reimbursableTotal > 0 && (
+              <div className="rounded-lg border border-teal-200 bg-teal-50 p-3">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-200"
+                    checked={!!form.include_reimbursables}
+                    onChange={e => setForm(f => ({ ...f, include_reimbursables: e.target.checked }))}
+                  />
+                  <span className="text-sm">
+                    <span className="font-semibold text-teal-900">
+                      Include Client Reimbursable Expense For Selected Show
+                    </span>
+                    <span className="block text-xs text-teal-700 mt-0.5">
+                      {formatCurrency(reimbursableTotal)} of reimbursable expenses on the selected
+                      project{Object.keys(reimbursableByProject).length > 1 ? 's' : ''}. Tick to add it to this
+                      invoice — the invoice total then becomes the full agreed amount. Left unticked, it stays
+                      on the client's ledger as separately recoverable (never both).
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+
             {/* Final Amount Override */}
             <div>
               <label className="text-xs font-bold text-slate-700 block mb-1">
@@ -1108,7 +1161,7 @@ const TaxInvoices = ({
                 min="0"
                 step="0.01"
                 className="w-full rounded-lg border border-slate-300 p-2 text-sm text-black"
-                placeholder={computedTotals.total ? String(Math.round(computedTotals.total * 100) / 100) : '0.00'}
+                placeholder={invoiceComputedTotal ? String(Math.round(invoiceComputedTotal * 100) / 100) : '0.00'}
                 value={form.final_amount}
                 onChange={e => setForm(f => ({ ...f, final_amount: e.target.value }))}
               />

@@ -1290,11 +1290,42 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               <button onClick={handleSetLedgerExpiry} className="rounded border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">Set Expiry</button>
               <button onClick={handleRegenerateLedgerLink} className="rounded border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">Regenerate Link</button>
             </div>
-            <div className="text-xs text-slate-500">
-              {ledgerLinkModal.client?.ledger_link_expires_at
-                ? `Expires: ${new Date(ledgerLinkModal.client.ledger_link_expires_at).toLocaleDateString()}`
-                : 'No expiry set.'}
-            </div>
+            {/* Expiry state. The server already REFUSES an expired link, but the modal
+                only ever printed the date — so a past date sat here looking normal and
+                the client hit a dead link before anyone noticed. Say it plainly. */}
+            {(() => {
+              const exp = ledgerLinkModal.client?.ledger_link_expires_at;
+              const disabled = ledgerLinkModal.client?.ledger_link_enabled === false;
+              const expired = !!exp && new Date(exp) < new Date();
+              const days = exp ? Math.ceil((new Date(exp) - new Date()) / 86400000) : null;
+              if (disabled) {
+                return (
+                  <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700">
+                    DISABLED — this link is switched off. The client sees an error. Regenerate to issue a new one.
+                  </div>
+                );
+              }
+              if (expired) {
+                return (
+                  <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs font-semibold text-red-700">
+                    EXPIRED on {new Date(exp).toLocaleDateString()} — the client can no longer open this link.
+                    Set a new expiry above (or clear it) to reactivate; regenerating issues a fresh URL.
+                  </div>
+                );
+              }
+              if (exp && days != null && days <= 7) {
+                return (
+                  <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs font-semibold text-amber-800">
+                    Expires in {days} day{days === 1 ? '' : 's'} ({new Date(exp).toLocaleDateString()}).
+                  </div>
+                );
+              }
+              return (
+                <div className="text-xs text-slate-500">
+                  {exp ? `Expires: ${new Date(exp).toLocaleDateString()}` : 'No expiry set.'}
+                </div>
+              );
+            })()}
             {ledgerLinkModal.client?.ledger_link_created_at && (
               <div className="text-xs text-slate-500">
                 Created: {new Date(ledgerLinkModal.client.ledger_link_created_at).toLocaleDateString()}
