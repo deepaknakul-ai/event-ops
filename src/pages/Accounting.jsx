@@ -37,7 +37,8 @@ import {
 import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { computeFyRolloverRows } from '../utils/fyRollover';
-import { resolvePurchaseGst } from '../utils/gstSupply';
+import { resolvePurchaseGst, resolvePurchaseSupplyType } from '../utils/gstSupply';
+import { inputGSTLines } from '../utils/aiAccountant/knowledge';
 import * as XLSX from '@e965/xlsx';
 import {
   buildAccountingSnapshot,
@@ -545,13 +546,30 @@ const Accounting = ({
       setIsSaving(true);
       const partyAccount = `Party: ${cnDnForm.party_name}`;
       const isCN = cnDnForm.type === 'credit_note';
+      // Place of supply, resolved from the selected party's GSTIN and stored on the
+      // note so the return tables (and any later re-post) do not have to re-derive
+      // it from data that may since have changed. Owner rule: a missing GSTIN
+      // changes the HEAD, never the amount.
+      const partyDoc = (clients || []).find((c) => c && c.name === cnDnForm.party_name);
+      const partyGstin = partyDoc?.gstin || '';
+      const noteSupplyType = resolvePurchaseSupplyType(undefined, orgGstin, partyGstin);
       const entries = [];
       if (isCN) {
+        // Sales are posted to a single 'Output GST Payable' control account, so the
+        // credit note reverses that same account — already symmetric.
         if (taxable > 0) entries.push({ debitAccount: 'Sales Revenue', creditAccount: partyAccount, amount: taxable });
         if (gst > 0) entries.push({ debitAccount: 'Output GST Payable', creditAccount: partyAccount, amount: gst });
       } else {
         if (taxable > 0) entries.push({ debitAccount: partyAccount, creditAccount: 'Purchase Expense', amount: taxable });
-        if (gst > 0) entries.push({ debitAccount: partyAccount, creditAccount: 'Input GST Credit', amount: gst });
+        // A purchase debits Input CGST+SGST (intra) or Input IGST (inter) via
+        // inputGSTLines. Reversing ITC through the single 'Input GST Credit'
+        // account drove THAT negative while the real head stayed uncleared, so the
+        // debit note now credits exactly the heads the purchase debited.
+        if (gst > 0) {
+          inputGSTLines(gst, noteSupplyType).forEach((g) => {
+            entries.push({ debitAccount: partyAccount, creditAccount: g.account, amount: g.amount });
+          });
+        }
       }
       const narration = `${isCN ? 'Credit Note' : 'Debit Note'}: ${cnDnForm.reason || ''} | Ref: ${cnDnForm.original_invoice || 'N/A'} | Party: ${cnDnForm.party_name}`;
 
@@ -570,6 +588,17 @@ const Accounting = ({
           narration,
           source: isCN ? 'credit_note' : 'debit_note',
           entries,
+          // Place-of-supply metadata captured AT ISSUE so the GST return tables can
+          // classify the note without re-deriving from data that may have changed
+          // (a party can be edited, or its GSTIN added, after the note was posted).
+          supply_type: noteSupplyType,
+          place_of_supply: (partyGstin || orgGstin || '').substring(0, 2),
+          party_name: cnDnForm.party_name,
+          party_gstin_at_issue: partyGstin,
+          original_invoice: cnDnForm.original_invoice || '',
+          taxable_amount: taxable,
+          gst_amount: gst,
+          note_value: total,
           updated_by: user?.uid || '',
           updated_at: new Date().toISOString(),
         };
@@ -578,7 +607,19 @@ const Accounting = ({
         addToast(`${isCN ? 'Credit Note' : 'Debit Note'} updated`, 'success');
       } else {
         const voucherNo = await generateJournalVoucherNumber({ db, appId, dateStr: cnDnForm.date });
-        const payload = { voucher_no: voucherNo, fy: getFYFromDate(cnDnForm.date), date: cnDnForm.date, narration, source: isCN ? 'credit_note' : 'debit_note', status: 'posted', entries, created_by: user?.uid || '', created_at: new Date().toISOString() };
+        const payload = { voucher_no: voucherNo, fy: getFYFromDate(cnDnForm.date), date: cnDnForm.date, narration, source: isCN ? 'credit_note' : 'debit_note', status: 'posted', entries,
+          // Place-of-supply metadata captured AT ISSUE so the GST return tables can
+          // classify the note without re-deriving from data that may have changed
+          // (a party can be edited, or its GSTIN added, after the note was posted).
+          supply_type: noteSupplyType,
+          place_of_supply: (partyGstin || orgGstin || '').substring(0, 2),
+          party_name: cnDnForm.party_name,
+          party_gstin_at_issue: partyGstin,
+          original_invoice: cnDnForm.original_invoice || '',
+          taxable_amount: taxable,
+          gst_amount: gst,
+          note_value: total,
+          created_by: user?.uid || '', created_at: new Date().toISOString() };
         const ref = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'), payload);
         logAction('journal_entries', 'create', ref.id, payload, `${isCN ? 'CN' : 'DN'} ${voucherNo}`);
         addToast(`${isCN ? 'Credit Note' : 'Debit Note'} posted`, 'success');
