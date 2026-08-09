@@ -828,27 +828,70 @@ const Accounting = ({
     // net them into GSTR-3B so net payable isn't overstated. Split is best-effort from
     // the party's GSTIN (notes carry no stored supply_type). A full per-note CDNR
     // table + portal-JSON section is a compliance-feature follow-up.
-    const noteAdj = { outCgst: 0, outSgst: 0, outIgst: 0, outTaxable: 0, inCgst: 0, inSgst: 0, inIgst: 0, inTaxable: 0 };
-    (manualJournalEntries || [])
-      .filter((r) => (r.source === 'credit_note' || r.source === 'debit_note') && inFY(r.date))
-      .forEach((r) => {
+    // ── Credit / Debit notes → return rows ──────────────────────────────────
+    // Notes issued from here on carry their place-of-supply metadata AT ISSUE
+    // (supply_type / place_of_supply / party_gstin_at_issue / taxable / gst).
+    // LEGACY notes predate that, so fall back to reading the posted journal legs
+    // and re-deriving the supply type from the party's GSTIN. The leg scan must
+    // recognise EVERY input-GST head: debit notes used to credit the single
+    // 'Input GST Credit', and now credit Input CGST/SGST or Input IGST.
+    const INPUT_GST_HEADS = new Set(['Input GST Credit', 'Input CGST', 'Input SGST', 'Input IGST']);
+    const gstNotes = (manualJournalEntries || [])
+      .filter((r) => (r.source === 'credit_note' || r.source === 'debit_note') && r.status !== 'cancelled' && inFY(r.date))
+      .map((r) => {
         const isCN = r.source === 'credit_note';
         const legs = Array.isArray(r.entries) ? r.entries : [];
-        const gstAmt = legs.filter((e) => (isCN ? e.debitAccount === 'Output GST Payable' : e.creditAccount === 'Input GST Credit')).reduce((s, e) => s + (Number(e.amount) || 0), 0);
-        const taxable = legs.filter((e) => (isCN ? e.debitAccount === 'Sales Revenue' : e.creditAccount === 'Purchase Expense')).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const legGst = legs
+          .filter((e) => (isCN ? e.debitAccount === 'Output GST Payable' : INPUT_GST_HEADS.has(e.creditAccount)))
+          .reduce((s2, e) => s2 + (Number(e.amount) || 0), 0);
+        const legTaxable = legs
+          .filter((e) => (isCN ? e.debitAccount === 'Sales Revenue' : e.creditAccount === 'Purchase Expense'))
+          .reduce((s2, e) => s2 + (Number(e.amount) || 0), 0);
+        const gst = r.gst_amount != null ? (Number(r.gst_amount) || 0) : legGst;
+        const taxable = r.taxable_amount != null ? (Number(r.taxable_amount) || 0) : legTaxable;
+
         const partyAcc = legs.map((e) => e.debitAccount).concat(legs.map((e) => e.creditAccount)).find((a) => a && a.startsWith('Party: '));
-        const party = clientById[Object.keys(clientById).find((id) => clientById[id]?.name === (partyAcc || '').replace('Party: ', ''))];
-        const os = (orgGstin || '').substring(0, 2);
-        const ps = (party?.gstin || '').substring(0, 2);
-        const isIntra = !!(os && ps && os === ps);
-        if (isCN) {
-          noteAdj.outTaxable += taxable;
-          if (isIntra) { noteAdj.outCgst += gstAmt / 2; noteAdj.outSgst += gstAmt / 2; } else { noteAdj.outIgst += gstAmt; }
-        } else {
-          noteAdj.inTaxable += taxable;
-          if (isIntra) { noteAdj.inCgst += gstAmt / 2; noteAdj.inSgst += gstAmt / 2; } else { noteAdj.inIgst += gstAmt; }
-        }
+        const partyName = r.party_name || (partyAcc || '').replace('Party: ', '');
+        const partyDoc = (clients || []).find((c) => c && c.name === partyName);
+        const partyGstin = r.party_gstin_at_issue || partyDoc?.gstin || '';
+        // Stored classification wins — it is what the tax was POSTED on.
+        const stored = String(r.supply_type || '').toLowerCase();
+        const supplyType = (stored === 'intra' || stored === 'inter')
+          ? stored
+          : resolvePurchaseSupplyType(undefined, orgGstin, partyGstin);
+        const isIntra = supplyType === 'intra';
+        const half = Math.round((gst / 2) * 100) / 100;
+        return {
+          id: r.id,
+          kind: isCN ? 'credit_note' : 'debit_note',
+          noteNo: r.voucher_no || r.id,
+          date: r.date,
+          partyName,
+          partyGstin,
+          registered: !!partyGstin,
+          placeOfSupply: r.place_of_supply || (partyGstin || orgGstin || '').substring(0, 2),
+          originalInvoice: r.original_invoice || '',
+          supplyType: isIntra ? 'Intra-State' : 'Inter-State',
+          taxable,
+          gst,
+          cgst: isIntra ? half : 0,
+          sgst: isIntra ? Math.round((gst - half) * 100) / 100 : 0,
+          igst: isIntra ? 0 : gst,
+          total: taxable + gst,
+          // GSTN CDNR (registered counterparty) vs CDNUR (unregistered).
+          returnTable: partyGstin ? 'CDNR' : 'CDNUR',
+        };
       });
+
+    // Credit notes reduce OUTPUT tax; debit notes reverse ITC (reduce INPUT tax).
+    const noteAdj = { outCgst: 0, outSgst: 0, outIgst: 0, outTaxable: 0, inCgst: 0, inSgst: 0, inIgst: 0, inTaxable: 0 };
+    gstNotes.forEach((n) => {
+      if (n.kind === 'credit_note') {
+        noteAdj.outTaxable += n.taxable; noteAdj.outCgst += n.cgst; noteAdj.outSgst += n.sgst; noteAdj.outIgst += n.igst;
+      } else {
+        noteAdj.inTaxable += n.taxable; noteAdj.inCgst += n.cgst; noteAdj.inSgst += n.sgst; noteAdj.inIgst += n.igst;
+      }
+    });
     const netOutCgst = totalOutputCgst - noteAdj.outCgst;
     const netOutSgst = totalOutputSgst - noteAdj.outSgst;
     const netOutIgst = totalOutputIgst - noteAdj.outIgst;
@@ -905,7 +948,7 @@ const Accounting = ({
     });
     const hsnSummary = Object.values(hsnMap).sort((a, b) => a.hsn.localeCompare(b.hsn));
 
-    return { gstr1, gstr2, gstr3b, hsnSummary };
+    return { gstr1, gstr2, gstr3b, hsnSummary, gstNotes };
   }, [taxInvoices, purchaseInvoices, projects, clients, fyFilter, orgGstin, manualJournalEntries]);
 
   // ── Excel Export ──
