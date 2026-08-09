@@ -104,8 +104,24 @@ async function backupCollection(name) {
   console.log(`    output: ${DRY_RUN ? '(dry-run, no files written)' : outDir}`);
   console.log('');
 
+  // Discover collections LIVE rather than trusting the hardcoded list. A static
+  // list silently drifts as the schema grows: a real dump taken from it was
+  // missing 17 collections, including project_financials (every project's money,
+  // moved there by the field-split scrub), chart_of_accounts, inventory_financials
+  // and all of payroll — i.e. it could not have restored the books. COLLECTIONS is
+  // kept only as a floor, so a collection that is momentarily empty still gets a file.
+  let discovered = [];
+  try {
+    discovered = (await db.doc(basePath.join('/')).listCollections()).map((c) => c.id);
+  } catch (err) {
+    console.warn(`⚠️  Could not enumerate collections (${err.message}); falling back to the static list.`);
+  }
+  const targets = [...new Set([...COLLECTIONS, ...discovered])].sort();
+  const extra = discovered.filter((c) => !COLLECTIONS.includes(c));
+  if (extra.length) console.log(`    discovered ${extra.length} collection(s) beyond the static list: ${extra.join(', ')}\n`);
+
   let total = 0;
-  for (const col of COLLECTIONS) {
+  for (const col of targets) {
     try {
       total += await backupCollection(col);
     } catch (err) {
