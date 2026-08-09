@@ -10,7 +10,7 @@ import {
   doc, updateDoc, deleteDoc, addDoc, collection, serverTimestamp, getDoc, setDoc
 } from 'firebase/firestore';
 import { Modal, ConfirmDeleteModal, GSTINField } from '../components/Shared';
-import { formatCurrency, validateGSTIN, getProjectGrandTotal, getProjectGST, getEffectivePOCost, toNum, getFYFromDate, generateSecureToken, isProjectInvoiced, publicLink } from '../utils/helpers';
+import { formatCurrency, validateGSTIN, getProjectGrandTotal, getProjectGST, getEffectivePOCost, getVendorBilled, toNum, getFYFromDate, generateSecureToken, isProjectInvoiced, publicLink } from '../utils/helpers';
 import { GST_STATE_CODES, CATEGORIES } from '../utils/constants';
 import { can } from '../utils/permissions';
 import { upsertPartyAccount } from '../utils/partyAccounts';
@@ -171,23 +171,48 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       }))
     ) : [];
 
-    // Total job value (tax_amount = amount with GST)
-    const totalJobValue = vendorAllocations.reduce((s, a) => s + (parseFloat(a.tax_amount || a.amount) || 0), 0);
-    const totalJobBase  = vendorAllocations.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+    // Total job value — ONE canonical basis, shared with the project P&L and the
+    // books: active POs at their effective cost (vendor invoice when Accepted/
+    // Verified, else the committed PO cost) PLUS only those allocations not yet
+    // linked to a PO. Summing raw allocations (the old behaviour) showed a zero
+    // balance for a vendor who had a PO but no allocation, and kept showing the
+    // stale allocation price after a PO renegotiated it.
+    const vendorBranchMatch = isBranchView
+      ? ((row, p) => (row.party_company_id || p.party_company_id || 'primary') === branchId)
+      : null;
+    const vendorBilled = isVendor ? getVendorBilled(projects, cid, vendorBranchMatch) : { total: 0, base: 0 };
+    const totalJobValue = vendorBilled.total;
+    const totalJobBase = vendorBilled.base;
 
     // Payments made to this vendor
     const vendorPmts = isVendor ? vendorPayments.filter(vp => vp.vendor_id === cid && (!isBranchView || ((vp.party_company_id || projects.find(pr => pr.id === vp.project_id)?.party_company_id || 'primary') === branchId))) : [];
-    const vendorPaid = vendorPmts.reduce((s, vp) => s + (parseFloat(vp.amount) || 0), 0);
+    const vendorPaid = vendorPmts.reduce((s, vp) => s + toNum(vp.amount), 0);
     const vendorBalance = totalJobValue - vendorPaid;
 
-    // Per-project breakdown
+    // Per-project breakdown — built on the SAME basis as totalJobValue above, so the
+    // sub-rows always sum to the headline. (Summing allocations here while the KPI
+    // counted POs would have left the two silently disagreeing on one screen.)
     const vendorProjectMap = {};
-    vendorAllocations.forEach(a => {
-      const key = a.project_id;
-      if (!vendorProjectMap[key]) vendorProjectMap[key] = { project_name: a.project_name, project_status: a.project_status, project_start: a.project_start, jobValue: 0, items: [] };
-      vendorProjectMap[key].jobValue += parseFloat(a.tax_amount || a.amount) || 0;
-      vendorProjectMap[key].items.push(a);
-    });
+    if (isVendor) {
+      (projects || []).forEach((p) => {
+        if (!p) return;
+        const add = (row, total, label) => {
+          if (!vendorProjectMap[p.id]) vendorProjectMap[p.id] = { project_name: p.project_name, project_status: p.status, project_start: p.start_date, jobValue: 0, items: [] };
+          vendorProjectMap[p.id].jobValue += total;
+          vendorProjectMap[p.id].items.push({ ...row, total, label });
+        };
+        (p.purchase_orders || []).forEach((po) => {
+          if (!po || po.vendor_id !== cid || po.status === 'Cancelled') return;
+          if (vendorBranchMatch && !vendorBranchMatch(po, p)) return;
+          add(po, toNum(getEffectivePOCost(po).total), po.po_no ? `PO ${po.po_no}` : 'Purchase Order');
+        });
+        (p.vendor_allocations || []).forEach((a) => {
+          if (!a || a.vendor_id !== cid || a.po_id) return; // PO-linked → counted above
+          if (vendorBranchMatch && !vendorBranchMatch(a, p)) return;
+          add(a, toNum(a.tax_amount != null ? a.tax_amount : a.amount), a.description || a.item_name || 'Service');
+        });
+      });
+    }
     const vendorByProject = Object.values(vendorProjectMap).sort((a, b) => new Date(b.project_start || 0) - new Date(a.project_start || 0));
 
     const branchSummaries = companyOptions.map(company => {
@@ -1757,10 +1782,10 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                             <div className="space-y-1">
                               {proj.items.map((item, ii) => (
                                 <div key={ii} className="flex items-center justify-between text-xs text-slate-500 pl-2 border-l-2 border-purple-100">
-                                  <span>{item.description || item.item_name || 'Service'}
+                                  <span>{item.label || item.description || item.item_name || 'Service'}
                                     {item.qty && item.rate ? <span className="text-slate-400 ml-1">({item.qty} × {formatCurrency(item.rate)}{item.days > 1 ? ` × ${item.days}d` : ''})</span> : ''}
                                   </span>
-                                  <span className="font-medium text-slate-600">{formatCurrency(item.tax_amount || item.amount)}</span>
+                                  <span className="font-medium text-slate-600">{formatCurrency(item.total != null ? item.total : (item.tax_amount || item.amount))}</span>
                                 </div>
                               ))}
                             </div>

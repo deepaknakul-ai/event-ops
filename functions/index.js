@@ -1484,11 +1484,33 @@ exports.getPortalData = onCall(
     const isVendor = client.type === 'Vendor' || client.type === 'Both';
     let vendor = null;
     if (isVendor) {
+      // Same canonical basis the staff dashboard and the books use (mirrors
+      // helpers.getVendorBilled / getProjectOutsourcing): ACTIVE purchase orders at
+      // their effective cost — an Accepted/Verified vendor invoice wins over the
+      // committed PO price — plus only those allocations NOT yet linked to a PO.
+      // Summing raw allocations showed a vendor ZERO owing when the job had been
+      // raised as a PO, and kept showing a stale allocation price after a PO
+      // renegotiated it, so the portal disagreed with what staff saw.
       const jobs = []; let vBilled = 0;
       for (const d of projSnap.docs) {
-        const p = await mergeProjectFin(appId, d.id, d.data()); // vendor_allocations from sibling (base scrubbed)
-        (p.vendor_allocations || []).filter((a) => a.vendor_id === cid).forEach((a) => {
-          const amt = Number(a.tax_amount || a.amount || 0);
+        const p = await mergeProjectFin(appId, d.id, d.data()); // money from the gated sibling (base scrubbed)
+        (p.purchase_orders || []).forEach((po) => {
+          if (!po || po.vendor_id !== cid || po.status === 'Cancelled') return;
+          const inv = po.vendor_invoice;
+          const useInv = inv && (inv.status === 'Accepted' || inv.status === 'Verified') && Number(inv.total_amount || 0) > 0;
+          let amt;
+          if (useInv) amt = Number(inv.total_amount || 0);
+          else if (Number(po.package_cost || 0) > 0) {
+            const base = Number(po.package_cost || 0);
+            const gst = po.gst_amount != null ? Number(po.gst_amount) : base * (Number(po.package_cost_gst ?? 0) / 100);
+            amt = base + gst;
+          } else amt = Number(po.amount || 0);
+          jobs.push({ project: p.project_name || '', item: po.po_no ? `PO ${po.po_no}` : 'Purchase Order', amount: amt });
+          vBilled += amt;
+        });
+        (p.vendor_allocations || []).forEach((a) => {
+          if (!a || a.vendor_id !== cid || a.po_id) return; // PO-linked → counted above
+          const amt = Number(a.tax_amount != null ? a.tax_amount : (a.amount || 0));
           jobs.push({ project: p.project_name || '', item: a.item_name || '', amount: amt });
           vBilled += amt;
         });

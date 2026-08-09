@@ -271,8 +271,12 @@ export const getEffectivePOCost = (po) => {
   let base = 0, gst = 0, total = 0;
   if (po.package_cost && parseFloat(po.package_cost) > 0) {
     base  = parseFloat(po.package_cost);
-    const pkgGstRate = parseFloat(po.package_cost_gst || 0);
-    gst   = parseFloat(po.gst_amount)  || base * (pkgGstRate / 100);
+    const pkgGstRate = parseFloat(po.package_cost_gst ?? 0);
+    // Honour a STORED gst_amount of 0 (a genuinely 0%/exempt PO). The old
+    // `parseFloat(po.gst_amount) || derive` treated 0 as "missing" and re-derived
+    // tax at the package rate. accounting.js getOutsourcingCost was already fixed
+    // to `!= null`; this aligns helpers with the books rather than diverging.
+    gst   = po.gst_amount != null ? parseFloat(po.gst_amount) : base * (pkgGstRate / 100);
     total = base + gst;
   } else {
     // po.amount is grand total (base + gst); po.subtotal is base; po.gst_amount is gst portion
@@ -1048,6 +1052,44 @@ export const projectOccupancyWindow = (project) => {
   if (!startCandidates.length || !endKey) return null;
   const startKey = startCandidates.sort()[0]; // earliest of setup/start
   return { start: startKey, end: endKey < startKey ? startKey : endKey };
+};
+
+/**
+ * What a VENDOR has billed us, on the SAME basis the project P&L and the books use.
+ *
+ * The vendor dashboard and the client portal previously summed raw
+ * `vendor_allocations` only, ignoring purchase orders entirely — so a vendor with a
+ * PO but no allocation showed a zero balance while the books carried a real payable,
+ * and an allocation converted to a PO at a renegotiated price showed the OLD
+ * allocation figure. This mirrors getProjectOutsourcing's precedence exactly:
+ * active POs at their effective cost (vendor invoice when Accepted/Verified, else
+ * the committed PO cost), plus only those allocations NOT yet linked to a PO.
+ *
+ * @param {object[]} projects
+ * @param {string} vendorId
+ * @param {(row:object, project:object)=>boolean} [matches] optional extra filter (e.g. branch scoping)
+ * @returns {{ total:number, base:number }} total = incl GST, base = taxable
+ */
+export const getVendorBilled = (projects = [], vendorId, matches = null) => {
+  let total = 0;
+  let base = 0;
+  (projects || []).forEach((p) => {
+    if (!p) return;
+    (p.purchase_orders || []).forEach((po) => {
+      if (!po || po.vendor_id !== vendorId || po.status === 'Cancelled') return;
+      if (matches && !matches(po, p)) return;
+      const c = getEffectivePOCost(po);
+      total += toNum(c.total);
+      base += toNum(c.base);
+    });
+    (p.vendor_allocations || []).forEach((a) => {
+      if (!a || a.vendor_id !== vendorId || a.po_id) return; // PO-linked → counted above
+      if (matches && !matches(a, p)) return;
+      total += toNum(a.tax_amount != null ? a.tax_amount : a.amount);
+      base += toNum(a.amount);
+    });
+  });
+  return { total: round2(total), base: round2(base) };
 };
 
 /** Total outsourcing cost for a project (active POs by effective cost + unlinked
