@@ -34,7 +34,7 @@ import {
   FileText,
   Search,
 } from 'lucide-react';
-import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced } from '../utils/helpers';
+import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced, isActiveTaxInvoice } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { computeFyRolloverRows } from '../utils/fyRollover';
 import { resolvePurchaseGst, resolvePurchaseSupplyType } from '../utils/gstSupply';
@@ -371,7 +371,7 @@ const Accounting = ({
     // consumer — the stacked bars, the Excel export, booksAudit — is untouched.
     const dueByRef = new Map();
     (taxInvoices || []).forEach((inv) => {
-      if (inv && inv.invoice_no && inv.due_date && inv.status !== 'Cancelled') dueByRef.set(String(inv.invoice_no), inv.due_date);
+      if (inv && inv.invoice_no && inv.due_date && isActiveTaxInvoice(inv.status)) dueByRef.set(String(inv.invoice_no), inv.due_date);
     });
     const parseTermDays = (terms) => {
       const m = /(\d+)/.exec(String(terms || ''));
@@ -760,7 +760,7 @@ const Accounting = ({
     // No project-derived rows: a tax invoice already covers its project(s), so
     // re-adding "Project Invoice" rows double-counted output tax (~2x).
     taxInvoices
-      .filter((inv) => inv.status !== 'Cancelled' && inFY(inv.invoice_date))
+      .filter((inv) => isActiveTaxInvoice(inv.status) && inFY(inv.invoice_date))
       .forEach((inv) => {
         const client = clientById[inv.client_id];
         const isIGST = (inv.supply_type || '') === 'IGST';
@@ -920,7 +920,7 @@ const Accounting = ({
     // Sales HSN — iterate the invoice's project_ids (array); the old code read the
     // singular inv.project_id, which modern invoices never set → the HSN sales table
     // was always blank. Cancelled excluded.
-    taxInvoices.filter(inv => inv.status !== 'Cancelled' && inFY(inv.invoice_date)).forEach((inv) => {
+    taxInvoices.filter(inv => isActiveTaxInvoice(inv.status) && inFY(inv.invoice_date)).forEach((inv) => {
       const ids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
       ids.forEach((pid) => {
         const proj = projects.find(p => p.id === pid);

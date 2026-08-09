@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectInvoiceReference, isProjectInvoiced, publicAppId, isActiveTaxInvoice } from '../utils/helpers';
 import { getOutsourcingCost } from '../utils/accounting';
 import { LoadingSpinner } from '../components/Shared';
 import { FileText, X, ChevronDown, ChevronUp, Receipt, ChevronRight, Image as ImageIcon, Eye } from 'lucide-react';
@@ -106,7 +106,7 @@ const PublicLedger = () => {
       // amount and SUPERSEDES the per-project quote(s) it covers — so a clubbed
       // invoice shows as ONE line, not N quote lines. Only completed/closed
       // projects NOT yet covered by any invoice show as an "unbilled" quote.
-      const activeClientInvoices = (taxInvoices || []).filter(inv => inv.status !== 'Cancelled');
+      const activeClientInvoices = (taxInvoices || []).filter(inv => isActiveTaxInvoice(inv.status));
       const invoicedPids = new Set();
       activeClientInvoices.forEach(inv => {
         const pids = Array.isArray(inv.project_ids) ? inv.project_ids : (inv.project_id ? [inv.project_id] : []);
@@ -380,7 +380,7 @@ const PublicLedger = () => {
 
     // (b) raised tax invoices (module-raised, with project linkage)
     (taxInvoices || [])
-      .filter(inv => inv.status !== 'Cancelled' && inv.invoice_no && String(inv.invoice_no).trim())
+      .filter(inv => isActiveTaxInvoice(inv.status) && inv.invoice_no && String(inv.invoice_no).trim())
       .forEach(inv => {
         const grp = ensure(String(inv.invoice_no).trim());
         grp.invoice_date = inv.invoice_date || grp.invoice_date;

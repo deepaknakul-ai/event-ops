@@ -8,7 +8,7 @@ import { FileText, Mail, MessageCircle, TrendingUp, AlertCircle } from 'lucide-r
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from '@e965/xlsx';
-import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2, isProjectInvoiced, sumLogisticsRecord } from '../utils/helpers';
+import { formatCurrency, getProjectGrandTotal, getProjectGST, getFinancialYear, getEffectivePOCost, getProjectGSTBreakdown, getGSTR1Category, fmtDate, round2, isProjectInvoiced, sumLogisticsRecord, isActiveTaxInvoice } from '../utils/helpers';
 import { GST_STATE_CODES } from '../utils/constants';
 import { buildAccountingSnapshot } from '../utils/accounting';
 import { purchaseGstSplit } from '../utils/aiAccountant';
@@ -917,7 +917,7 @@ const Reports = ({
 
       // Output GST from issued tax invoices (tax point = invoice_date, not project end_date).
       taxInvoices
-        .filter(inv => inv.status !== 'Cancelled' && inv.invoice_date)
+        .filter(inv => isActiveTaxInvoice(inv.status) && inv.invoice_date)
         .forEach(inv => {
           const date = new Date(inv.invoice_date);
           if (s && date < s) return;
@@ -1077,7 +1077,7 @@ const Reports = ({
 
       return taxInvoices
         .filter(inv => {
-          if (inv.status === 'Cancelled') return false;
+          if (!isActiveTaxInvoice(inv.status)) return false;
           if (!inv.invoice_date) return false;
           const d = new Date(inv.invoice_date);
           if (s && d < s) return false;

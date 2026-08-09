@@ -43,6 +43,26 @@ export const getProjectInvoiceReference = (project) => {
 // M-8 fix: round to paise to prevent float drift between line totals and grand total.
 export const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 
+/**
+ * Is this tax invoice live (i.e. should it count as billed)?
+ *
+ * THE SINGLE PREDICATE. There were eight divergent re-implementations, and two of
+ * them were broken: the server compared `(status || 'active') !== 'cancelled'`
+ * while TaxInvoices.jsx writes `status: 'Cancelled'` (capital C), so
+ * `'Cancelled' !== 'cancelled'` is TRUE and a cancelled invoice stayed "live" —
+ * it kept showing in the client portal and kept generating payment reminders.
+ * The client-side checks compared `!== 'Cancelled'` exactly, which is
+ * case-sensitive and blind to voided / void / rejected.
+ *
+ * Semantics match the books' ACTIVE_TAX_INVOICE_STATUSES (src/utils/accounting.js
+ * and its functions/books-digest.cjs mirror), which are kept identical to this.
+ * An absent status means active — legacy invoices predate the field.
+ */
+export const isActiveTaxInvoice = (status) => {
+  const v = String(status || '').trim().toLowerCase();
+  return v !== 'cancelled' && v !== 'voided' && v !== 'void' && v !== 'rejected';
+};
+
 // Money coercion for reduce/accumulator legs. Legacy + imported docs can carry a
 // STRING amount/total; `acc + '11800'` silently string-concatenates and corrupts
 // every downstream figure (grand total, margin, referral commission). Tolerant by

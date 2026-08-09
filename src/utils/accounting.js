@@ -479,7 +479,10 @@ export const buildAccountingSnapshot = ({
 
   // C-5 fix: exclude Cancelled / Voided tax invoices from sales book
   const ACTIVE_TAX_INVOICE_STATUSES = (s) => {
-    const v = String(s || '').toLowerCase();
+    // .trim() keeps this byte-identical to helpers.isActiveTaxInvoice, the single
+    // predicate every other surface now uses. Verified a no-op on live data (no
+    // padded status values exist); it only hardens against ' Cancelled '.
+    const v = String(s || '').trim().toLowerCase();
     return v !== 'cancelled' && v !== 'voided' && v !== 'void' && v !== 'rejected';
   };
 
