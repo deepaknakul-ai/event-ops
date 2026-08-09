@@ -48,6 +48,32 @@ const MIGRATIONS = [
     scrub: { fn: 'scrubEmployeeEmbeddedPay', msg: 'SCRUB pay from the base employee docs. Only affects employees already mirrored to employee_pay. Run AFTER Backfill + confirming pay still displays for Owner/Accountant. Proceed?', fmt: (d) => `Scrubbed ${d.scrubbed ?? 0} employee(s); ${d.skipped ?? 0} skipped (no sibling yet).` } },
 ];
 
+// Storage-SDK error codes that mean "the request never reached Google" rather
+// than "this object is a problem". An ad/tracking blocker cancelling the XHR
+// (net::ERR_BLOCKED_BY_CLIENT) surfaces as retry-limit-exceeded after the SDK
+// exhausts its retry window; unknown covers the raw network failure.
+const STORAGE_NETWORK_CODES = new Set(['storage/retry-limit-exceeded', 'storage/unknown']);
+
+const b64ToBytes = (b64) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+// Pull one file through the adminReadStorageFile callable, chunk by chunk.
+const readFileViaServer = async (readCall, appId, path) => {
+  const parts = [];
+  let offset = 0;
+  for (;;) {
+    const res = (await readCall({ appId, path, offset })).data;
+    if (res.b64) parts.push(b64ToBytes(res.b64));
+    offset += res.bytes || 0;
+    if (res.eof || !res.bytes) break;
+  }
+  return new Blob(parts);
+};
+
 const AdminTools = ({ db, appId, logAction, role }) => {
   // NOTE: the access-restricted return lives BELOW the hooks (rules-of-hooks —
   // an early return above useState/useEffect breaks hook ordering). The fetch
@@ -382,7 +408,8 @@ const AdminTools = ({ db, appId, logAction, role }) => {
   // The JSON backup covers Firestore only; uploaded files (expense proofs,
   // PI scans, chat attachments, draft attachments) live in Storage. The
   // adminListStorage callable produces the manifest; the files themselves
-  // download through the Storage SDK and pack into a zip alongside it.
+  // download through the Storage SDK — or, where a browser extension blocks
+  // that, through adminReadStorageFile — and pack into a zip alongside it.
 
   const handleStorageBackup = async () => {
     setStorageBackupStatus('loading');
@@ -408,20 +435,48 @@ const AdminTools = ({ db, appId, logAction, role }) => {
         exported_at: new Date().toISOString(), app_id: appId, bucket: plan.bucket,
         other_files_outside_prefixes: plan.otherFiles || 0, files: manifest,
       }, null, 2));
+      const readCall = httpsCallable(getFunctions(), 'adminReadStorageFile', { timeout: 180000 });
       let done = 0;
+      let viaServer = false;
       const failed = [];
-      for (const f of manifest) {
-        try {
-          const blob = await getBlob(ref(storage, f.path));
-          zip.file(f.path, blob);
-        } catch (err) {
-          failed.push(f.path);
-          console.error('Storage backup: download failed', f.path, err);
+      // Ad/tracking blockers cancel the direct requests to
+      // firebasestorage.googleapis.com, and the SDK's default two-minute retry
+      // window would then be spent per file before we ever learn that. Fail
+      // fast, and once a network-level refusal appears treat it as permanent —
+      // a blocker rejects every file alike — so the rest of the run goes
+      // straight through the server without re-paying that wait.
+      const prevRetryMs = storage.maxOperationRetryTime;
+      storage.maxOperationRetryTime = 12000;
+      try {
+        for (const f of manifest) {
+          try {
+            let fileBlob = null;
+            if (!viaServer) {
+              try {
+                fileBlob = await getBlob(ref(storage, f.path));
+              } catch (err) {
+                if (STORAGE_NETWORK_CODES.has(err?.code)) {
+                  viaServer = true;
+                  setStorageBackupProgress('Direct downloads blocked by this browser — routing through the server…');
+                }
+                console.warn('Storage backup: direct download failed, retrying server-side', f.path, err);
+              }
+            }
+            // Also the retry for a one-off direct failure: the Admin SDK reads
+            // the object regardless of what stopped the browser.
+            if (!fileBlob) fileBlob = await readFileViaServer(readCall, appId, f.path);
+            zip.file(f.path, fileBlob);
+          } catch (err) {
+            failed.push(f.path);
+            console.error('Storage backup: download failed', f.path, err);
+          }
+          done += 1;
+          if (done % 5 === 0 || done === manifest.length) {
+            setStorageBackupProgress(`Downloading ${done}/${manifest.length} files (${totalMB.toFixed(1)} MB total)…`);
+          }
         }
-        done += 1;
-        if (done % 5 === 0 || done === manifest.length) {
-          setStorageBackupProgress(`Downloading ${done}/${manifest.length} files (${totalMB.toFixed(1)} MB total)…`);
-        }
+      } finally {
+        storage.maxOperationRetryTime = prevRetryMs;
       }
       setStorageBackupProgress('Compressing…');
       const blob = await zip.generateAsync({ type: 'blob' });
@@ -437,9 +492,10 @@ const AdminTools = ({ db, appId, logAction, role }) => {
       if (failed.length) setStorageBackupError(`${failed.length} file(s) failed to download and are missing from the zip.`);
       setStorageBackupProgress(
         `${manifest.length - failed.length} files, ${(blob.size / 1048576).toFixed(1)} MB` +
+        (viaServer ? ' — a browser extension blocked direct downloads, so these came through the server' : '') +
         (plan.otherFiles ? ` — ${plan.otherFiles} file(s) outside known app prefixes NOT included` : ''),
       );
-      logAction('admin', 'backup', 'storage', { files: manifest.length, failed: failed.length }, 'Storage Backup');
+      logAction('admin', 'backup', 'storage', { files: manifest.length, failed: failed.length, via: viaServer ? 'server' : 'direct' }, 'Storage Backup');
     } catch (error) {
       console.error(error);
       setStorageBackupStatus('error');
