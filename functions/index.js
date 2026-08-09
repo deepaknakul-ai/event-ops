@@ -1375,7 +1375,7 @@ async function processDueReminders(appId, today) {
     db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
   ]);
   const org = (orgSnap && orgSnap.exists) ? orgSnap.data() : {};
-  const invoices = invSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => (i.status || 'active') !== 'cancelled');
+  const invoices = invSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((i) => isActiveTaxInvoice(i.status));
   const clients = {}; cliSnap.forEach((d) => { clients[d.id] = d.data(); });
 
   const byClient = {};
@@ -1448,6 +1448,17 @@ exports.runDueRemindersNow = onCall(
 // Validates a client/vendor portal_token server-side and returns ONLY that
 // party's scoped data via the Admin SDK, so the public portal page needs no
 // Firestore access or auth.
+// Is this tax invoice live? MIRRORS helpers.isActiveTaxInvoice and the books'
+// ACTIVE_TAX_INVOICE_STATUSES exactly (functions/ is CommonJS and cannot import the
+// ESM helper). The previous inline checks were `(i.status || 'active') !== 'cancelled'`
+// which NEVER matched the 'Cancelled' that TaxInvoices.jsx actually writes, so a
+// cancelled invoice kept showing in the client portal and kept generating payment
+// reminders. Absent status = active (legacy invoices predate the field).
+const isActiveTaxInvoice = (status) => {
+  const v = String(status || '').trim().toLowerCase();
+  return v !== 'cancelled' && v !== 'voided' && v !== 'void' && v !== 'rejected';
+};
+
 exports.getPortalData = onCall(
   { region: 'us-central1', memory: '256MiB', timeoutSeconds: 30 },
   async (req) => {
@@ -1472,7 +1483,7 @@ exports.getPortalData = onCall(
     const projects = projSnap.docs
       .map((d) => { const p = d.data(); return { id: d.id, name: p.project_name || '', status: p.status || '', start_date: p.start_date || '', end_date: p.end_date || '', venue: p.venue || '', invoice_status: p.invoice_status || '', quote_status: p.quote_status || '' }; })
       .sort((a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0));
-    const invoices = invSnap.docs.map((d) => d.data()).filter((i) => (i.status || 'active') !== 'cancelled')
+    const invoices = invSnap.docs.map((d) => d.data()).filter((i) => isActiveTaxInvoice(i.status))
       .map((i) => ({ invoice_no: i.invoice_no || '', date: i.invoice_date || '', amount: Number(i.final_amount || 0) }))
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
     const payments = paySnap.docs.map((d) => d.data())
@@ -2776,6 +2787,47 @@ exports.adminListStorage = onCall(
         updated: f.metadata.updated || '',
       })),
       nextPageToken: (nextQuery && nextQuery.pageToken) || null,
+    };
+  },
+);
+
+// Server-side read of one file, in ranges. The client's fast path is a direct
+// download from firebasestorage.googleapis.com, but browser ad/tracking
+// blockers cancel those requests outright (net::ERR_BLOCKED_BY_CLIENT) and the
+// Storage SDK then burns its two-minute retry window on every file before
+// giving up — a backup that silently comes back empty. The callable channel
+// this page already uses is left alone by those blockers, so the backup falls
+// back to here. Ranged so one response never approaches the callable payload
+// ceiling however large the file is.
+const STORAGE_READ_CHUNK = 3 * 1024 * 1024; // ≈4 MB once base64-encoded
+
+exports.adminReadStorageFile = onCall(
+  { region: 'us-central1', memory: '512MiB', timeoutSeconds: 300 },
+  async (req) => {
+    const { appId, path, offset } = req.data || {};
+    await assertAdmin(req.auth, appId);
+    if (typeof path !== 'string' || !path) {
+      throw new HttpsError('invalid-argument', 'path required');
+    }
+    // Tenant scoping: assertAdmin proves admin OF THIS WORKSPACE, so the path
+    // must sit under this workspace's prefixes — otherwise one tenant's admin
+    // could read another's uploads by hand-crafting a path.
+    if (!storagePrefixes(appId).some((p) => path.startsWith(p))) {
+      throw new HttpsError('permission-denied', 'Path is outside this workspace');
+    }
+    const start = Math.max(0, parseInt(offset, 10) || 0);
+    const file = admin.storage().bucket().file(path);
+    const [meta] = await file.getMetadata();
+    const size = Number(meta.size || 0);
+    if (start >= size) return { size, offset: start, bytes: 0, eof: true, b64: '' };
+    const end = Math.min(size, start + STORAGE_READ_CHUNK) - 1;
+    const [buf] = await file.download({ start, end });
+    return {
+      size,
+      offset: start,
+      bytes: buf.length,
+      eof: start + buf.length >= size,
+      b64: buf.toString('base64'),
     };
   },
 );
