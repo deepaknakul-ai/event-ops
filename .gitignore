@@ -45,3 +45,8 @@ database-debug.log
 
 # Local Anthropic key for functions/llm-eval.cjs (never commit)
 functions/.eval-key*
+
+# Firestore data dumps from scripts/backup-firestore.cjs — these contain LIVE
+# production data (clients, employees, payroll, audit logs). Never commit them.
+firestore-backup-*/
+firestore-backup-*.json
