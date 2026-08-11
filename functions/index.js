@@ -42,6 +42,7 @@ const {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
+  foldPartyLedgerAdjustments,
   selectVendorProjectPOs,
   projectSharedReimbursables,
   groupClientSharedExpenses,
@@ -1511,12 +1512,21 @@ exports.getPortalData = onCall(
     if (client.portal_token_expiry && new Date(client.portal_token_expiry) < new Date()) {
       throw new HttpsError('permission-denied', 'This link has expired. Please request a new one.');
     }
-    const [projSnap, invSnap, paySnap, orgSnap, vpaySnap] = await Promise.all([
+    const [projSnap, invSnap, paySnap, orgSnap, vpaySnap, jeSnap, paSnap, obSnap] = await Promise.all([
       db.collection(`artifacts/${appId}/public/data/projects`).where('client_id', '==', cid).get(),
       db.collection(`artifacts/${appId}/public/data/tax_invoices`).where('client_id', '==', cid).get(),
       db.collection(`artifacts/${appId}/public/data/payments`).where('client_id', '==', cid).get(),
       db.doc(`artifacts/${appId}/public/data/settings/organization`).get().catch(() => null),
       db.collection(`artifacts/${appId}/public/data/vendor_payments`).where('vendor_id', '==', cid).get().catch(() => ({ docs: [] })),
+      // Party-leg JVs / credit notes / debit notes / TDS + the opening-balance
+      // mirror. The public LEDGER already folds these in (getLedgerData below), so
+      // omitting them here left the portal disagreeing with the ledger for the same
+      // client — e.g. a ₹2,00,000 receipt booked as a journal voucher rather than a
+      // payment kept the portal 2 lakh too high. No party field to query journal
+      // entries on, so read all and filter by leg name (same as getLedgerData).
+      db.collection(`artifacts/${appId}/public/data/journal_entries`).get().catch(() => ({ docs: [] })),
+      db.doc(`artifacts/${appId}/public/data/party_accounts/${cid}`).get().catch(() => null),
+      db.doc(`artifacts/${appId}/public/data/opening_balances/clientob_${cid}`).get().catch(() => null),
     ]);
     const org = (orgSnap && orgSnap.exists) ? orgSnap.data() : {};
     const projects = projSnap.docs
@@ -1549,8 +1559,27 @@ exports.getPortalData = onCall(
     const invoices = buildClientInvoiceList(billingRows)
       .map((i) => ({ invoice_no: i.invoice_no, date: i.date || '', amount: i.amount, projects: i.projects }));
     const totals = summariseClientBilling(billingRows, payments);
-    const billed = totals.billed;
-    const received = totals.received;
+
+    // Fold in the party's journal legs + opening balance exactly as the ledger
+    // does, so `outstanding` equals the ledger's closing balance. Only the party's
+    // OWN leg is projected (projectPartyJournalRows) — the contra account never
+    // leaves the server — and cancelled vouchers are dropped.
+    const nameSet = partyLegNameSet(client, (paSnap && paSnap.exists) ? paSnap.data() : null);
+    const journalRows = projectPartyJournalRows(
+      (jeSnap.docs || []).map((d) => ({ id: d.id, ...d.data() })), nameSet);
+    const openingBalance = projectOpeningBalance((obSnap && obSnap.exists) ? obSnap.data() : null);
+
+    const folded = foldPartyLedgerAdjustments({
+      billed: totals.billed,
+      received: totals.received,
+      journalRows,
+      openingBalance,
+    });
+    if (folded.creditRows.length) {
+      payments.push(...folded.creditRows);
+      payments.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+    }
+    const { billed, received } = folded;
 
     const isVendor = client.type === 'Vendor' || client.type === 'Both';
     let vendor = null;
@@ -1596,13 +1625,16 @@ exports.getPortalData = onCall(
       isVendor,
       // invoiced / unbilled / reimbursable are the same total split three ways, so a
       // caller can show "delivered, awaiting invoice" separately without recomputing.
+      // adjustments carries the journal / opening-balance legs already inside
+      // billed + received, so nothing is folded in invisibly.
       summary: {
         billed,
         received,
-        outstanding: totals.outstanding,
+        outstanding: folded.outstanding,
         invoiced: totals.invoiced,
         unbilled: totals.unbilled,
         reimbursable: totals.reimbursable,
+        adjustments: folded.adjustments,
         projectCount: projects.length,
       },
       projects, invoices, payments, vendor,

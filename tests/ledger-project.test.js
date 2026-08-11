@@ -3,6 +3,7 @@ import {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
+  foldPartyLedgerAdjustments,
   selectVendorProjectPOs,
   projectSharedExpenses,
   projectSharedReimbursables,
@@ -271,5 +272,102 @@ describe('groupClientSharedExpenses', () => {
     expect(groupClientSharedExpenses(docs, ['pA'])).toHaveProperty('pA');
     expect(groupClientSharedExpenses([], CLIENT_PIDS)).toEqual({});
     expect(groupClientSharedExpenses(null, null)).toEqual({});
+  });
+});
+
+// The client PORTAL previously summed only invoices and the `payments` collection,
+// while the client LEDGER also folds in party-leg journal vouchers and the opening
+// balance. Same client, same day, two different balances: a ₹2,00,000 receipt
+// booked as a JV instead of a payment left the portal 2 lakh too high, and a Cr
+// opening balance did the same. foldPartyLedgerAdjustments is what closes that.
+describe('foldPartyLedgerAdjustments', () => {
+  const jvCredit = { id: 'j1', date: '2026-06-12', voucher_no: 'JV-0010-2026-27', narration: 'Payment received', source: 'chat_entry', debit: 0, credit: 200000 };
+
+  it('is a no-op when the party has no journal legs and no opening balance', () => {
+    const r = foldPartyLedgerAdjustments({ billed: 7050426.25, received: 3930000 });
+    expect(r).toMatchObject({ billed: 7050426.25, received: 3930000, outstanding: 3120426.25 });
+    expect(r.creditRows).toEqual([]);
+    expect(r.adjustments).toMatchObject({ debit: 0, credit: 0, entries: 0, opening_balance: false });
+  });
+
+  it('folds a JV receipt into received — the real SANJEEV CHOPRA case', () => {
+    const r = foldPartyLedgerAdjustments({ billed: 7050426.25, received: 3930000, journalRows: [jvCredit] });
+    expect(r.received).toBe(4130000);
+    expect(r.outstanding).toBe(2920426.25); // was 31,20,426.25 before the fold
+    expect(r.billed).toBe(7050426.25);      // billed is untouched by a credit
+  });
+
+  it('lists the credit so `received` ties to the rows shown beneath it', () => {
+    const r = foldPartyLedgerAdjustments({ billed: 100000, received: 0, journalRows: [jvCredit] });
+    expect(r.creditRows).toEqual([
+      { date: '2026-06-12', amount: 200000, mode: 'Journal Voucher', ref: 'JV-0010-2026-27' },
+    ]);
+    expect(r.creditRows.reduce((s, x) => s + x.amount, 0)).toBe(r.adjustments.credit);
+  });
+
+  it('labels each voucher type the way the ledger page does', () => {
+    const rows = [
+      { id: 'a', date: '2026-01-01', voucher_no: 'CN-1', source: 'credit_note', debit: 0, credit: 100 },
+      { id: 'b', date: '2026-01-02', voucher_no: 'TD-1', source: 'tds_entry', debit: 0, credit: 200 },
+      { id: 'c', date: '2026-01-03', voucher_no: 'JV-1', source: 'manual_journal', debit: 0, credit: 300 },
+    ];
+    expect(foldPartyLedgerAdjustments({ journalRows: rows }).creditRows.map((r) => r.mode))
+      .toEqual(['Credit Note', 'TDS', 'Journal Voucher']);
+  });
+
+  it('a debit note increases billed and is NOT listed as a payment', () => {
+    const dn = { id: 'd', date: '2026-05-01', voucher_no: 'DN-1', source: 'debit_note', debit: 15000, credit: 0 };
+    const r = foldPartyLedgerAdjustments({ billed: 100000, received: 0, journalRows: [dn] });
+    expect(r.billed).toBe(115000);
+    expect(r.outstanding).toBe(115000);
+    expect(r.creditRows).toEqual([]); // a debit note is not money in
+    expect(r.adjustments.debit).toBe(15000);
+  });
+
+  it('nets a voucher that both debits and credits the same party', () => {
+    const both = { id: 'e', date: '2026-05-01', voucher_no: 'JV-9', source: 'manual_journal', debit: 55000, credit: 55000 };
+    const r = foldPartyLedgerAdjustments({ billed: 100000, received: 0, journalRows: [both] });
+    expect(r.outstanding).toBe(100000); // nets out, as the production 55,000 pairs do
+  });
+
+  it('applies a Cr opening balance — the real NEERAJ KALKAJI case', () => {
+    const ob = projectOpeningBalance({ amount: 36000, side: 'Cr', date: '2026-04-01', remarks: 'Opening balance for NEERAJ KALKAJI' });
+    const r = foldPartyLedgerAdjustments({ billed: 11800, received: 0, openingBalance: ob });
+    expect(r.outstanding).toBe(-24200); // a genuine credit balance, not an error
+    expect(r.creditRows[0]).toMatchObject({ mode: 'Opening Balance', amount: 36000 });
+    expect(r.adjustments.opening_balance).toBe(true);
+  });
+
+  it('applies a Dr opening balance to billed', () => {
+    const ob = projectOpeningBalance({ amount: 50000, side: 'Dr', date: '2026-04-01' });
+    const r = foldPartyLedgerAdjustments({ billed: 10000, received: 0, openingBalance: ob });
+    expect(r.billed).toBe(60000);
+    expect(r.creditRows).toEqual([]);
+  });
+
+  it('combines an opening balance with several vouchers, ordered OB first', () => {
+    const ob = projectOpeningBalance({ amount: 5000, side: 'Cr', date: '2026-04-01' });
+    const r = foldPartyLedgerAdjustments({
+      billed: 100000, received: 20000, openingBalance: ob,
+      journalRows: [jvCredit, { id: 'x', date: '2026-07-01', voucher_no: 'DN-2', source: 'debit_note', debit: 1000, credit: 0 }],
+    });
+    expect(r.billed).toBe(101000);
+    expect(r.received).toBe(225000);
+    expect(r.outstanding).toBe(-124000);
+    expect(r.creditRows.map((x) => x.mode)).toEqual(['Opening Balance', 'Journal Voucher']);
+    expect(r.adjustments).toMatchObject({ debit: 1000, credit: 205000, entries: 2, opening_balance: true });
+  });
+
+  it('survives junk input without throwing', () => {
+    expect(foldPartyLedgerAdjustments()).toMatchObject({ billed: 0, received: 0, outstanding: 0 });
+    expect(foldPartyLedgerAdjustments({ journalRows: null, openingBalance: null }).outstanding).toBe(0);
+    expect(foldPartyLedgerAdjustments({ billed: 100, journalRows: [null, undefined] }).outstanding).toBe(100);
+  });
+
+  it('rounds to paise rather than drifting', () => {
+    const r = foldPartyLedgerAdjustments({
+      billed: 0.1, received: 0, journalRows: [{ id: 'r', date: '', source: 'x', debit: 0.2, credit: 0 }],
+    });
+    expect(r.billed).toBe(0.3);
   });
 });

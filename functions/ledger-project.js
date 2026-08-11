@@ -196,10 +196,72 @@ function groupClientSharedExpenses(expenseDocs, clientPids) {
   return byPid;
 }
 
+/**
+ * Fold the party's journal legs + opening balance into a billed/received summary,
+ * so a caller's `outstanding` equals the ledger's closing balance.
+ *
+ * The public ledger folds these in; getPortalData did not, which left the portal
+ * disagreeing with the ledger for the same client on the same day — a ₹2,00,000
+ * receipt booked as a journal voucher instead of a payment kept the portal 2 lakh
+ * too high, and a credit opening balance did the same.
+ *
+ * Credits (JV credits, a Cr opening balance) reduce what is owed, so they are
+ * returned as `creditRows` for the money-in list — otherwise `received` would not
+ * tie to the rows shown beneath it. Debits are additional charges and get no list
+ * of their own (a debit note is not an invoice), so they ride in `billed` and are
+ * itemised under `adjustments`.
+ *
+ * @param {{billed?:number, received?:number, journalRows?:Array, openingBalance?:object|null}} input
+ */
+function foldPartyLedgerAdjustments({ billed = 0, received = 0, journalRows = [], openingBalance = null } = {}) {
+  const jvLabel = (src) => (src === 'credit_note' ? 'Credit Note'
+    : src === 'debit_note' ? 'Debit Note'
+      : src === 'tds_entry' ? 'TDS' : 'Journal Voucher');
+
+  const rows = Array.isArray(journalRows) ? journalRows : [];
+  const creditRows = [];
+  if (openingBalance && Number(openingBalance.credit) > 0) {
+    creditRows.push({
+      date: openingBalance.date || '',
+      amount: round2(openingBalance.credit),
+      mode: 'Opening Balance',
+      ref: openingBalance.remarks || '',
+    });
+  }
+  rows.filter((j) => j && Number(j.credit) > 0).forEach((j) => {
+    creditRows.push({
+      date: j.date || '',
+      amount: round2(j.credit),
+      mode: jvLabel(j.source),
+      ref: j.voucher_no || '',
+    });
+  });
+
+  const adjDebit = round2((openingBalance ? Number(openingBalance.debit) || 0 : 0)
+    + rows.reduce((s, j) => s + (Number(j && j.debit) || 0), 0));
+  const adjCredit = round2(creditRows.reduce((s, r) => s + r.amount, 0));
+  const outBilled = round2(Number(billed) + adjDebit);
+  const outReceived = round2(Number(received) + adjCredit);
+
+  return {
+    billed: outBilled,
+    received: outReceived,
+    outstanding: round2(outBilled - outReceived),
+    adjustments: {
+      debit: adjDebit,
+      credit: adjCredit,
+      entries: rows.length,
+      opening_balance: !!openingBalance,
+    },
+    creditRows,
+  };
+}
+
 module.exports = {
   partyLegNameSet,
   projectPartyJournalRows,
   projectOpeningBalance,
+  foldPartyLedgerAdjustments,
   selectVendorProjectPOs,
   projectSharedExpenses,
   projectSharedReimbursables,
