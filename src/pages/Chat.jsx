@@ -361,7 +361,7 @@ const Chat = ({ role = 'user', db, appId, employees = [], projects = [], current
   };
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <div className="flex h-[calc(100dvh-7rem)] overflow-hidden rounded-xl border border-slate-200 bg-white">
       {/* Sidebar */}
       <aside className={`${mobileThread ? 'hidden' : 'flex'} w-full flex-col border-r border-slate-100 md:flex md:w-72`}>
         <div className="border-b border-slate-100 p-3">

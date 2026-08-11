@@ -414,7 +414,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-slate-800">Challan Manager</h2>
-        <div className="flex gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap gap-2 w-full md:w-auto">
             <div className="flex items-center rounded border px-3 py-1 bg-white flex-1">
                 <Search size={16} className="text-slate-400 mr-2" />
                 <input placeholder="Search challans..." className="text-sm outline-none" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
@@ -425,7 +425,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-slate-700 font-semibold">
             <tr>
@@ -474,7 +474,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
 
       <Modal isOpen={isEditOpen} onClose={() => setIsEditOpen(false)} title={`Edit ${editingChallan?.type === 'return' ? 'Return' : 'Delivery'} Challan`}>
             <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div><label className="text-xs font-bold text-slate-700">Transport Mode</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={challanForm.mode} onChange={e => setChallanForm({ ...challanForm, mode: e.target.value })}><option>Road</option><option>Air</option><option>Train</option><option>Hand Carry</option></select></div>
                 <div><label className="text-xs font-bold text-slate-700">Vehicle No</label><input className="w-full rounded border border-slate-300 p-2 text-black" value={challanForm.vehicle_no} onChange={e => setChallanForm({ ...challanForm, vehicle_no: e.target.value })} placeholder="MH-01-AB-1234" /></div>
                 <div><label className="text-xs font-bold text-slate-700">Driver Name</label><input className="w-full rounded border border-slate-300 p-2 text-black" value={challanForm.driver_name} onChange={e => setChallanForm({ ...challanForm, driver_name: e.target.value })} /></div>
@@ -486,7 +486,7 @@ const ChallanManager = ({ projects, clients, inventory, db, appId, logAction, us
 
               <div className="border-t pt-4">
                 <h4 className="text-sm font-bold text-slate-700 mb-2">Select Items to Include</h4>
-                <div className="border rounded overflow-hidden">
+                <div className="border rounded overflow-x-auto">
                     <table className="w-full text-xs text-left text-slate-600">
                         <thead className="bg-slate-50 text-slate-500"><tr><th className="p-2 w-8"></th><th className="p-2">Item</th><th className="p-2 text-center">Total</th><th className="p-2 text-center">{editingChallan?.type === 'delivery' ? 'Sent' : 'Returned'}</th><th className="p-2 text-center">Avail</th><th className="p-2 w-20">Current</th></tr></thead>
                         <tbody className="divide-y divide-slate-100">

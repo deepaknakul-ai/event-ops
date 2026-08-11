@@ -21,7 +21,9 @@ export const ConfirmationModal = ({ isOpen, onClose, onConfirm, title, message }
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl animate-slide-up">
+      {/* max-h + scroll: in phone landscape (~360px tall) a long message pushed the
+          Cancel/Confirm buttons off-screen with no way to reach them. */}
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl animate-slide-up max-h-[85dvh] overflow-y-auto">
         <h3 className="text-base font-bold text-slate-900 mb-2">{title}</h3>
         <p className="text-sm text-slate-600 mb-6">{message}</p>
         <div className="flex justify-end gap-3">
@@ -45,7 +47,9 @@ export const ConfirmDeleteModal = ({ isOpen, onClose, onConfirm, title, message,
   const canConfirm = !requireTyped || typed.trim().toUpperCase() === 'DELETE';
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl bg-white shadow-2xl border border-red-200">
+      {/* max-h + scroll: keeps the type-DELETE input and the Delete button reachable
+          in phone landscape instead of falling below the fold. */}
+      <div className="w-full max-w-md rounded-xl bg-white shadow-2xl border border-red-200 max-h-[85dvh] overflow-y-auto">
         <div className="flex items-center gap-3 border-b border-red-100 px-5 py-4">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100">
             <AlertTriangle size={18} className="text-red-600" />

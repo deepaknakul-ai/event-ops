@@ -256,8 +256,8 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
 
       {/* ═══════ APPLY LEAVE MODAL ═══════ */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-1">
               {isAdminMarking ? 'Mark Leave for Employee' : 'Apply for Leave'}
             </h3>
@@ -282,7 +282,7 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
                   {LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Start Date</label>
                   <input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={form.startDate} onChange={e => setForm({ ...form, startDate: e.target.value })} />
@@ -318,8 +318,8 @@ const HRLeaves = ({ employees = [], hrLeaves = [], role, currentEmpId, db, appId
 
       {/* Detail Modal */}
       {showDetail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowDetail(null)}>
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowDetail(null)}>
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold text-slate-800 mb-4">Leave Details</h3>
             <div className="space-y-2 text-sm">
               <div><span className="text-slate-500">Employee:</span> <span className="font-medium">{getEmpName(showDetail.employeeId)}</span></div>

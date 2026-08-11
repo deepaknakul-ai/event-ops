@@ -348,10 +348,13 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
     <div className="space-y-4">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-slate-800">Inventory Manager</h2>
-        <div className="flex gap-2 w-full md:w-auto">
-          <div className="hidden md:flex items-center rounded border px-3 py-1 bg-white flex-1">
+        {/* flex-wrap: 6 controls in one non-wrapping row squeezed each to ~60px on a
+            phone. The search box was `hidden md:flex` — inventory search simply did
+            not exist on mobile. */}
+        <div className="flex flex-wrap gap-2 w-full md:w-auto">
+          <div className="flex items-center rounded border px-3 py-1 bg-white w-full md:w-auto md:flex-1">
             <Search size={16} className="text-slate-400 mr-2" />
-            <input placeholder="Search name, brand, tag..." className="text-sm outline-none text-black" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+            <input placeholder="Search name, brand, tag..." className="text-sm outline-none text-black w-full" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           </div>
           <select className="rounded border px-3 py-1 bg-white text-sm outline-none flex-1 md:flex-none" value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
             <option value="All">All Categories</option>
@@ -386,7 +389,9 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      {/* overflow-x-auto (was overflow-hidden): hidden CLIPPED the table's right
+          columns on narrow screens with no way to scroll to them. */}
+      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-slate-700 font-semibold">
             <tr>
@@ -416,6 +421,11 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                     {item.is_external && item.vendor_id && (
                         <span className="text-[10px] text-slate-500">via {clients.find(c => c.id === item.vendor_id)?.name}</span>
                     )}
+                    {/* Mobile: Brand / Category / Loc columns are hidden below md:,
+                        so surface them inline — the data was unreachable on phones. */}
+                    <span className="text-[10px] text-slate-400 md:hidden">
+                      {[item.brand, item.category, item.location].filter(Boolean).join(' · ')}
+                    </span>
                   </div>
                 </td>
                 <td className="p-4 text-slate-500 hidden md:table-cell">{item.brand || '-'}</td>
@@ -449,7 +459,9 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                 </td>
                 {role === 'admin' && (
                   <td className="p-4 text-center">
-                    <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {/* Visible by default, hover-reveal only from md: — touch screens
+                        have no hover, so opacity-0 made Edit/Archive/Delete unreachable. */}
+                    <div className="flex items-center justify-center gap-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                       <button onClick={() => openEdit(item)} className="rounded p-1 text-blue-600 hover:bg-blue-50"><Edit size={16} /></button>
                       {item.is_archived ? (
                         <button onClick={() => handleArchive(item.id, false)} title="Unarchive" className="rounded p-1 text-green-600 hover:bg-green-50"><ArchiveRestore size={16} /></button>
@@ -523,11 +535,11 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                             )}
                         </div>
                         {/* Row 1: Asset ID + Item Name */}
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Asset ID / Barcode', 'asset_id', 'text', 'Scan Code')}
                             {renderField('Item Name / Model', 'name')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Brand / Manufacturer', 'brand')}
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 mb-1">Category</label>
@@ -535,11 +547,11 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                                 <datalist id="categories">{categories.map(cat => <option key={cat} value={cat} />)}</datalist>
                             </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Sub-Category', 'sub_category')}
                             {renderField('Location', 'location')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
                                 <label className="block text-xs font-bold text-black mb-1">Total Qty</label>
                                 <input
@@ -806,7 +818,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                         {/* Add Supplier Form */}
                         <div className="border-t pt-3 mt-2">
                             <h4 className="text-xs font-bold text-slate-700 mb-2">Add Supplier Option</h4>
-                            <div className="grid grid-cols-2 gap-2 mb-2">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                                 <select className="w-full rounded border border-slate-300 p-1.5 text-sm text-slate-800" value={supplierForm.vendor_id} onChange={e => setSupplierForm({...supplierForm, vendor_id: e.target.value})}>
                                     <option value="">-- Select Vendor --</option>
                                     {clients.filter(c => c.type === 'Vendor' || c.type === 'Both').map(v => (
@@ -824,23 +836,23 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                 {activeTab === 'commercial' && (
                     <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Daily Rate', 'rate_per_day', 'number')}
                             {renderField('Weekly Rate', 'rate_per_week', 'number')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Purchase Cost', 'purchase_cost', 'number')}
                             {renderField('Purchase Date', 'purchase_date', 'date')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Replacement Value', 'replacement_value', 'number')}
                             {renderField('Supplier / Vendor', 'supplier')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('GST Rate %', 'gst_rate', 'number')}
                             {renderField('HSN Code', 'hsn_code')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Reorder Level (qty)', 'reorder_level', 'number')}
                             <div></div>
                         </div>
@@ -849,15 +861,15 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                 {activeTab === 'logistics' && (
                     <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Weight (kg)', 'weight', 'number')}
                             {renderField('Dimensions (LxWxH)', 'dimensions')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Power (Watts)', 'power_watts', 'number')}
                             {renderField('Current (Amps)', 'current_amps', 'number')}
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {renderField('Connector Type', 'connector_type')}
                             {renderField('IP Rating', 'ip_rating')}
                         </div>
@@ -872,7 +884,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                         {/* Audio Fields */}
                         {(formData.category === 'Sound' || formData.category === 'Audio') && (
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div><label className="text-xs font-bold text-slate-700">Signal Type</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 placeholder-slate-400" value={formData.attributes.signal_type || ''} onChange={e => updateAttribute('signal_type', e.target.value)} placeholder="Analog, Dante..." /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Wireless Freq</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 placeholder-slate-400" value={formData.attributes.frequency || ''} onChange={e => updateAttribute('frequency', e.target.value)} placeholder="470-530 MHz" /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Channels</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 placeholder-slate-400" value={formData.attributes.channels || ''} onChange={e => updateAttribute('channels', e.target.value)} /></div>
@@ -882,7 +894,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                         {/* Video Fields */}
                         {['Video', 'Projectors', 'LED', 'Camera'].includes(formData.category) && (
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div><label className="text-xs font-bold text-slate-700">Resolution</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 placeholder-slate-400" value={formData.attributes.resolution || ''} onChange={e => updateAttribute('resolution', e.target.value)} placeholder="1080p, 4K..." /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Lumens / Brightness</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 placeholder-slate-400" value={formData.attributes.lumens || ''} onChange={e => updateAttribute('lumens', e.target.value)} /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Inputs</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.inputs || ''} onChange={e => updateAttribute('inputs', e.target.value)} placeholder="HDMI, SDI..." /></div>
@@ -894,7 +906,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
                         {formData.category === 'LED' && (
                           <div className="border-t pt-4 mt-4">
                             <h4 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2"><Layers size={16} /> LED Tile Model Specifications</h4>
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                               <div><label className="text-xs font-bold text-slate-700">Model Name</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800" value={formData.tile_model?.modelName || ''} onChange={e => setFormData({...formData, tile_model: {...(formData.tile_model || {}), modelName: e.target.value}})} placeholder="e.g. P3.9-500x500" /></div>
                               <div><label className="text-xs font-bold text-slate-700">Pixel Pitch (mm)</label><input type="number" step="0.1" className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800" value={formData.tile_model?.pixelPitch || ''} onChange={e => setFormData({...formData, tile_model: {...(formData.tile_model || {}), pixelPitch: parseFloat(e.target.value) || 0}})} placeholder="e.g. 3.9" /></div>
                               <div><label className="text-xs font-bold text-slate-700">Width (mm)</label><input type="number" className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800" value={formData.tile_model?.dimensions?.width_mm || ''} onChange={e => setFormData({...formData, tile_model: {...(formData.tile_model || {}), dimensions: {...(formData.tile_model?.dimensions || {}), width_mm: parseInt(e.target.value) || 0}}})} placeholder="e.g. 500" /></div>
@@ -913,7 +925,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                         {/* Lighting Fields */}
                         {formData.category === 'Lighting' && (
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div><label className="text-xs font-bold text-slate-700">Fixture Type</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.fixture_type || ''} onChange={e => updateAttribute('fixture_type', e.target.value)} placeholder="Spot, Wash..." /></div>
                                 <div><label className="text-xs font-bold text-slate-700">DMX Mode</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.dmx_mode || ''} onChange={e => updateAttribute('dmx_mode', e.target.value)} /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Lamp Type</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.lamp_type || ''} onChange={e => updateAttribute('lamp_type', e.target.value)} /></div>
@@ -923,7 +935,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                         {/* Rigging Fields */}
                         {['Trussing', 'Rigging'].includes(formData.category) && (
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div><label className="text-xs font-bold text-slate-700">Truss Type</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.truss_type || ''} onChange={e => updateAttribute('truss_type', e.target.value)} placeholder="Box, Triangle..." /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Length</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.length || ''} onChange={e => updateAttribute('length', e.target.value)} /></div>
                                 <div><label className="text-xs font-bold text-slate-700">Connection</label><input className="w-full border border-slate-300 rounded p-2 text-sm bg-white text-slate-800 bg-slate-50 border-slate-200 placeholder-slate-400 placeholder-slate-4000" value={formData.attributes.connection || ''} onChange={e => updateAttribute('connection', e.target.value)} placeholder="Spigot, Bolt..." /></div>
@@ -940,7 +952,7 @@ const Inventory = ({ inventory, clients, projects = [], role, db, appId, logActi
 
                 {activeTab === 'maintenance' && (
                     <div className="space-y-4">
-                        <div className="grid grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                             {renderField('Last Service Date', 'last_service_date', 'date')}
                             {renderField('Next Test Due', 'next_test_due', 'date')}
                             {renderField('Service Interval (days)', 'service_interval_days', 'number')}

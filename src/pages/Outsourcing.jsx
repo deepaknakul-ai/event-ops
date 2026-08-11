@@ -8,12 +8,12 @@ import { updateDoc, doc, runTransaction, getDoc, addDoc, collection } from 'fire
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Modal } from '../components/Shared';
-import { formatCurrency, formatCurrencyPDF, getDaysDifference, getEffectivePOCost } from '../utils/helpers';
+import { formatCurrency, formatCurrencyPDF, getDaysDifference, getEffectivePOCost, getVendorBilled, getProjectGrandTotal, toNum } from '../utils/helpers';
 import { generateBookInvoiceNumber } from '../utils/accounting';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { can } from '../utils/permissions';
 
-const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, db, appId, logAction, purchaseInvoices = [], lockedFYs = [], addToast }) => {
+const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, db, appId, logAction, purchaseInvoices = [], vendorPayments = [], lockedFYs = [], addToast }) => {
   // A manager sees outsourcing (PO costs, vendor allocations, PI totals) only for
   // their OWN projects — never another manager's clients'.
   const scopedProjects = useMemo(
@@ -378,6 +378,13 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               misc_cost: vData.costs?.misc || 0,
               gst_rate: vData.gst_rate || 18,
               is_package: vData.is_package || false,
+              // Carry the package price into the form. Omitting these left
+              // poForm.package_cost at 0, so handleUpdatePO took the itemised
+              // branch and silently REPLACED a lump-sum PO's value with the
+              // (often zero) itemised costs — and stripped package_cost off
+              // every linked allocation. Editing a package PO destroyed it.
+              package_cost: parseFloat(vData.package_cost) || 0,
+              package_cost_gst: vData.package_cost_gst ?? 18,
               attachments: vData.attachments || []
           });
       } else {
@@ -400,6 +407,8 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               misc_cost: 0,
               gst_rate: 18,
               is_package: false,
+              package_cost: 0,
+              package_cost_gst: 18,
               attachments: []
           });
       }
@@ -439,7 +448,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
     } else {
       // New PI — prefill from the PO's effective cost (or legacy embedded vendor_invoice).
       setEditingPIId(null);
-      const eff = getEffectivePOCost(po);
+      const eff = getEffectivePOCost(po, purchaseInvoices);
       const legacy = po.vendor_invoice || {};
       const base = parseFloat(legacy.base_amount) || eff.base || 0;
       const gst = parseFloat(legacy.gst_amount) || eff.gst || 0;
@@ -543,7 +552,10 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
             ...rest,
             purchase_invoice_id: piId,
             purchase_invoice_no: piNo,
-            purchase_invoice_summary: { invoice_ref: piData.invoice_ref, total, status: piData.status },
+            // amount/gst_amount ride along so getEffectivePOCost can escalate to the
+            // invoice (with a correct base/GST split) even when the caller has no
+            // purchase_invoices collection in hand.
+            purchase_invoice_summary: { invoice_ref: piData.invoice_ref, total, amount: base, gst_amount: gst, status: piData.status },
           };
         });
         transaction.update(projectRef, { purchase_orders: updatedPOs });
@@ -1284,6 +1296,61 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
     return filteredAllPOs.slice(start, start + poItemsPerPage);
   }, [filteredAllPOs, poCurrentPage]);
 
+  // One shared basis for every PO amount shown on this page: the EFFECTIVE cost
+  // (a Verified invoice supersedes the committed PO price). The two tables used
+  // to compute this differently — package recompute in the project view, raw
+  // po.amount in the all-projects view — so the same PO showed two figures.
+  const poCommitted = (po) => (po.package_cost && po.package_cost > 0)
+    ? toNum(po.package_cost) * (1 + toNum(po.package_cost_gst ?? 0) / 100)
+    : toNum(po.amount);
+  const poEffective = (po) => getEffectivePOCost(po, purchaseInvoices);
+
+  // ── Project money picture (KPI strip) ─────────────────────────────────────
+  const projectKpis = useMemo(() => {
+    if (!selectedProject) return null;
+    const activePOs = (selectedProject.purchase_orders || []).filter(po => po && po.status !== 'Cancelled');
+    // Same precedence getVendorBilled/getProjectOutsourcing use: POs at effective
+    // cost + only allocations NOT superseded by a PO (no po_id).
+    let committed = 0, invoiced = 0;
+    activePOs.forEach(po => {
+      const eff = poEffective(po);
+      committed += eff.total;
+      if (eff.source === 'invoice') invoiced += eff.total;
+    });
+    const allocated = (selectedProject.vendor_allocations || [])
+      .reduce((s, a) => s + toNum(a?.tax_amount != null ? a.tax_amount : a?.amount), 0);
+    const unlinkedAlloc = (selectedProject.vendor_allocations || [])
+      .filter(a => a && !a.po_id)
+      .reduce((s, a) => s + toNum(a?.tax_amount != null ? a.tax_amount : a?.amount), 0);
+    const outsourcingTotal = committed + unlinkedAlloc;
+    const paid = (vendorPayments || [])
+      .filter(vp => vp && vp.project_id === selectedProject.id)
+      .reduce((s, vp) => s + toNum(vp.amount), 0);
+    const projectValue = getProjectGrandTotal(selectedProject);
+    return {
+      allocated,
+      committed,
+      invoiced,
+      outsourcingTotal,
+      paid,
+      balance: outsourcingTotal - paid,
+      projectValue,
+      pctOfProject: projectValue > 0 ? Math.round((outsourcingTotal / projectValue) * 100) : null,
+    };
+  }, [selectedProject, purchaseInvoices, vendorPayments]);
+
+  // ── PO status pipeline (counts + click-to-filter) ─────────────────────────
+  const [poStatusFilter, setPoStatusFilter] = useState('');
+  const projectPoStatusCounts = useMemo(() => {
+    const counts = {};
+    (selectedProject?.purchase_orders || []).forEach(po => {
+      if (!po) return;
+      const s = po.status || 'Draft';
+      counts[s] = (counts[s] || 0) + 1;
+    });
+    return counts;
+  }, [selectedProject]);
+
   const poSubtotal = poForm.package_cost > 0
     ? poForm.package_cost
     : ((poForm.equipment_cost || 0) + (poForm.labour_cost || 0) + (poForm.transport_cost || 0) + (poForm.fnb_cost || 0) + (poForm.travel_cost || 0) + (poForm.accommodation_cost || 0) + (poForm.misc_cost || 0));
@@ -1304,7 +1371,9 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           <select
             className="rounded border p-2 text-sm w-full md:w-64 text-black"
             value={selectedProjectId}
-            onChange={(e) => { setSelectedProjectId(e.target.value); setEditingAlloc(null); setVendorForm({ vendor_id: '', item_id: '', qty: 1, rate: 0, days: 1, gst: 18, description: '' }); setActiveTab('allocations'); setAllocWizardSelection({}); }}
+            /* No setActiveTab here: switching project used to yank the user back to
+               the Allocations tab mid-PO-work ("where did my Create PO button go"). */
+            onChange={(e) => { setSelectedProjectId(e.target.value); setEditingAlloc(null); setVendorForm({ vendor_id: '', item_id: '', qty: 1, rate: 0, days: 1, gst: 18, description: '' }); setAllocWizardSelection({}); setPoStatusFilter(''); }}
           >
             <option value="">-- Select Project --</option>
             {scopedProjects.filter(p => ['Confirmed', 'Ongoing'].includes(p.status)).map(p => (
@@ -1314,9 +1383,49 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
         </div>
       </div>
 
+      {/* THE CLEAR PICTURE: one strip answering "where does this project's vendor
+          money stand?" — allocated vs committed vs invoiced vs paid vs balance,
+          and how big outsourcing is against the project's own value. */}
+      {selectedProject && projectKpis && role !== 'tech' && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <div className="text-[11px] font-semibold text-slate-500">Allocated</div>
+            <div className="text-lg font-bold text-slate-800">{formatCurrency(projectKpis.allocated)}</div>
+            <div className="text-[10px] text-slate-400">all vendor allocations</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <div className="text-[11px] font-semibold text-slate-500">PO Committed</div>
+            <div className="text-lg font-bold text-slate-800">{formatCurrency(projectKpis.committed)}</div>
+            <div className="text-[10px] text-slate-400">active POs, effective cost</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <div className="text-[11px] font-semibold text-slate-500">Invoiced</div>
+            <div className="text-lg font-bold text-indigo-700">{formatCurrency(projectKpis.invoiced)}</div>
+            <div className="text-[10px] text-slate-400">verified vendor invoices</div>
+          </div>
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+            <div className="text-[11px] font-semibold text-emerald-700">Paid</div>
+            <div className="text-lg font-bold text-emerald-700">{formatCurrency(projectKpis.paid)}</div>
+            <div className="text-[10px] text-emerald-600/70">vendor payments (this project)</div>
+          </div>
+          <div className={`rounded-xl border p-3 ${projectKpis.balance > 0.5 ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+            <div className={`text-[11px] font-semibold ${projectKpis.balance > 0.5 ? 'text-amber-700' : 'text-slate-500'}`}>Balance Payable</div>
+            <div className={`text-lg font-bold ${projectKpis.balance > 0.5 ? 'text-amber-700' : 'text-slate-800'}`}>{formatCurrency(projectKpis.balance)}</div>
+            <div className="text-[10px] text-slate-400">outsourcing − paid</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3">
+            <div className="text-[11px] font-semibold text-slate-500">Of Project Value</div>
+            <div className={`text-lg font-bold ${projectKpis.pctOfProject != null && projectKpis.pctOfProject > 70 ? 'text-red-600' : 'text-slate-800'}`}>
+              {projectKpis.pctOfProject != null ? `${projectKpis.pctOfProject}%` : '—'}
+            </div>
+            <div className="text-[10px] text-slate-400">{formatCurrency(projectKpis.outsourcingTotal)} of {formatCurrency(projectKpis.projectValue)}</div>
+          </div>
+        </div>
+      )}
+
       {selectedProject ? (
         activeTab === 'allocations' ? (
-        <div className="grid gap-6 md:grid-cols-2 h-[calc(100vh-200px)]">
+        <div className="grid gap-6 md:grid-cols-2 md:h-[calc(100dvh-200px)]">
           {/* Left: Requirements */}
           <div className="rounded-xl border bg-slate-50 p-4 shadow-sm flex flex-col overflow-y-auto bg-slate-50 border-slate-200">
             <div className="flex justify-between items-center mb-4">
@@ -1356,20 +1465,48 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                     <div className="bg-slate-100 p-2 px-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 bg-slate-50">
                         <div className="font-bold text-slate-700">{group.name}</div>
                         {role !== 'tech' && (
-                        <div className="text-xs text-slate-600 flex gap-3 bg-white px-2 py-1 rounded border">
+                        <div className="text-xs text-slate-600 flex flex-wrap gap-x-3 gap-y-1 bg-white px-2 py-1 rounded border">
                             <span>Base: <span className="font-semibold">{formatCurrency(group.totalBase)}</span></span>
-                            <span className="text-slate-300">|</span>
+                            <span className="text-slate-300 hidden sm:inline">|</span>
                             <span>GST: <span className="font-semibold">{formatCurrency(group.totalGst)}</span></span>
-                            <span className="text-slate-300">|</span>
+                            <span className="text-slate-300 hidden sm:inline">|</span>
                             <span className="text-indigo-700 font-bold">Total: {formatCurrency(group.totalAmount)}</span>
                         </div>
                         )}
                     </div>
+                    {/* Vendor across ALL projects, on the SAME basis Clients.jsx and
+                        the vendor portal use (getVendorBilled + vendor payments) —
+                        so this line always agrees with the vendor's own dashboard. */}
+                    {role !== 'tech' && (() => {
+                      const vBilled = getVendorBilled(scopedProjects, group.id, null, purchaseInvoices).total;
+                      const vPaid = (vendorPayments || []).filter(vp => vp && vp.vendor_id === group.id).reduce((s, vp) => s + toNum(vp.amount), 0);
+                      const vBal = vBilled - vPaid;
+                      return (
+                        <div className="px-3 py-1.5 text-[11px] text-slate-500 bg-white border-b border-slate-100 flex flex-wrap gap-x-3 gap-y-0.5">
+                          <span className="font-semibold text-slate-600">Vendor overall:</span>
+                          <span>Billed {formatCurrency(vBilled)}</span>
+                          <span className="text-emerald-600">Paid {formatCurrency(vPaid)}</span>
+                          <span className={vBal > 0.5 ? 'text-amber-600 font-semibold' : 'text-slate-500'}>Balance {formatCurrency(vBal)}</span>
+                        </div>
+                      );
+                    })()}
                     <div className="divide-y divide-slate-100 divide-slate-100">
                         {group.items.map((alloc, idx) => (
                             <div key={idx} className="p-3 hover:bg-slate-50 flex justify-between items-center text-sm hover:bg-slate-50">
                                 <div>
-                                    <div className="font-medium text-slate-800">{alloc.item_name} {alloc.description && <span className="text-xs font-normal text-slate-500 italic">- {alloc.description}</span>}</div>
+                                    <div className="font-medium text-slate-800">
+                                      {alloc.item_name} {alloc.description && <span className="text-xs font-normal text-slate-500 italic">- {alloc.description}</span>}
+                                      {/* Which PO covers this line — previously the ONLY
+                                          signal was its absence from the pending list. */}
+                                      {alloc.po_id && (() => {
+                                        const linkedPO = (selectedProject.purchase_orders || []).find(po => po && po.id === alloc.po_id);
+                                        return (
+                                          <span className={`ml-1.5 align-middle text-[9px] px-1.5 py-0.5 rounded-full border font-bold ${linkedPO?.status === 'Cancelled' ? 'bg-red-50 text-red-500 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+                                            {linkedPO ? `PO ${linkedPO.po_no}${linkedPO.status === 'Cancelled' ? ' (cancelled)' : ''}` : 'PO linked'}
+                                          </span>
+                                        );
+                                      })()}
+                                    </div>
                                     <div className="text-xs text-slate-500 text-slate-400"><span className="bg-slate-100 px-1 rounded bg-slate-600 text-slate-200">x{alloc.qty}</span> {role !== 'tech' ? `| Rate: ${alloc.rate} | Days: ${alloc.days} | GST: ${alloc.gst}%` : `| Days: ${alloc.days}`}</div>
                                 </div>
                                 <div className="text-right">
@@ -1387,7 +1524,14 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                     </div>
                 </div>
               ))}
-              {allocationsByVendor.length === 0 && <div className="text-center text-slate-400 italic mt-4">No allocations yet.</div>}
+              {allocationsByVendor.length === 0 && (
+                <div className="text-center mt-6 py-6 rounded-lg border border-dashed border-slate-300 bg-white">
+                  <Truck size={28} className="mx-auto text-slate-300 mb-2" />
+                  <div className="text-sm text-slate-500 font-medium">No vendor allocations yet</div>
+                  <div className="text-xs text-slate-400 mt-1 mb-3">Pick items from the requirements list and assign them to a vendor.</div>
+                  <button onClick={() => setIsAllocWizardOpen(true)} className="text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg px-3 py-1.5">+ Create First Allocation</button>
+                </div>
+              )}
             </div>
             {allocationsByVendor.length > allocItemsPerPage && (
                 <div className="flex items-center justify-between pt-4 border-t mt-2">
@@ -1416,26 +1560,61 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                          <button onClick={() => openPOModal(group)} className="w-full py-2 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Create PO</button>
                       </div>
                    ))}
-                   {pendingPOVendors.length === 0 && <div className="col-span-3 text-center text-slate-400 py-4">No pending items for PO.</div>}
+                   {pendingPOVendors.length === 0 && (
+                     <div className="md:col-span-3 text-center py-6 rounded-lg border border-dashed border-slate-200">
+                       <div className="text-sm text-slate-500 font-medium">Nothing awaiting a PO</div>
+                       <div className="text-xs text-slate-400 mt-1 mb-2">Every vendor allocation on this project is already covered by a purchase order.</div>
+                       <button onClick={() => setActiveTab('allocations')} className="text-xs font-semibold text-indigo-600 hover:underline">Add another allocation →</button>
+                     </div>
+                   )}
                 </div>
              </div>
 
              {/* Issued POs */}
-             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                <div className="flex justify-between items-center mb-4">
+             <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 shadow-sm">
+                <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
                     <h3 className="font-bold text-slate-700 flex items-center gap-2"><FileCheck size={18} className="text-green-600"/> Issued Purchase Orders</h3>
                     <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
                         <input type="checkbox" checked={showCancelledPOs} onChange={e => setShowCancelledPOs(e.target.checked)} className="w-4 h-4 cursor-pointer accent-indigo-600 rounded border-slate-300" />
                         <span className="text-slate-600 font-medium">Show Cancelled</span>
                     </label>
                 </div>
+                {/* Status pipeline — the counts ARE the picture; click one to filter. */}
+                {Object.keys(projectPoStatusCounts).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-4">
+                    <button onClick={() => setPoStatusFilter('')} className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition ${!poStatusFilter ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>
+                      All {(selectedProject.purchase_orders || []).length}
+                    </button>
+                    {PO_STATUSES.filter(s => projectPoStatusCounts[s]).map(s => (
+                      <button key={s} onClick={() => setPoStatusFilter(poStatusFilter === s ? '' : s)}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition ${poStatusFilter === s ? 'bg-indigo-600 text-white border-indigo-600'
+                          : s === 'Paid' ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
+                          : s === 'Cancelled' ? 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>
+                        {s} {projectPoStatusCounts[s]}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="overflow-x-auto">
                    <table className="w-full text-sm text-left">
                       <thead className="bg-slate-50 text-slate-700 font-semibold"><tr><th className="p-3">PO No</th><th className="p-3">Date</th><th className="p-3">Vendor</th><th className="p-3">Subject</th><th className="p-3 text-right">PO Amount</th><th className="p-3">Status</th><th className="p-3 text-center">Vendor Invoice</th><th className="p-3 text-center">Action</th></tr></thead>
                       <tbody className="divide-y divide-slate-100">
-                         {(selectedProject.purchase_orders || []).filter(po => showCancelledPOs || po.status !== 'Cancelled').map((po, idx) => (
+                         {(selectedProject.purchase_orders || []).filter(po => (showCancelledPOs || po.status !== 'Cancelled') && (!poStatusFilter || (po.status || 'Draft') === poStatusFilter)).map((po, idx) => {
+                           const eff = poEffective(po);
+                           const committed = poCommitted(po);
+                           const superseded = eff.source === 'invoice' && Math.abs(eff.total - committed) > 0.5;
+                           return (
                             <tr key={idx} className="hover:bg-slate-50">
-                               <td className="p-3 font-medium text-slate-800">{po.po_no}</td><td className="p-3">{new Date(po.date).toLocaleDateString()}</td><td className="p-3">{po.vendor_name}</td><td className="p-3 text-slate-500 truncate max-w-[200px]">{po.subject}</td><td className="p-3 text-right font-bold">{formatCurrency((po.package_cost && po.package_cost > 0) ? po.package_cost * (1 + (po.package_cost_gst || 0) / 100) : po.amount)}</td>
+                               <td className="p-3 font-medium text-slate-800">{po.po_no}</td><td className="p-3">{new Date(po.date).toLocaleDateString()}</td><td className="p-3">{po.vendor_name}</td><td className="p-3 text-slate-500 truncate max-w-[200px]">{po.subject}</td>
+                               {/* Effective cost with provenance: the figure in force is
+                                   big; a superseded PO price shows struck-through. */}
+                               <td className="p-3 text-right">
+                                 <div className="font-bold">{formatCurrency(eff.total)}
+                                   <span className={`ml-1 align-middle text-[9px] px-1 py-0.5 rounded border font-bold ${eff.source === 'invoice' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>{eff.source === 'invoice' ? 'INV' : 'PO'}</span>
+                                 </div>
+                                 {superseded && <div className="text-[10px] text-slate-400 line-through">{formatCurrency(committed)}</div>}
+                               </td>
                                <td className="p-3">
                                    <select className={`text-xs border rounded p-1 text-black ${po.status === 'Paid' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-slate-50'}`} value={po.status || 'Draft'} onChange={(e) => updatePOStatus(po, e.target.value)}>
                                        {PO_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -1444,15 +1623,26 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                                <td className="p-3 text-center">
                                  {renderInvoiceCell(po, selectedProjectId || po.projectId)}
                                </td>
-                               <td className="p-3 text-center flex justify-center gap-2">
+                               {/* display:flex on a <td> breaks table layout — flex lives on an inner div */}
+                               <td className="p-3 text-center">
+                                 <div className="flex flex-wrap justify-center gap-2">
                                    <button onClick={() => generatePOPDF(po, 'print')} className="text-indigo-600 hover:underline flex items-center gap-1"><Printer size={14}/> Print</button>
                                    <button onClick={() => generatePOPDF(po, 'download')} className="text-blue-600 hover:underline flex items-center gap-1"><Download size={14}/> PDF</button>
                                    <button onClick={() => openPOModal(po, true)} className="text-orange-600 hover:underline flex items-center gap-1"><Edit size={14}/> Edit</button>
                                    <button onClick={() => handleDuplicatePO(po)} className="text-green-600 hover:underline flex items-center gap-1"><Copy size={14}/> Copy</button>
+                                 </div>
                                </td>
                             </tr>
-                         ))}
-                         {(selectedProject.purchase_orders || []).filter(po => showCancelledPOs || po.status !== 'Cancelled').length === 0 && <tr><td colSpan={8} className="p-6 text-center text-slate-400">No POs to display.</td></tr>}
+                           );
+                         })}
+                         {(selectedProject.purchase_orders || []).filter(po => (showCancelledPOs || po.status !== 'Cancelled') && (!poStatusFilter || (po.status || 'Draft') === poStatusFilter)).length === 0 && (
+                           <tr><td colSpan={8} className="p-8 text-center">
+                             <div className="text-slate-400 mb-2">{poStatusFilter ? `No ${poStatusFilter} POs on this project.` : 'No purchase orders raised for this project yet.'}</div>
+                             {poStatusFilter
+                               ? <button onClick={() => setPoStatusFilter('')} className="text-xs font-semibold text-indigo-600 hover:underline">Show all statuses</button>
+                               : <button onClick={() => setActiveTab('allocations')} className="text-xs font-semibold text-indigo-600 hover:underline">Allocate items to a vendor first →</button>}
+                           </td></tr>
+                         )}
                       </tbody>
                    </table>
                 </div>
@@ -1460,10 +1650,17 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
           </div>
         )
       ) : (
-             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                <div className="flex justify-between items-center mb-4">
+          <>
+             {/* No project selected: say so — clicking the Allocations tab used to
+                 look like it did nothing. */}
+             <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 px-4 py-3 text-sm text-indigo-700 flex flex-wrap items-center gap-2">
+               <AlertCircle size={16} className="shrink-0" />
+               <span><span className="font-semibold">Select a project above</span> to manage its allocations and raise POs — below are recent purchase orders across all projects.</span>
+             </div>
+             <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 shadow-sm">
+                <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
                     <h3 className="font-bold text-slate-700 flex items-center gap-2"><FileCheck size={18} className="text-green-600"/> Recent Purchase Orders</h3>
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-wrap items-center gap-4">
                         <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
                             <input type="checkbox" checked={showCancelledPOs} onChange={e => setShowCancelledPOs(e.target.checked)} className="w-4 h-4 cursor-pointer accent-indigo-600 rounded border-slate-300" />
                             <span className="text-slate-600 font-medium">Show Cancelled</span>
@@ -1478,13 +1675,25 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                      <table className="w-full text-sm text-left">
                         <thead className="bg-slate-50 text-slate-700 font-semibold"><tr><th className="p-3">PO No</th><th className="p-3">Date</th><th className="p-3">Project</th><th className="p-3">Vendor</th><th className="p-3 text-right">PO Amount</th><th className="p-3">Status</th><th className="p-3 text-center">Vendor Invoice</th><th className="p-3 text-center">Actions</th></tr></thead>
                         <tbody className="divide-y divide-slate-100">
-                           {paginatedAllPOs.map((po, idx) => (
+                           {paginatedAllPOs.map((po, idx) => {
+                             const eff = poEffective(po);
+                             const committed = poCommitted(po);
+                             const superseded = eff.source === 'invoice' && Math.abs(eff.total - committed) > 0.5;
+                             return (
                               <tr key={idx} className="hover:bg-slate-50">
                                  <td className="p-3 font-medium text-slate-800">{po.po_no}</td>
                                  <td className="p-3">{new Date(po.date).toLocaleDateString()}</td>
                                  <td className="p-3">{po.projectName}</td>
                                  <td className="p-3">{po.vendor_name}</td>
-                                 <td className="p-3 text-right font-bold">{formatCurrency(po.amount)}</td>
+                                 {/* Same effective-cost basis as the project view — this
+                                     cell used raw po.amount, so a package PO showed a
+                                     DIFFERENT figure here than one tab away. */}
+                                 <td className="p-3 text-right">
+                                   <div className="font-bold">{formatCurrency(eff.total)}
+                                     <span className={`ml-1 align-middle text-[9px] px-1 py-0.5 rounded border font-bold ${eff.source === 'invoice' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>{eff.source === 'invoice' ? 'INV' : 'PO'}</span>
+                                   </div>
+                                   {superseded && <div className="text-[10px] text-slate-400 line-through">{formatCurrency(committed)}</div>}
+                                 </td>
                                  <td className="p-3">
                                      <select className={`text-xs border rounded p-1 text-black ${po.status === 'Paid' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-slate-50'}`} value={po.status || 'Draft'} onChange={(e) => updatePOStatus(po, e.target.value)}>
                                          {PO_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -1493,15 +1702,25 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                                  <td className="p-3 text-center">
                                    {renderInvoiceCell(po, selectedProjectId || po.projectId)}
                                  </td>
-                                 <td className="p-3 text-center flex justify-center gap-2">
+                                 <td className="p-3 text-center">
+                                   <div className="flex flex-wrap justify-center gap-2">
                                      <button onClick={() => generatePOPDF(po, 'print')} className="text-indigo-600 hover:underline flex items-center gap-1"><Printer size={14}/> Print</button>
                                      <button onClick={() => generatePOPDF(po, 'download')} className="text-blue-600 hover:underline flex items-center gap-1"><Download size={14}/> PDF</button>
                                       <button onClick={() => openPOModal(po, true)} className="text-orange-600 hover:underline flex items-center gap-1"><Edit size={14}/> Edit</button>
                                       <button onClick={() => handleDuplicatePO(po)} className="text-green-600 hover:underline flex items-center gap-1"><Copy size={14}/> Copy</button>
+                                   </div>
                                  </td>
                               </tr>
-                           ))}
-                           {filteredAllPOs.length === 0 && <tr><td colSpan={7} className="p-6 text-center text-slate-400">No POs found.</td></tr>}
+                             );
+                           })}
+                           {filteredAllPOs.length === 0 && (
+                             <tr><td colSpan={8} className="p-8 text-center">
+                               <div className="text-slate-400 mb-2">{poSearch ? `No POs match "${poSearch}".` : 'No purchase orders anywhere yet.'}</div>
+                               {poSearch
+                                 ? <button onClick={() => setPoSearch('')} className="text-xs font-semibold text-indigo-600 hover:underline">Clear search</button>
+                                 : <span className="text-xs text-slate-400">Select a project above, allocate items to a vendor, then raise a PO.</span>}
+                             </td></tr>
+                           )}
                         </tbody>
                      </table>
                 </div>
@@ -1517,6 +1736,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                   </div>
                 )}
              </div>
+          </>
           )}
       <EditAllocationModal
         isOpen={isEditModalOpen}
@@ -1608,7 +1828,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
 
       {/* Allocation Wizard Modal */}
       <Modal isOpen={isAllocWizardOpen} onClose={() => setIsAllocWizardOpen(false)} title="New Allocation">
-          <div className="space-y-4 h-[70vh] flex flex-col">
+          <div className="space-y-4 h-[70dvh] flex flex-col">
               <div className="grid grid-cols-2 gap-4">
                   <div>
                       <label className="text-xs font-bold text-slate-700">Project</label>
@@ -1623,7 +1843,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                   </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto border rounded-lg">
+              <div className="flex-1 overflow-y-auto overflow-x-auto border rounded-lg">
                   <table className="w-full text-sm text-left">
                       <thead className="bg-slate-100 text-slate-500 font-bold sticky top-0"><tr><th className="p-2 w-8"></th><th className="p-2">Item</th><th className="p-2 text-center">Req</th><th className="p-2 text-center">Rem</th><th className="p-2 w-20">Qty</th><th className="p-2 w-24">Rate</th><th className="p-2 w-16">Days</th></tr></thead>
                       <tbody className="divide-y divide-slate-100">
@@ -1655,7 +1875,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
             <div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-700">PO Number</label><input className="w-full rounded border border-slate-300 p-2 text-slate-800" value={poForm.po_no} onChange={e => setPoForm({...poForm, po_no: e.target.value})} /></div><div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-slate-800" value={poForm.date} onChange={e => setPoForm({...poForm, date: e.target.value})} /></div></div>
             <div><label className="text-xs font-bold text-slate-700">Subject</label><input className="w-full rounded border border-slate-300 p-2 text-slate-800" value={poForm.subject} onChange={e => setPoForm({...poForm, subject: e.target.value})} /></div>
 
-            <div className="border rounded overflow-hidden max-h-40 overflow-y-auto">
+            <div className="border rounded overflow-x-auto max-h-40 overflow-y-auto">
                 <table className="w-full text-xs text-left">
                     <thead className="bg-slate-100 text-slate-800 font-bold sticky top-0">
                         <tr>
@@ -1698,7 +1918,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
               </div>
 
               {poForm.package_cost > 0 ? (
-                <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                   <div>
                     <label className="text-xs font-bold text-slate-700">Package Cost (excl. GST)</label>
                     <input type="number" step="0.01" className="w-full rounded border border-slate-300 border-slate-200 bg-slate-50 text-slate-800 p-2" value={poForm.package_cost} onChange={e => setPoForm({...poForm, package_cost: parseFloat(e.target.value) || 0})} />
@@ -1716,7 +1936,7 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                   </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                   <div><label className="text-xs font-bold text-slate-700">Equipment Cost</label><input type="number" className="w-full rounded border border-slate-300 border-slate-200 bg-slate-50 text-slate-800 p-2" value={poForm.equipment_cost} onChange={e => setPoForm({...poForm, equipment_cost: parseFloat(e.target.value) || 0})} /></div>
                   <div><label className="text-xs font-bold text-slate-700">Labour Cost</label><input type="number" className="w-full rounded border border-slate-300 border-slate-200 bg-slate-50 text-slate-800 p-2" value={poForm.labour_cost} onChange={e => setPoForm({...poForm, labour_cost: parseFloat(e.target.value) || 0})} /></div>
                   <div><label className="text-xs font-bold text-slate-700">Transport Cost</label><input type="number" className="w-full rounded border border-slate-300 border-slate-200 bg-slate-50 text-slate-800 p-2" value={poForm.transport_cost} onChange={e => setPoForm({...poForm, transport_cost: parseFloat(e.target.value) || 0})} /></div>
@@ -1727,14 +1947,19 @@ const Outsourcing = ({ projects, clients, inventory, role, currentEmpId = null, 
                 </div>
               )}
 
-              <div className="grid grid-cols-3 gap-4 mt-4">
-                  <div className="col-span-1">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
+                  {/* In package mode the package GST select above is the ONLY live
+                      rate — showing this second select too made users unsure which
+                      one applied. Render it solely on the itemised path. */}
+                  {!(poForm.package_cost > 0) && (
+                  <div className="sm:col-span-1">
                       <label className="text-xs font-bold text-slate-700">GST Rate</label>
                       <select className="w-full rounded border border-slate-300 p-2 text-slate-800 bg-slate-50" value={poForm.gst_rate} onChange={e => setPoForm({...poForm, gst_rate: parseFloat(e.target.value) || 0})}>
                           <option value="0">0%</option><option value="5">5%</option><option value="12">12%</option><option value="18">18%</option><option value="28">28%</option>
                       </select>
                   </div>
-                  <div className="col-span-2 bg-slate-100 p-3 rounded-lg text-right">
+                  )}
+                  <div className={`${poForm.package_cost > 0 ? 'sm:col-span-3' : 'sm:col-span-2'} bg-slate-100 p-3 rounded-lg text-right`}>
                       <div className="text-xs text-slate-500">Subtotal: {formatCurrency(poSubtotal)}</div>
                       <div className="text-xs text-slate-500">GST ({poForm.package_cost > 0 ? poForm.package_cost_gst : poForm.gst_rate}%): {formatCurrency(poGstAmount)}</div>
                       <div className="text-lg font-bold text-indigo-700">Total: {formatCurrency(poGrandTotal)}</div>

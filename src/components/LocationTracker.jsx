@@ -44,7 +44,7 @@ const LocationTracker = ({ db, appId, currentEmpId, employees = [], timeLogs = [
 
   if (!shouldTrack) return null;
   return (
-    <div className="fixed bottom-3 left-3 z-[150] flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white shadow-lg">
+    <div className="fixed bottom-3 left-3 z-[150] mb-[env(safe-area-inset-bottom)] flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white shadow-lg">
       <MapPin size={13} /> Sharing location — on duty
     </div>
   );

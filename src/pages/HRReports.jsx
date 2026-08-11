@@ -986,7 +986,7 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
                   <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-500" /> active</span>
                 </div>
               </div>
-              <div className="grid grid-cols-7 gap-1">
+              <div className="overflow-x-auto"><div className="grid grid-cols-7 gap-1 min-w-[560px]">
                 {weekdays.map(w => <div key={w} className="text-center text-[10px] font-bold uppercase text-slate-400 py-1">{w}</div>)}
                 {cells.map((day, i) => {
                   if (day === null) return <div key={`e${i}`} />;
@@ -1007,7 +1007,7 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
                     </div>
                   );
                 })}
-              </div>
+              </div></div>
             </div>
 
             {/* Date-wise show & time detail */}
@@ -1536,7 +1536,7 @@ const HRReports = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests
                       <p className="text-xs text-slate-500 mt-1">Net benefit = Realized Revenue Share − (Labor Cost + Approved Expense Reports)</p>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                       <div className="rounded border border-slate-200 p-3">
                         <div className="text-xs text-slate-500 uppercase">Expense Reports</div>
                         <div className="text-lg font-semibold text-slate-800">{selectedPerformanceEmployeeData.expenseReportCount}</div>

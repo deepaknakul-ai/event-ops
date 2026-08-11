@@ -1596,10 +1596,16 @@ exports.getPortalData = onCall(
         const p = await mergeProjectFin(appId, d.id, d.data()); // money from the gated sibling (base scrubbed)
         (p.purchase_orders || []).forEach((po) => {
           if (!po || po.vendor_id !== cid || po.status === 'Cancelled') return;
+          // New PI flow: the linked Purchase Invoice's slim summary is stamped on
+          // the PO (and kept in sync on status change). A Verified PI supersedes
+          // the committed PO price — mirrors helpers.getEffectivePOCost level 1a.
+          const pis = po.purchase_invoice_summary;
+          const usePis = pis && (pis.status === 'Verified' || pis.status === 'Accepted') && Number(pis.total || 0) > 0;
           const inv = po.vendor_invoice;
           const useInv = inv && (inv.status === 'Accepted' || inv.status === 'Verified') && Number(inv.total_amount || 0) > 0;
           let amt;
-          if (useInv) amt = Number(inv.total_amount || 0);
+          if (usePis) amt = Number(pis.total || 0);
+          else if (useInv) amt = Number(inv.total_amount || 0);
           else if (Number(po.package_cost || 0) > 0) {
             const base = Number(po.package_cost || 0);
             const gst = po.gst_amount != null ? Number(po.gst_amount) : base * (Number(po.package_cost_gst ?? 0) / 100);

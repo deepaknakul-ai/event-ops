@@ -65,7 +65,7 @@ const HRSettings = ({ hqSettings, role, db, logAction, addToast }) => {
       {/* HQ Location */}
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h3 className="text-base font-semibold text-slate-800 mb-4 flex items-center gap-2"><MapPin size={18} className="text-indigo-600" /> HQ Location</h3>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {renderField("Latitude", "lat", form, setForm, "number")}
           {renderField("Longitude", "lng", form, setForm, "number")}
         </div>
@@ -86,14 +86,14 @@ const HRSettings = ({ hqSettings, role, db, logAction, addToast }) => {
       {/* Time Window */}
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h3 className="text-base font-semibold text-slate-800 mb-4 flex items-center gap-2"><Clock size={18} className="text-blue-500" /> Time Window & Shifts</h3>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {renderField("Window Start", "windowStart", form, setForm, "time")}
           {renderField("Window End", "windowEnd", form, setForm, "time")}
         </div>
         <div className="mt-3 space-y-1">
           {renderToggle("Enforce Time Window", "enforceTime", form, setForm, "Require check-in within time window (±grace minutes)")}
         </div>
-        <div className="grid grid-cols-3 gap-4 mt-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
           {renderField("Grace Minutes", "graceMinutes", form, setForm, "number", "min", 0)}
           {renderField("Max Shift Hours", "maxShiftHours", form, setForm, "number", "hours", 1)}
           {renderField("Auto-Close Hours", "autoCloseHours", form, setForm, "number", "hours", 1)}
@@ -109,7 +109,7 @@ const HRSettings = ({ hqSettings, role, db, logAction, addToast }) => {
           {renderToggle("Block Checkout Beyond Max Hours", "enforceMaxShift", form, setForm, "If ON, employees CANNOT check out once shift exceeds Max Shift Hours — admin must force-close. Prevents staff from staying logged in all night.")}
           {renderToggle("Require Reason for Late Checkout", "requireLateReason", form, setForm, "If ON, a mandatory reason is required when checkout happens after Max Shift Hours threshold.")}
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-4">
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
           {renderField("Suspicious Checkout Hour (24h)", "suspiciousCheckoutHour", form, setForm, "number", "e.g. 22 = 10 PM", 0)}
           <div>
             <label className="text-xs font-bold text-slate-700">Flag Description</label>

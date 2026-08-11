@@ -829,7 +829,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                   </select>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} /></div><div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>{expenseCats.map(c => <option key={c}>{c}</option>)}</select></div></div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.date} onChange={e => setExpenseForm({...expenseForm, date: e.target.value})} /></div><div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={expenseForm.category} onChange={e => setExpenseForm({...expenseForm, category: e.target.value})}>{expenseCats.map(c => <option key={c}>{c}</option>)}</select></div></div>
               <div><label className="text-xs font-bold text-slate-700">Amount</label><input type="number" className="w-full rounded border border-slate-300 p-2 text-black" placeholder="0.00" value={expenseForm.amount} onChange={e => setExpenseForm({...expenseForm, amount: e.target.value})} /></div>
               <div><label className="text-xs font-bold text-slate-700">Remarks</label><textarea className="w-full rounded border border-slate-300 p-2 text-sm text-black" rows={2} value={expenseForm.remarks} onChange={e => setExpenseForm({...expenseForm, remarks: e.target.value})} placeholder="Description..." /></div>
               <div>
@@ -1406,7 +1406,14 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
                         {emp?.designation && <div className="text-xs text-slate-400">{emp.designation}</div>}
                       </td>
                       <td className="p-3">{exp.is_general ? <span className="bg-orange-50 text-orange-700 px-2 py-0.5 rounded text-xs">General Ops</span> : <span className="text-slate-700">{proj?.project_name || 'Unknown'}</span>}</td>
-                      <td className="p-3 font-medium">{exp.category}</td>
+                      <td className="p-3 font-medium">
+                        {exp.category}
+                        {/* Remarks/proof column is lg:-only — keep both reachable on phones */}
+                        <div className="lg:hidden text-[10px] text-slate-400 font-normal mt-0.5">
+                          {exp.remarks && <span className="block truncate max-w-[140px]">{exp.remarks}</span>}
+                          {exp.proof_url && <ProofBadge proof_url={exp.proof_url} />}
+                        </div>
+                      </td>
                       <td className="p-3 text-slate-500 text-xs max-w-[160px] truncate hidden lg:table-cell">{exp.remarks || '—'}{exp.proof_url && <div className="mt-1"><ProofBadge proof_url={exp.proof_url} /></div>}</td>
                       <td className="p-3 text-right font-bold whitespace-nowrap">{formatCurrency(exp.amount)}</td>
                       <td className="p-3 text-center"><span className={`text-xs px-2 py-0.5 rounded font-medium ${statusColors[exp.status] || 'bg-slate-100 text-slate-600'}`}>{exp.status}</span></td>
@@ -1609,7 +1616,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
               </select>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div><label className="text-xs font-bold text-slate-700">Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={editForm.date} onChange={e => setEditForm({ ...editForm, date: e.target.value })} /></div>
             <div><label className="text-xs font-bold text-slate-700">Category</label><select className="w-full rounded border border-slate-300 p-2 text-black" value={editForm.category} onChange={e => setEditForm({ ...editForm, category: e.target.value })}>{expenseCats.map(c => <option key={c}>{c}</option>)}</select></div>
           </div>

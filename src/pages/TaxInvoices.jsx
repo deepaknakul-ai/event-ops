@@ -697,7 +697,7 @@ const TaxInvoices = ({
       </div>
 
       {activeTab === 'unbilled' ? (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-x-auto">
           {unbilledProjects.length === 0 ? (
             <div className="text-center text-slate-400 py-12">
               <CheckCircle size={36} className="mx-auto mb-2 text-green-400" />
@@ -819,7 +819,7 @@ const TaxInvoices = ({
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-x-auto">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -1031,7 +1031,7 @@ const TaxInvoices = ({
                 <span className="text-xs font-bold text-indigo-700 uppercase">Invoice Summary</span>
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${TYPE_BADGE[invoiceType] || 'bg-blue-100 text-blue-700 border-blue-200'}`}>{invoiceType}</span>
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div className="bg-white rounded p-2 text-center border border-indigo-100">
                   <div className="text-[10px] text-slate-500 uppercase font-semibold mb-0.5">Taxable</div>
                   <div className="text-sm font-bold text-slate-800">{formatCurrency(computedTotals.taxable)}</div>
@@ -1185,7 +1185,7 @@ const TaxInvoices = ({
             {/* Transportation & PO (optional — GST-format invoice) */}
             <details className="rounded-lg border border-slate-200 bg-slate-50/60">
               <summary className="cursor-pointer px-3 py-2 text-xs font-bold text-slate-600 select-none">Transportation &amp; PO details <span className="font-normal text-slate-400">(optional — shown on GST-format invoice)</span></summary>
-              <div className="grid grid-cols-2 gap-3 p-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 pt-1">
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">PO Number</label>
                   <input className="w-full rounded-lg border border-slate-300 p-2 text-sm text-black" value={form.po_number} onChange={e => setForm(f => ({ ...f, po_number: e.target.value }))} placeholder="e.g. ASHUTOSH VERBAL" />

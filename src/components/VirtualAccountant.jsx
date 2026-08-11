@@ -731,7 +731,7 @@ const VirtualAccountant = ({
 
   return (
     <div className="fixed inset-0 z-[120] flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-full max-w-2xl sm:rounded-2xl rounded-t-2xl bg-white shadow-2xl flex flex-col" style={{ maxHeight: '85vh' }}>
+      <div className="w-full max-w-2xl sm:rounded-2xl rounded-t-2xl bg-white shadow-2xl flex flex-col" style={{ maxHeight: '85dvh' }}>
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-200 bg-gradient-to-r from-indigo-600 to-indigo-700 px-5 py-3 sm:rounded-t-2xl rounded-t-2xl shrink-0">
           <div className="flex items-center gap-3">

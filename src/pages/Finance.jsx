@@ -348,7 +348,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-slate-800">Finance & Payments</h2>
-        <div className="flex bg-white rounded-lg border p-1">
+        <div className="flex flex-col sm:flex-row bg-white rounded-lg border p-1">
           <button onClick={() => handleTabChange('client_in')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'client_in' ? 'bg-green-100 text-green-700' : 'text-slate-600 hover:bg-slate-50'}`}>Receive Payment (In)</button>
           {role !== 'manager' && <button onClick={() => handleTabChange('emp_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'emp_out' ? 'bg-red-100 text-red-700' : 'text-slate-600 hover:bg-slate-50'}`}>Employee Payout</button>}
           {role !== 'manager' && <button onClick={() => handleTabChange('vendor_out')} className={`px-4 py-2 text-sm rounded-md font-medium transition-colors flex-1 ${activeTab === 'vendor_out' ? 'bg-orange-100 text-orange-700' : 'text-slate-600 hover:bg-slate-50'}`}>Pay Vendor (Out)</button>}
@@ -450,7 +450,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
                 );
               })()}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700 uppercase">Amount</label>
                   <input type="number" className="w-full rounded border p-2 text-black" value={form.amount} onChange={e => setForm({...form, amount: e.target.value})} />

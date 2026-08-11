@@ -149,7 +149,7 @@ const HRDashboard = ({ employees = [], timeLogs = [], hrLeaves = [], shiftReques
         <div className="lg:col-span-2 rounded-xl border bg-white p-5 shadow-sm">
           <h3 className="text-sm font-semibold text-slate-700 mb-4">Employee Hours — {new Date(selectedMonth + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</h3>
           {empChartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={300}>
+            <ResponsiveContainer width="100%" height={300} minWidth={0}>
               <BarChart data={empChartData} margin={{ left: 0, right: 10 }}>
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} interval={0} angle={-30} textAnchor="end" height={60} />
                 <YAxis tick={{ fontSize: 11 }} />
@@ -165,7 +165,7 @@ const HRDashboard = ({ employees = [], timeLogs = [], hrLeaves = [], shiftReques
         <div className="rounded-xl border bg-white p-5 shadow-sm">
           <h3 className="text-sm font-semibold text-slate-700 mb-4">Check-in Locations</h3>
           {locationPie.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
+            <ResponsiveContainer width="100%" height={250} minWidth={0}>
               <PieChart>
                 <Pie data={locationPie} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>
                   {locationPie.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
@@ -180,7 +180,7 @@ const HRDashboard = ({ employees = [], timeLogs = [], hrLeaves = [], shiftReques
       {/* Leave Summary */}
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h3 className="text-sm font-semibold text-slate-700 mb-3">Leave Summary (FY)</h3>
-        <div className="grid grid-cols-4 gap-4 text-center">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
           <div><p className="text-2xl font-bold text-slate-800">{leaveStats.total}</p><p className="text-xs text-slate-500">Total Applied</p></div>
           <div><p className="text-2xl font-bold text-green-600">{leaveStats.approved}</p><p className="text-xs text-slate-500">Approved</p></div>
           <div><p className="text-2xl font-bold text-amber-600">{leaveStats.pending}</p><p className="text-xs text-slate-500">Pending</p></div>

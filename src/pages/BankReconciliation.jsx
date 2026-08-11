@@ -672,7 +672,7 @@ const BankReconciliation = ({
             <select
               value={bankAccount}
               onChange={(e) => setBankAccount(e.target.value)}
-              className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 min-w-[160px]"
+              className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 min-w-0 sm:min-w-[160px]"
               title="Scope matching to a specific bank ledger. 'All' uses any account named like a bank."
             >
               <option value="">All bank accounts</option>
@@ -729,7 +729,7 @@ const BankReconciliation = ({
               value={sessionName}
               onChange={(e) => setSessionName(e.target.value)}
               placeholder="Session name (optional)"
-              className="flex-1 min-w-[200px] rounded-md border border-slate-300 px-2 py-1.5 text-xs"
+              className="flex-1 min-w-0 sm:min-w-[200px] rounded-md border border-slate-300 px-2 py-1.5 text-xs"
             />
             <button
               onClick={saveSession}

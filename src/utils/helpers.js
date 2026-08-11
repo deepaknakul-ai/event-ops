@@ -300,16 +300,55 @@ export const isDateOverlap = (start1, end1, start2, end2) => {
 
 /**
  * Cost Waterfall for a single PO:
- *  1. If vendor invoice is Accepted or Verified → use invoice actuals (most accurate for P&L)
- *  2. Else → use PO committed cost (package or itemized)
+ *  1a. Linked standalone Purchase Invoice (new flow) — Verified/Accepted only
+ *  1b. Embedded vendor invoice (legacy flow) — Accepted or Verified
+ *  2.  Else → PO committed cost (package or itemized)
  * Returns { base, gst, total, source }
+ *
+ * `purchaseInvoices` is optional: an array (resolved by po.purchase_invoice_id or
+ * the PI's linked_po_id) or an already-resolved PI object. Callers without the
+ * collection still get the right answer via the slim `purchase_invoice_summary`
+ * the invoice flow stamps onto the PO (and keeps in sync on status change).
+ * Before this, the new PI flow stripped `vendor_invoice` off the PO, so a
+ * verified ₹2L invoice against a ₹3L PO never superseded it anywhere — project
+ * P&L, vendor payable, commission all kept the committed PO figure.
  */
-export const getEffectivePOCost = (po) => {
+export const getEffectivePOCost = (po, purchaseInvoices = null) => {
   if (!po) return { base: 0, gst: 0, total: 0, source: 'none' };
+
+  // Level 1a: linked standalone Purchase Invoice (Outsourcing "Create Invoice (PI)"
+  // flow, or a PI linked from the Purchases page). A LIVE doc, when resolvable,
+  // is authoritative — including authoritatively NOT escalating when it is
+  // Pending/Rejected — so a stale stamped summary can never override it.
+  const piUsable = (s) => s === 'Verified' || s === 'Accepted';
+  let pi = null;
+  if (Array.isArray(purchaseInvoices)) {
+    pi = purchaseInvoices.find((x) => x && (
+      (po.purchase_invoice_id && x.id === po.purchase_invoice_id)
+      || (x.linked_po_id && po.id && x.linked_po_id === po.id)
+    )) || null;
+  } else if (purchaseInvoices && typeof purchaseInvoices === 'object') {
+    pi = purchaseInvoices;
+  }
+  if (pi) {
+    if (piUsable(pi.status)) {
+      const base = toNum(pi.amount);
+      const gst = toNum(pi.gst_amount);
+      if (base + gst > 0) return { base, gst, total: round2(base + gst), source: 'invoice' };
+    }
+  } else if (po.purchase_invoice_id || po.purchase_invoice_no) {
+    const s = po.purchase_invoice_summary;
+    if (s && piUsable(s.status) && toNum(s.total) > 0) {
+      // Older summaries carried only {total,status}; amount/gst ride along now.
+      const base = s.amount != null ? toNum(s.amount) : round2(toNum(s.total) - toNum(s.gst_amount));
+      const gst = s.gst_amount != null ? toNum(s.gst_amount) : round2(toNum(s.total) - base);
+      return { base, gst, total: toNum(s.total), source: 'invoice' };
+    }
+  }
 
   const inv = po.vendor_invoice;
 
-  // Level 1: Invoice accepted/verified — use actuals for accounting & ITC
+  // Level 1b: embedded invoice accepted/verified — use actuals for accounting & ITC
   if (inv && (inv.status === 'Accepted' || inv.status === 'Verified') && parseFloat(inv.total_amount || 0) > 0) {
     const base  = parseFloat(inv.base_amount  || 0);
     const gst   = parseFloat(inv.gst_amount   || 0);
@@ -1118,9 +1157,10 @@ export const projectOccupancyWindow = (project) => {
  * @param {object[]} projects
  * @param {string} vendorId
  * @param {(row:object, project:object)=>boolean} [matches] optional extra filter (e.g. branch scoping)
+ * @param {object[]} [purchaseInvoices] optional PI collection for live linked-invoice resolution
  * @returns {{ total:number, base:number }} total = incl GST, base = taxable
  */
-export const getVendorBilled = (projects = [], vendorId, matches = null) => {
+export const getVendorBilled = (projects = [], vendorId, matches = null, purchaseInvoices = null) => {
   let total = 0;
   let base = 0;
   (projects || []).forEach((p) => {
@@ -1128,7 +1168,7 @@ export const getVendorBilled = (projects = [], vendorId, matches = null) => {
     (p.purchase_orders || []).forEach((po) => {
       if (!po || po.vendor_id !== vendorId || po.status === 'Cancelled') return;
       if (matches && !matches(po, p)) return;
-      const c = getEffectivePOCost(po);
+      const c = getEffectivePOCost(po, purchaseInvoices);
       total += toNum(c.total);
       base += toNum(c.base);
     });

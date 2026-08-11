@@ -1437,7 +1437,7 @@ const Reports = ({
         <div className="flex flex-wrap gap-4 items-end">
           <div className="w-full md:w-auto">
             <label className="block text-sm font-medium text-slate-700 mb-1">Report Type</label>
-            <select className="w-full rounded border p-2 min-w-[250px] text-black" value={reportType} onChange={(e) => { setReportType(e.target.value); setFilterId(''); setSelectedProjId(''); setPartyInvoiceFilter(''); }}>
+            <select className="w-full rounded border p-2 min-w-0 sm:min-w-[250px] text-black" value={reportType} onChange={(e) => { setReportType(e.target.value); setFilterId(''); setSelectedProjId(''); setPartyInvoiceFilter(''); }}>
                <option value="ledger">Client Ledger (Statement)</option>
                <option value="client_balance">Client/Vendor Balance Summary</option>
                <option value="vendor_ledger">Vendor Ledger</option>
@@ -1466,7 +1466,7 @@ const Reports = ({
           {reportType === 'ledger' && (
             <div className="w-full md:w-auto">
                <label className="block text-sm font-medium text-slate-700 mb-1">Select Client</label>
-               <select className="w-full rounded border p-2 min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+               <select className="w-full rounded border p-2 min-w-0 sm:min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
                   <option value="">-- Choose Client --</option>
                   {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                </select>
@@ -1476,7 +1476,7 @@ const Reports = ({
           {reportType === 'invoice_status' && (
             <div className="w-full md:w-auto">
               <label className="block text-sm font-medium text-slate-700 mb-1">Invoice Filter</label>
-              <select className="w-full rounded border p-2 min-w-[180px] text-black" value={filterId} onChange={e => setFilterId(e.target.value)}>
+              <select className="w-full rounded border p-2 min-w-0 sm:min-w-[180px] text-black" value={filterId} onChange={e => setFilterId(e.target.value)}>
                 <option value="">All (Invoiced + Non-Invoiced)</option>
                 <option value="Invoiced">Invoiced Only</option>
                 <option value="Not Invoiced">Not Invoiced Only</option>
@@ -1497,7 +1497,7 @@ const Reports = ({
             </div>
             <div className="w-full md:w-auto">
               <label className="block text-sm font-medium text-slate-700 mb-1">Invoice Filter</label>
-              <select className="w-full rounded border p-2 min-w-[200px] text-black" value={partyInvoiceFilter} onChange={(e) => setPartyInvoiceFilter(e.target.value)}>
+              <select className="w-full rounded border p-2 min-w-0 sm:min-w-[200px] text-black" value={partyInvoiceFilter} onChange={(e) => setPartyInvoiceFilter(e.target.value)}>
                 <option value="">All Projects</option>
                 <option value="Invoiced">Invoiced Projects</option>
                 <option value="Not Invoiced">Non Invoiced Projects</option>
@@ -1509,7 +1509,7 @@ const Reports = ({
           {reportType === 'unbilled_shows' && (
             <div className="w-full md:w-auto">
               <label className="block text-sm font-medium text-slate-700 mb-1">Select Client</label>
-              <select className="w-full rounded border p-2 min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+              <select className="w-full rounded border p-2 min-w-0 sm:min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
                 <option value="">All Clients</option>
                 {clients.filter(c => c.type !== 'Vendor').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
@@ -1519,7 +1519,7 @@ const Reports = ({
           {reportType === 'vendor_ledger' && (
             <div className="w-full md:w-auto">
                <label className="block text-sm font-medium text-slate-700 mb-1">Select Vendor</label>
-               <select className="w-full rounded border p-2 min-w-[200px] text-black bg-slate-50 border-slate-200 text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+               <select className="w-full rounded border p-2 min-w-0 sm:min-w-0 sm:min-w-[200px] text-black bg-slate-50 border-slate-200 text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
                   <option value="">-- Choose Vendor --</option>
                   {clients.filter(c => c.type === 'Vendor' || c.type === 'Both').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                </select>
@@ -1530,7 +1530,7 @@ const Reports = ({
             <div className="w-full md:w-auto flex flex-col gap-2">
                <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Select Employee</label>
-                  <select className="w-full rounded border p-2 min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
+                  <select className="w-full rounded border p-2 min-w-0 sm:min-w-[200px] text-black" value={filterId} onChange={(e) => setFilterId(e.target.value)}>
                       <option value="">-- Choose Employee --</option>
                       {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
@@ -1542,7 +1542,7 @@ const Reports = ({
           {['project_ops', 'project_expenses', 'project_pnl'].includes(reportType) && (
             <div className="w-full md:w-auto">
                <label className="block text-sm font-medium text-slate-700 mb-1">Select Project</label>
-               <select className="w-full rounded border p-2 min-w-[250px] text-black" value={selectedProjId} onChange={(e) => setSelectedProjId(e.target.value)}>
+               <select className="w-full rounded border p-2 min-w-0 sm:min-w-[250px] text-black" value={selectedProjId} onChange={(e) => setSelectedProjId(e.target.value)}>
                   <option value="">-- Choose Project --</option>
                   {projects.sort((a,b) => new Date(b.start_date) - new Date(a.start_date)).map(p => (
                       <option key={p.id} value={p.id}>{p.project_name} ({p.status})</option>

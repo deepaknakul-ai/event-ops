@@ -408,8 +408,8 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
 
       {/* Force Close Shift Modal */}
       {closeTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-4">Force Close Shift</h3>
             <p className="text-sm text-slate-600 mb-3">Employee: <strong>{getEmpName(closeTarget.employeeId)}</strong><br />Checked in: {fmtDateTime(closeTarget.checkIn)}</p>
             <label className="text-xs font-bold text-slate-700">Close Time</label>
@@ -424,8 +424,8 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
 
       {/* Shift Request Modal */}
       {showShiftModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-4">{editShift ? 'Edit' : 'New'} Shift Request</h3>
             <div className="space-y-3">
               {can(role, 'hr_shifts', 'view') && (
@@ -437,7 +437,7 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
                   </select>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Start Time</label>
                   <input type="datetime-local" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={shiftForm.startTime} onChange={e => setShiftForm({ ...shiftForm, startTime: e.target.value })} />
@@ -470,8 +470,8 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
 
       {/* Penalty Modal */}
       {showPenaltyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-4">Add Penalty</h3>
             <div className="space-y-3">
               <div>
@@ -499,8 +499,8 @@ const HRAttendance = ({ employees = [], timeLogs = [], shiftRequests = [], penal
       )}
       {/* Adjust Checkout Modal — Admin correction of suspicious late checkouts */}
       {adjustTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto space-y-4">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-full bg-red-100 shrink-0"><AlertTriangle size={20} className="text-red-600" /></div>
               <div>

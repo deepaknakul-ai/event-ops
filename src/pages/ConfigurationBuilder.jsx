@@ -187,7 +187,7 @@ const VideoInsights = ({ items }) => {
           <div key={idx} className="bg-indigo-50 rounded-lg p-3 border border-indigo-100 col-span-2">
             <div className="text-[10px] text-indigo-500 font-bold uppercase">LED Wall {'\u2014'} {item.item_name}</div>
             {specs ? (
-              <div className="grid grid-cols-3 gap-2 mt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-1">
                 {specs.physicalDimensions && <div><div className="text-[10px] text-indigo-400">Size</div><div className="font-bold text-indigo-800 text-sm">{specs.physicalDimensions.totalWidthM}m {'\u00d7'} {specs.physicalDimensions.totalHeightM}m</div></div>}
                 {specs.resolution && <div><div className="text-[10px] text-indigo-400">Resolution</div><div className="font-bold text-indigo-800 text-sm">{specs.resolution.totalPixelWidth} {'\u00d7'} {specs.resolution.totalPixelHeight}</div></div>}
                 {specs.power && <div><div className="text-[10px] text-indigo-400">Max Power</div><div className="font-bold text-indigo-800 text-sm">{specs.power.maxPowerWatts?.toLocaleString()} W</div></div>}
@@ -297,7 +297,7 @@ const GroupAnalysisCard = ({ grpKey, grp, config }) => {
           {grpKey === 'video' && <VideoInsights items={grp.items} />}
           {grpKey === 'rigging' && <RiggingInsights items={grp.items} />}
           {grpKey === 'power' && <PowerInsights items={grp.items} config={config} />}
-          <table className="w-full text-xs">
+          <div className="overflow-x-auto"><table className="w-full text-xs">
             <thead className="text-slate-500 uppercase border-b">
               <tr>
                 <th className="text-left py-1.5 pr-2">Item</th>
@@ -355,7 +355,7 @@ const GroupAnalysisCard = ({ grpKey, grp, config }) => {
                 <td></td>
               </tr>
             </tfoot>
-          </table>
+          </table></div>
         </div>
       )}
     </div>
@@ -1125,7 +1125,7 @@ const ConfigurationBuilder = ({ configurations = [], inventory = [], clients = [
 
         {showItemModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl max-h-[90dvh] overflow-y-auto">
               <div className="flex items-center justify-between px-5 py-3 border-b bg-slate-50">
                 <h3 className="font-bold text-slate-800">{editingItemIdx !== null ? 'Edit Item' : 'Add Item'}</h3>
                 <button onClick={() => setShowItemModal(false)} className="text-slate-400 hover:text-slate-600"><X size={18}/></button>
@@ -1188,7 +1188,7 @@ const ConfigurationBuilder = ({ configurations = [], inventory = [], clients = [
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-slate-600 mb-1">Quantity *</label>
                     <input type="number" min="1" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={itemForm.qty} onChange={e => setItemForm({ ...itemForm, qty: e.target.value })} />
@@ -1210,7 +1210,7 @@ const ConfigurationBuilder = ({ configurations = [], inventory = [], clients = [
                 {itemForm.is_led && (
                   <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-3">
                     <div className="text-sm font-bold text-indigo-800 flex items-center gap-1.5"><Monitor size={14}/> LED Wall Configuration</div>
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div>
                         <label className="block text-xs font-semibold text-indigo-600 mb-1">Tiles Wide</label>
                         <input type="number" min="1" className="w-full rounded-lg border border-indigo-200 px-3 py-2 text-sm bg-white" value={itemForm.tilesWide} onChange={e => setItemForm({ ...itemForm, tilesWide: parseInt(e.target.value) || 0 })} />

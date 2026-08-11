@@ -201,7 +201,7 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
         <h2 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Calendar size={20} className="text-indigo-600" /> Resource Schedule</h2>
         <div className="flex items-center gap-2">
           <button onClick={() => setMonthOffset((m) => m - 1)} className="rounded-lg border border-slate-200 p-1.5 hover:bg-slate-50"><ChevronLeft size={16} /></button>
-          <span className="min-w-[130px] text-center text-sm font-semibold text-slate-700">{monthLabel}</span>
+          <span className="min-w-0 sm:min-w-[130px] text-center text-sm font-semibold text-slate-700">{monthLabel}</span>
           <button onClick={() => setMonthOffset((m) => m + 1)} className="rounded-lg border border-slate-200 p-1.5 hover:bg-slate-50"><ChevronRight size={16} /></button>
           {monthOffset !== 0 && <button onClick={() => setMonthOffset(0)} className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-50">Today</button>}
         </div>
@@ -255,10 +255,12 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
         )}
       </div>
 
-      {/* Timeline */}
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      {/* Timeline — scrolls horizontally on phones. overflow-hidden left ~180px for
+          a 30-day month (≈6px/day): bars were invisible and unreachable. */}
+      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <div className="min-w-[720px]">
         <div className="flex border-b border-slate-100 bg-slate-50 text-[11px] text-slate-400">
-          <div className="w-48 shrink-0 px-3 py-2 font-semibold uppercase tracking-wide">Project</div>
+          <div className="w-32 sm:w-48 shrink-0 px-3 py-2 font-semibold uppercase tracking-wide">Project</div>
           <div className="relative flex-1">
             {weekTicks.map((d) => <span key={d} className="absolute top-0 py-2" style={{ left: `${((d - 1) / daysInMonth) * 100}%` }}>{d}</span>)}
           </div>
@@ -271,7 +273,7 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
           const flagged = conflictIds.has(p.id);
           return (
             <button key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="flex w-full items-stretch border-b border-slate-50 text-left hover:bg-slate-50">
-              <div className="w-48 shrink-0 px-3 py-2.5">
+              <div className="w-32 sm:w-48 shrink-0 px-3 py-2.5">
                 <div className="flex items-center gap-1.5 truncate text-sm font-medium text-slate-700">{flagged && <AlertTriangle size={12} className="shrink-0 text-red-500" />}{p.project_name}</div>
                 <div className="mt-0.5 flex items-center gap-3 text-[11px] text-slate-400"><span className="flex items-center gap-0.5"><Users size={10} /> {crew}</span><span className="flex items-center gap-0.5"><Package size={10} /> {kit}</span></div>
               </div>
@@ -285,6 +287,7 @@ const Schedule = ({ projects = [], inventory = [], employees = [], role = 'manag
             </button>
           );
         })}
+        </div>
       </div>
       <div className="flex flex-wrap gap-3 px-1 text-[11px] text-slate-500">
         {['Quoted', 'Confirmed', 'Ongoing', 'Completed'].map((s) => <span key={s} className="flex items-center gap-1"><span className={`h-2.5 w-2.5 rounded ${statusBar(s)}`} /> {s}</span>)}

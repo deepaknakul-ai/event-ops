@@ -659,8 +659,8 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
 
       {/* Late / Night Checkout Reason Modal */}
       {lateCheckoutModal && pendingCheckoutPayload && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4 max-h-[90dvh] overflow-y-auto">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-full bg-red-100 shrink-0"><Shield size={22} className="text-red-600" /></div>
               <div>
@@ -694,7 +694,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
       )}
 
       {!can(role, 'finance', 'view') && (
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:grid-cols-4">
         <div className="rounded-xl bg-white p-4 shadow-sm border border-slate-200 flex items-start gap-3">
           <div className="p-2 rounded-lg bg-blue-50 text-blue-600"><CalendarDays size={18} /></div>
           <div>
@@ -884,7 +884,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
 
       {/* Calendar */}
       <div className="rounded-xl bg-white shadow-sm border border-slate-200 p-5">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">Project Calendar</h3>
               <div className="flex items-center gap-2">
                   <button
@@ -894,7 +894,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                   >
                     <ChevronRight className="rotate-180" size={16} /> Prev
                   </button>
-                  <span className="min-w-[160px] text-center font-bold text-slate-800">
+                  <span className="min-w-0 sm:min-w-[160px] text-center font-bold text-slate-800">
                     {currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
                   </span>
                   <button
@@ -906,7 +906,10 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                   </button>
               </div>
           </div>
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          {/* Scrollable on phones: 7 columns at ~50px each were unreadable and the
+              overflow-hidden blocked reaching the clipped days. */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+            <div className="min-w-[640px]">
               <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50">
                   {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
                       <div key={d} className="p-2 text-center text-xs font-bold text-slate-600 uppercase">{d}</div>
@@ -960,6 +963,7 @@ const Dashboard = ({ projects, expenses, role, clients, onProjectClick, employee
                       </div>
                   );
               })}
+            </div>
           </div>
       </div>
 

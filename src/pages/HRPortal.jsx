@@ -260,7 +260,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
             {/* Location selector */}
             <div>
               <label className="text-xs font-bold text-slate-700 mb-1 block">Location</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 {LOCATION_TYPES.map(loc => (
                   <button
                     key={loc}
@@ -365,7 +365,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
       {tab === 1 && (
         <div className="space-y-4">
           {/* Balance cards */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {LEAVE_TYPES.map(t => (
               <div key={t} className="rounded-xl border bg-white p-4 text-center shadow-sm">
                 <p className="text-xs text-slate-500 uppercase">{t}</p>
@@ -463,8 +463,8 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
 
       {/* Leave Modal */}
       {showLeaveModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-4">Apply for Leave</h3>
             <div className="space-y-3">
               <div>
@@ -473,7 +473,7 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
                   {LEAVE_TYPES.map(t => <option key={t} value={t}>{t} (Balance: {leaveBalance[t]})</option>)}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Start Date</label>
                   <input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={leaveForm.startDate} onChange={e => setLeaveForm({ ...leaveForm, startDate: e.target.value })} />
@@ -518,12 +518,12 @@ const HRPortal = ({ employees = [], timeLogs = [], hrLeaves = [], shiftRequests 
 
       {/* Shift Request Modal */}
       {showShiftModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl max-h-[90dvh] overflow-y-auto">
             <h3 className="text-lg font-bold text-slate-800 mb-1">Request Attendance / Shift</h3>
             <p className="mb-3 rounded bg-indigo-50 border border-indigo-200 px-3 py-1.5 text-xs text-indigo-700">Request the correct date &amp; time for a missed or wrong attendance. An <strong>admin</strong> reviews it; once approved it is recorded as your attendance and marked <strong>SR</strong>.</p>
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Start Time</label>
                   <input type="datetime-local" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={shiftForm.startTime} onChange={e => setShiftForm({ ...shiftForm, startTime: e.target.value })} />

@@ -2317,6 +2317,13 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
                             <div className="font-medium text-slate-800">{item.item_name}</div>
                             {item.description && <div className="text-xs text-slate-500 italic mt-0.5">{item.description}</div>}
                             {item.is_external && <span className="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded mt-1 inline-block">External</span>}
+                            {/* Phone portrait: Days/Rate/Amount/GST columns are hidden
+                                below sm:, so carry them inline — the data was invisible. */}
+                            {canViewProjectFinancials && (
+                              <div className="text-[10px] text-slate-400 sm:hidden mt-0.5">
+                                {item.days}d × {formatCurrency(item.rate)} = {formatCurrency(item.amount || (item.qty * item.rate * item.days))} · GST {formatCurrency(item.gst_amount || ((item.amount || item.qty * item.rate * item.days) * item.gst_rate / 100))}
+                              </div>
+                            )}
                           </td>
                           <td className="p-3 text-center font-medium">{item.qty}</td>
                           <td className="p-3 text-center hidden sm:table-cell">{item.days}</td>
@@ -3109,7 +3116,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
               
               <div className="border-t pt-4">
                 <h4 className="text-sm font-bold text-slate-700 mb-2">Select Items to Include</h4>
-                <div className="border rounded overflow-hidden">
+                <div className="border rounded overflow-x-auto">
                     <table className="w-full text-xs text-left text-slate-600">
                         <thead className="bg-slate-50 text-slate-500"><tr><th className="p-2 w-8"></th><th className="p-2">Item</th><th className="p-2 text-center">Total</th><th className="p-2 text-center">{challanType === 'delivery' ? 'Sent' : 'Returned'}</th><th className="p-2 text-center">Avail</th><th className="p-2 w-20">Current</th></tr></thead>
                         <tbody className="divide-y divide-slate-100">
@@ -3221,7 +3228,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             </div>
 
             {/* Preview of items */}
-            <div className="border rounded overflow-hidden">
+            <div className="border rounded overflow-x-auto">
               <div className="bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600 uppercase">Equipment Snapshot Preview</div>
               <div className="max-h-48 overflow-y-auto">
                 <table className="w-full text-xs">
@@ -3757,7 +3764,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
     <div className="space-y-4">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h2 className="text-2xl font-bold text-slate-800">Projects</h2>
-          <div className="flex gap-2 w-full md:w-auto">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 w-full md:w-auto">
               {(role === 'manager' || role === 'admin') && (
                 <>
                   <button onClick={exportFilteredProjects} className="flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50 whitespace-nowrap w-full md:w-auto"><Download size={18} /> Export</button>
@@ -3868,7 +3875,7 @@ const Projects = ({ projects, clients, inventory, expenses, employees, role, use
             </div>
 
             {/* Main Info Grid: 2x3 Layout */}
-            <div className="grid grid-cols-3 gap-3 mb-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3 text-sm">
               {/* Column 1: Dates */}
               <div className="space-y-2">
                 <div className="bg-slate-50 rounded p-2">

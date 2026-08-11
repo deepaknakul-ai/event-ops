@@ -99,7 +99,7 @@ const DailyReport = ({ projects = [], clients = [], employees = [], expenses = [
       {/* Header + date */}
       <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
         <h2 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Calendar size={20} className="text-indigo-600" /> Daily Report</h2>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => setDate((d) => shiftDate(d, -1))} className="rounded-lg border border-slate-200 p-1.5 hover:bg-slate-50"><ChevronLeft size={16} /></button>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-black" />
           <button onClick={() => setDate((d) => shiftDate(d, 1))} className="rounded-lg border border-slate-200 p-1.5 hover:bg-slate-50"><ChevronRight size={16} /></button>

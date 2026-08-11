@@ -23,6 +23,16 @@
     @apply bg-white border border-slate-200 rounded-lg text-slate-800 text-sm transition-colors duration-150;
   }
 
+  /* Mobile: any control under 16px makes iOS Safari force-zoom the page on focus
+     and never zoom back — the app then looks "scaled wrong" until a manual
+     pinch-out. 16px is the documented threshold, so hold every field at 16px
+     below the sm: breakpoint and let the text-sm compact look apply from 640px. */
+  @media (max-width: 639px) {
+    input, select, textarea {
+      font-size: 16px;
+    }
+  }
+
   input:focus, select:focus, textarea:focus {
     @apply border-indigo-400 ring-2 ring-indigo-100 outline-none;
   }

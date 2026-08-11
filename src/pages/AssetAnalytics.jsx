@@ -90,7 +90,7 @@ const AssetAnalytics = ({ inventory = [], projects = [], role = 'manager' }) => 
     <div className="space-y-4 p-1">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Boxes size={20} className="text-indigo-600" /> Asset Analytics</h2>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
           <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1.5" />
           <span className="text-slate-400">→</span>
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-1.5" />

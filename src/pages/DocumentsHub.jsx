@@ -518,7 +518,7 @@ const DocumentsHub = ({ projects = [], clients = [], role, currentEmpId = null, 
           <div className="space-y-4 text-sm">
 
             {/* Meta row */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <InfoRow icon={Hash}       label="Reference"  value={detailDoc.ref} />
               <InfoRow icon={Calendar}   label="Date"       value={fmt(detailDoc.date)} />
               <InfoRow icon={FileText}   label="Project"    value={detailDoc.projectName} />

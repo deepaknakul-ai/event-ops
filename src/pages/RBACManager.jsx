@@ -430,7 +430,7 @@ const RBACManager = ({ db, appId, logAction }) => {
           <thead>
             {/* Role header row */}
             <tr className="bg-slate-800 text-white">
-              <th className="sticky left-0 bg-slate-800 z-20 text-left px-4 py-3 font-semibold w-52 min-w-[200px] border-r border-slate-700">
+              <th className="sticky left-0 bg-slate-800 z-20 text-left px-4 py-3 font-semibold w-32 min-w-[120px] sm:w-52 sm:min-w-[200px] border-r border-slate-700">
                 Resource / Action
               </th>
               {roleIds.map(roleId => {
@@ -438,7 +438,7 @@ const RBACManager = ({ db, appId, logAction }) => {
                 return (
                   <th
                     key={roleId}
-                    className="px-2 py-3 text-center min-w-[96px] cursor-pointer select-none transition"
+                    className="px-2 py-3 text-center min-w-[64px] sm:min-w-[96px] cursor-pointer select-none transition"
                     onMouseEnter={() => setHoverCol(roleId)}
                     onMouseLeave={() => setHoverCol(null)}
                     onClick={() => toggleAllForRole(roleId)}
@@ -471,7 +471,7 @@ const RBACManager = ({ db, appId, logAction }) => {
                   >
                     {/* Action label — click to toggle all roles for this action */}
                     <td
-                      className="sticky left-0 z-10 bg-inherit pl-8 pr-4 py-2.5 text-slate-600 font-medium border-r border-slate-100 cursor-pointer hover:text-indigo-700 select-none"
+                      className="sticky left-0 z-10 bg-white pl-8 pr-4 py-2.5 text-slate-600 font-medium border-r border-slate-100 cursor-pointer hover:text-indigo-700 select-none"
                       onClick={() => toggleAllForAction(resource, action)}
                       title="Click to toggle this permission for ALL roles"
                     >

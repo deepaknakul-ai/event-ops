@@ -69,7 +69,7 @@ const Commission = ({ clients = [], projects = [], expenses = [], payments = [],
         </p>
       )}
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="text-[11px] font-semibold uppercase text-slate-400">Accrued</div><div className="mt-0.5 text-xl font-bold text-slate-700">{formatCurrency(totals.accrued)}</div></div>
         <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="text-[11px] font-semibold uppercase text-slate-400">Paid out</div><div className="mt-0.5 text-xl font-bold text-emerald-700">{formatCurrency(totals.paid)}</div></div>
         <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="text-[11px] font-semibold uppercase text-slate-400">Balance owed</div><div className={`mt-0.5 text-xl font-bold ${totals.balance > 0 ? 'text-amber-700' : 'text-slate-700'}`}>{formatCurrency(totals.balance)}</div></div>

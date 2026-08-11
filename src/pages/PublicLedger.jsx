@@ -841,7 +841,7 @@ const PublicLedger = () => {
               ))}
             </div>
           )}
-          <div className="overflow-x-auto max-h-[70vh]">
+          <div className="overflow-x-auto max-h-[70dvh]">
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-100 text-slate-600 text-xs uppercase">
                 <tr>
@@ -953,7 +953,7 @@ const PublicLedger = () => {
           <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-4 overflow-y-auto">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl my-6 overflow-hidden">
               {/* Header */}
-              <div className="bg-indigo-700 px-6 py-4 flex items-center justify-between">
+              <div className="bg-indigo-700 px-6 py-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-white/70 text-xs uppercase tracking-widest">Project Cost Breakdown</div>
                   <div className="text-white text-xl font-bold mt-0.5">{p.project_name}</div>
@@ -975,7 +975,7 @@ const PublicLedger = () => {
                 </div>
               </div>
 
-              <div className="p-6 space-y-6 overflow-y-auto max-h-[80vh]">
+              <div className="p-6 space-y-6 overflow-y-auto max-h-[80dvh]">
 
                 {/* Equipment */}
                 {items.length > 0 && (
@@ -1156,7 +1156,7 @@ const PublicLedger = () => {
                 <button onClick={() => setExpenseProject(null)} className="text-white/70 hover:text-white transition-colors"><X size={22} /></button>
               </div>
 
-              <div className="p-6 space-y-6 overflow-y-auto max-h-[80vh]">
+              <div className="p-6 space-y-6 overflow-y-auto max-h-[80dvh]">
                 {/* Direct / actual expenses */}
                 {de.length > 0 && (
                   <section>

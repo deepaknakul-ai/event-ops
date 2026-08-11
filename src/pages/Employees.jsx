@@ -520,7 +520,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
             )}
           </div>
           {canViewPay && (
-             <div className="grid grid-cols-3 gap-2 mt-2">
+             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
                <button onClick={() => { setSelectedEmp(emp); setIsAdvanceModalOpen(true); }} className="flex-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-100 py-1 text-xs font-medium hover:bg-emerald-100 flex items-center justify-center gap-1"><Wallet size={12} /> Advance</button>
                <button onClick={() => { setSelectedEmp(emp); setIsHistoryOpen(true); }} className="flex-1 rounded bg-slate-50 text-slate-700 border border-slate-100 py-1 text-xs font-medium hover:bg-slate-100 flex items-center justify-center gap-1"><History size={12} /> View</button>
                <button onClick={() => openPromotionModal(emp)} className="flex-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-100 py-1 text-xs font-medium hover:bg-indigo-100 flex items-center justify-center gap-1"><TrendingUp size={12} /> Promote</button>
@@ -528,7 +528,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
           )}
           {canViewPay && (
              <div className="mt-2">
-               <div className="grid grid-cols-2 gap-2">
+               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                  <button onClick={() => handleStatementLink(emp)} className="w-full rounded bg-violet-50 text-violet-700 border border-violet-100 py-1 text-xs font-medium hover:bg-violet-100 flex items-center justify-center gap-1"><Link2 size={12} /> Ledger Share</button>
                  <button onClick={() => openEmployeeLedger(emp)} className="w-full rounded bg-cyan-50 text-cyan-700 border border-cyan-100 py-1 text-xs font-medium hover:bg-cyan-100 flex items-center justify-center gap-1"><ExternalLink size={12} /> Open Ledger</button>
                </div>
@@ -555,7 +555,7 @@ const Employees = ({ employees, role, db, appId, advances = [], logAction }) => 
 
           <div className="border-t pt-3">
              <h4 className="text-sm font-semibold mb-2 text-slate-800">Documents & Photos</h4>
-             <div className="grid grid-cols-3 gap-3">
+             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="text-center">
                    <div className="h-20 w-full rounded border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 mb-2 overflow-hidden bg-slate-50">
                       {formData.photo_url ? <img src={formData.photo_url} className="h-full w-full object-cover" /> : <Camera size={24} />}

@@ -854,9 +854,10 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
       {/* ── Page header with tabs ── */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-slate-800">Clients & Vendors</h2>
-        <div className="flex gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap gap-2 w-full md:w-auto">
           {activeTab === 'list' && (
-            <div className="hidden md:flex items-center rounded border px-3 py-1 bg-white flex-1">
+            /* was hidden md:flex — client search did not exist on phones */
+            <div className="flex items-center rounded border px-3 py-1 bg-white w-full md:w-auto md:flex-1">
               <Search size={16} className="text-slate-400 mr-2" />
               <input placeholder="Search..." className="text-sm outline-none text-black" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             </div>
@@ -1022,7 +1023,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                           <div className="text-xs text-slate-400">{c.type} · {GST_STATE_CODES[c.gstin?.substring(0,2)] || 'Unknown State'} · {cp.length} project{cp.length !== 1 ? 's' : ''}</div>
                         </div>
                       </div>
-                      <div className="text-right shrink-0 hidden md:block">
+                      <div className="text-right shrink-0">
                         <div className="text-sm font-bold text-slate-700">{formatCurrency(totalRev)}</div>
                         {outstanding > 0 && <div className="text-xs text-amber-600">{formatCurrency(outstanding)} due</div>}
                         {outstanding <= 0 && invoiced > 0 && <div className="text-xs text-green-600">Settled</div>}
@@ -1088,7 +1089,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               </select>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-bold text-slate-700">Amount (₹)</label>
               <input type="number" min="0" step="0.01" className="w-full rounded border border-slate-300 p-2 text-black" value={receiptForm.amount} onChange={(e) => setReceiptForm({ ...receiptForm, amount: e.target.value })} />
@@ -1098,7 +1099,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               <input type="date" className="w-full rounded border border-slate-300 p-2 text-black" value={receiptForm.date} onChange={(e) => setReceiptForm({ ...receiptForm, date: e.target.value })} />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-bold text-slate-700">Mode</label>
               <select className="w-full rounded border border-slate-300 p-2 bg-white text-black" value={receiptForm.mode} onChange={(e) => setReceiptForm({ ...receiptForm, mode: e.target.value })}>
@@ -1122,7 +1123,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-black border-b pb-1">Basic Details</h4>
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Basic Details</h4>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
               <label htmlFor="client-type" className="block text-sm font-bold text-slate-800">Type</label>
               <select id="client-type" name="type" className="w-full rounded border p-2 bg-white text-black focus:ring-2 focus:ring-indigo-500" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}>
@@ -1159,7 +1160,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Financial & Terms</h4>
             <div><label className="block text-sm font-bold text-slate-800">Credit Terms</label><select className="w-full rounded border p-2 bg-white text-slate-800" value={formData.billing_terms} onChange={e => setFormData({...formData, billing_terms: e.target.value})}><option value="Net 15">Net 15 Days</option><option value="Net 30">Net 30 Days</option><option value="Net 45">Net 45 Days</option><option value="Net 60">Net 60 Days</option><option value="Net 90">Net 90 Days</option></select></div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div>
                 <label className="block text-sm font-bold text-slate-800">Owner / Brought by <span className="text-xs font-normal text-slate-500">(earns referral)</span></label>
                 {role === 'admin' ? (
@@ -1187,7 +1188,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
                   <button type="button" onClick={() => setFormData({ ...formData, opening_balance: { ...blankOpening } })} className="text-xs text-rose-600 hover:underline">Clear</button>
                 )}
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600">Amount</label>
                   <input
@@ -1237,7 +1238,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
             {formData.contacts.length > 0 && (
               <div className="space-y-2 mb-3">{formData.contacts.map((c, idx) => (<div key={idx} className="flex items-center justify-between bg-slate-50 p-2 rounded border border-slate-200"><div><div className="text-sm font-medium text-slate-800">{c.name}</div><div className="text-xs text-slate-500">{c.phone}</div></div><button onClick={() => handleRemoveContact(idx)} className="text-red-500 hover:text-red-700"><Trash2 size={14} /></button></div>))}</div>
             )}
-            <div className="bg-slate-50 p-3 rounded border border-dashed border-slate-300"><div className="grid grid-cols-2 gap-2 mb-2"><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Name *" value={newContact.name} onChange={e => setNewContact({...newContact, name: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Role" value={newContact.role} onChange={e => setNewContact({...newContact, role: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Phone *" value={newContact.phone} onChange={e => setNewContact({...newContact, phone: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Email" value={newContact.email} onChange={e => setNewContact({...newContact, email: e.target.value})} /></div><button onClick={handleAddContact} className="w-full rounded border border-indigo-200 bg-white py-1 text-sm text-indigo-600 hover:bg-indigo-50">+ Add to List</button></div>
+            <div className="bg-slate-50 p-3 rounded border border-dashed border-slate-300"><div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2"><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Name *" value={newContact.name} onChange={e => setNewContact({...newContact, name: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Role" value={newContact.role} onChange={e => setNewContact({...newContact, role: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Phone *" value={newContact.phone} onChange={e => setNewContact({...newContact, phone: e.target.value})} /><input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Email" value={newContact.email} onChange={e => setNewContact({...newContact, email: e.target.value})} /></div><button onClick={handleAddContact} className="w-full rounded border border-indigo-200 bg-white py-1 text-sm text-indigo-600 hover:bg-indigo-50">+ Add to List</button></div>
           </div>
           <div className="space-y-3">
             <h4 className="text-sm font-semibold text-slate-800 border-b pb-1">Additional Companies / Branches (Unique GSTIN)</h4>
@@ -1256,7 +1257,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
               </div>
             )}
             <div className="rounded border border-dashed border-slate-300 bg-slate-50 p-3">
-              <div className="grid grid-cols-2 gap-2 mb-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                 <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="Company / Branch Name *" value={newCompany.name} onChange={e => setNewCompany({ ...newCompany, name: e.target.value })} />
                 <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400" placeholder="GSTIN *" value={newCompany.gstin} onChange={e => setNewCompany({ ...newCompany, gstin: e.target.value.toUpperCase() })} />
                 <input className="rounded border p-1.5 text-sm bg-white text-black placeholder-slate-400 col-span-2" placeholder="Address *" value={newCompany.address} onChange={e => setNewCompany({ ...newCompany, address: e.target.value })} />
@@ -1341,7 +1342,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
         <div className="space-y-6">
             <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
                 <h4 className="text-sm font-bold text-slate-700 mb-3 text-slate-800">Add New Asset</h4>
-                <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                     <div>
                     <label htmlFor="vendor-asset-name" className="text-xs font-bold text-slate-700">Item Name</label>
                     <input id="vendor-asset-name" name="vendor_asset_name" className="w-full rounded border border-slate-300 p-2 text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500" value={vendorAssetForm.name} onChange={e => setVendorAssetForm({...vendorAssetForm, name: e.target.value})} placeholder="e.g. LED Wall Panel" />
@@ -1361,7 +1362,7 @@ const Clients = ({ clients, inventory, projects = [], payments = [], vendorPayme
 
             <div>
                 <h4 className="text-sm font-bold text-slate-800 mb-2">Current Assets</h4>
-                <div className="max-h-60 overflow-y-auto border rounded-lg">
+                <div className="max-h-60 overflow-y-auto overflow-x-auto border rounded-lg">
                     <table className="w-full text-sm text-left"><thead className="bg-slate-100 text-slate-800 font-bold sticky top-0"><tr><th className="p-2">Item</th><th className="p-2">Qty</th><th className="p-2">Price</th><th className="p-2"></th></tr></thead><tbody className="divide-y divide-slate-100">
                         {inventory.filter(i => i.vendor_id === selectedVendorForAssets?.id).map(item => (
                             <tr key={item.id}><td className="p-2 text-black">{item.name}<div className="text-xs text-slate-500">{item.category}</div></td><td className="p-2 text-black">{item.total}</td><td className="p-2 text-black">{formatCurrency(item.rate_per_day)}</td><td className="p-2 text-right"><button onClick={() => handleDeleteAsset(item.id)} className="text-red-500 hover:text-red-700"><Trash2 size={14}/></button></td></tr>

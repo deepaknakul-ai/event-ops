@@ -44,7 +44,7 @@ const AuditLogs = ({ db, appId, role }) => {
             <div><label className="text-xs font-bold text-slate-700 uppercase">From Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={filters.startDate} onChange={e => setFilters({...filters, startDate: e.target.value})} /></div>
             <div><label className="text-xs font-bold text-slate-700 uppercase">To Date</label><input type="date" className="w-full rounded border border-slate-300 p-2 text-sm text-black" value={filters.endDate} onChange={e => setFilters({...filters, endDate: e.target.value})} /></div>
         </div>
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
             <div className="max-h-[600px] overflow-y-auto">
                 <table className="w-full text-left text-sm">
                     <thead className="bg-slate-50 text-slate-700 font-semibold sticky top-0"><tr><th className="p-3">Timestamp</th><th className="p-3">User</th><th className="p-3">Action</th><th className="p-3">Category</th><th className="p-3">Target</th><th className="p-3">Details</th></tr></thead>

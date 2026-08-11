@@ -152,8 +152,11 @@ const InventoryCalendar = ({ inventory = [], projects = [], clients = [], isOpen
           ))}
         </div>
 
-        {/* Calendar grid */}
-        <div className="rounded-xl border border-slate-200 overflow-hidden">
+        {/* Calendar grid — horizontally scrollable on phones: 7 columns crushed
+            into a 360px viewport are unreadable, so hold a 560px minimum and let
+            the wrapper scroll instead. */}
+        <div className="rounded-xl border border-slate-200 overflow-x-auto">
+          <div className="min-w-[560px]">
           {/* Day headers */}
           <div className="grid grid-cols-7 bg-slate-50 border-b border-slate-200">
             {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
@@ -209,6 +212,7 @@ const InventoryCalendar = ({ inventory = [], projects = [], clients = [], isOpen
               })}
             </div>
           ))}
+          </div>
         </div>
 
         {/* Month projects list */}

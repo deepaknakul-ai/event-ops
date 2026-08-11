@@ -135,7 +135,7 @@ const Portal = () => {
         {/* Vendor engagement */}
         {isVendor && vendor && (
           <Section icon={<CheckCircle2 size={16} className="text-amber-600" />} title="Vendor Engagement">
-            <div className="grid grid-cols-3 gap-3 px-3 py-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 px-3 py-3 text-sm">
               <div><div className="text-[11px] text-slate-500">Job Value</div><div className="font-bold text-slate-800">{formatCurrency(vendor.billed)}</div></div>
               <div><div className="text-[11px] text-slate-500">Paid</div><div className="font-bold text-emerald-700">{formatCurrency(vendor.paid)}</div></div>
               <div><div className="text-[11px] text-slate-500">Balance</div><div className={`font-bold ${vendor.balance > 0.5 ? 'text-amber-700' : 'text-slate-800'}`}>{formatCurrency(vendor.balance)}</div></div>

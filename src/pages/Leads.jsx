@@ -161,7 +161,7 @@ const Leads = ({ role = 'manager', db, appId, currentEmpId, logAction }) => {
       <Modal isOpen={isOpen} onClose={() => setIsOpen(false)} title={editingId ? 'Edit Lead' : 'Add Lead'}>
         <div className="space-y-3">
           <Field label="Lead / Company Name *"><input className="inp" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field label="Contact Person"><input className="inp" value={form.contact_name} onChange={(e) => setForm({ ...form, contact_name: e.target.value })} /></Field>
             <Field label="Phone"><input className="inp" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
             <Field label="Email"><input className="inp" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>

@@ -132,7 +132,7 @@ const LiveMap = ({ role = 'user', db, appId, employees = [], hqSettings = {} }) 
   const liveCount = locations.filter(isLive).length;
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white md:flex-row">
+    <div className="flex h-[calc(100dvh-7rem)] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white md:flex-row">
       {/* Sidebar */}
       <aside className="flex w-full shrink-0 flex-col border-b border-slate-100 md:w-72 md:border-b-0 md:border-r">
         <div className="border-b border-slate-100 p-3">

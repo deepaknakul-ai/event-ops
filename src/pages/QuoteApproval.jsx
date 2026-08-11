@@ -143,14 +143,14 @@ const QuoteApproval = () => {
         </div>
 
         {/* Items / Package Cost */}
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto shadow-sm">
           <div className="bg-slate-50 px-5 py-3 text-sm font-semibold text-slate-700 flex items-center gap-2 border-b">
             <Package size={16} className="text-indigo-500" /> Equipment &amp; Services
           </div>
 
           {usePackageCost ? (
             <div className="p-5">
-              <div className="grid grid-cols-2 gap-4 text-sm mb-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm mb-4">
                 <div>
                   <div className="text-slate-500 text-xs uppercase font-semibold mb-1">Package Cost (Base)</div>
                   <div className="text-2xl font-bold text-slate-800">{formatCurrency(project.package_cost)}</div>

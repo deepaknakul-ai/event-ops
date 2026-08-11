@@ -231,7 +231,7 @@ const DataPortal = ({ db, appId, role, logAction, addToast }) => {
           <h1 className="text-2xl font-bold text-slate-800">Data Portal</h1>
           <p className="text-sm text-slate-500">Export &amp; import data to set up new accounts or migrate between environments.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             disabled={selected.size === 0 || !!busy}
             onClick={handleExportSelected}

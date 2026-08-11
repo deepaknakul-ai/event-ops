@@ -419,7 +419,7 @@ export default function AppAssistant({
   return (
     <div className="fixed inset-0 z-[120] flex items-end justify-end bg-black/30 sm:items-center sm:justify-end sm:p-4" onClick={onClose}>
       <div
-        className="flex h-[85vh] w-full flex-col rounded-t-2xl bg-white shadow-2xl sm:h-[90vh] sm:max-h-[720px] sm:w-[440px] sm:rounded-2xl"
+        className="flex h-[85dvh] w-full flex-col rounded-t-2xl bg-white shadow-2xl sm:h-[90dvh] sm:max-h-[720px] sm:w-[440px] sm:rounded-2xl pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
@@ -519,7 +519,7 @@ export function AppAssistantLauncher({ onClick }) {
       onClick={onClick}
       title="Ask the assistant"
       aria-label="Open assistant"
-      className="fixed bottom-20 right-4 sm:bottom-5 sm:right-5 z-[110] flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-lg transition hover:scale-105 hover:shadow-xl"
+      className="fixed bottom-20 right-4 sm:bottom-5 sm:right-5 z-[110] mb-[env(safe-area-inset-bottom)] flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-lg transition hover:scale-105 hover:shadow-xl"
     >
       <MessageSquare className="w-6 h-6" />
     </button>

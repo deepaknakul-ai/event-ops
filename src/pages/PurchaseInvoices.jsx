@@ -297,6 +297,38 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
   };
 
   // ── Save ──
+  // Keep the linked PO's stamped summary in sync with this PI. The Outsourcing
+  // page stamps {purchase_invoice_id/no/summary} onto the PO so getEffectivePOCost
+  // can escalate to the invoice without the purchase_invoices collection — but if
+  // the status/amount is then edited HERE and the stamp never followed, every
+  // dashboard would keep trusting a stale figure. Pass stamp=null to clear (PI
+  // deleted or re-linked). linked_po_id is either the PO's stable id or the
+  // legacy composite 'projectId::po_no'.
+  const syncLinkedPOStamp = async (linkedPoId, piId, piNo, stamp) => {
+    if (!linkedPoId) return;
+    const [maybePid, maybePoNo] = String(linkedPoId).split('::');
+    let proj = null; let target = null;
+    for (const p of projects) {
+      const hit = (p.purchase_orders || []).find(po =>
+        po && (po.id === linkedPoId || (p.id === maybePid && po.po_no === maybePoNo)));
+      if (hit) { proj = p; target = hit; break; }
+    }
+    if (!proj || !target) return; // PO gone (cancelled project etc.) — nothing to sync
+    const updatedPOs = (proj.purchase_orders || []).map(po => {
+      if (po !== target) return po;
+      if (!stamp) {
+        const { purchase_invoice_id: _a, purchase_invoice_no: _b, purchase_invoice_summary: _c, ...rest } = po;
+        return rest;
+      }
+      return { ...po, purchase_invoice_id: piId, purchase_invoice_no: piNo, purchase_invoice_summary: stamp };
+    });
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'projects', proj.id), { purchase_orders: updatedPOs });
+    } catch (e) {
+      console.warn('Linked-PO stamp sync failed (dashboards may show the committed PO figure until re-saved):', e);
+    }
+  };
+
   const handleSave = async () => {
     if (editingId ? !can(role, 'purchase_invoices', 'edit') : !can(role, 'purchase_invoices', 'create')) return notify('Access denied: insufficient permissions.', 'error');
     if (!form.invoice_date) return notify('Invoice date is required.', 'error');
@@ -352,6 +384,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
         updated_at: new Date().toISOString(),
       };
 
+      let savedId = editingId;
       if (editingId) {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', editingId), data);
         setRecords(prev => {
@@ -363,12 +396,27 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
       } else {
         data.created_at = new Date().toISOString();
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices'), data);
+        savedId = docRef.id;
         setRecords(prev => {
           const next = [{ id: docRef.id, ...data }, ...prev];
           setPurchaseInvoicesExternal?.(next);
           return next;
         });
         logAction('purchase_invoices', 'create', docRef.id, data, piNo);
+      }
+      // Mirror this PI onto its linked PO (and un-stamp a PO it was moved off).
+      const prevLinked = editingId ? (records.find(r => r.id === editingId)?.linked_po_id || '') : '';
+      if (prevLinked && prevLinked !== (data.linked_po_id || '')) {
+        await syncLinkedPOStamp(prevLinked, null, null, null);
+      }
+      if (data.linked_po_id) {
+        await syncLinkedPOStamp(data.linked_po_id, savedId, piNo, {
+          invoice_ref: data.invoice_ref || piNo,
+          total: round2((data.amount || 0) + (data.gst_amount || 0)),
+          amount: data.amount || 0,
+          gst_amount: data.gst_amount || 0,
+          status: data.status,
+        });
       }
       setIsModalOpen(false);
     } catch (e) {
@@ -395,6 +443,9 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
             }
           }
           await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchase_invoices', rec.id));
+          // Un-stamp the linked PO — a dead pointer with a 'Verified' summary would
+          // keep every dashboard valuing the PO at a no-longer-existing invoice.
+          if (rec.linked_po_id) await syncLinkedPOStamp(rec.linked_po_id, null, null, null);
           setRecords(prev => {
             const next = prev.filter(r => r.id !== rec.id);
             setPurchaseInvoicesExternal?.(next);
@@ -575,6 +626,16 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
                       <td className="p-3 text-slate-600 text-xs whitespace-nowrap">{rec.invoice_date}</td>
                       <td className="p-3 text-slate-700 font-medium text-xs">
                         <div className="truncate max-w-[140px]">{rec.vendor_name || '—'}</div>
+                        {/* Mobile: Inv Ref / GST / Images columns are md:-only, so
+                            carry the essentials inline — they were unreachable. */}
+                        <div className="text-[10px] text-slate-400 md:hidden mt-0.5">
+                          {rec.invoice_ref ? `Ref ${rec.invoice_ref} · ` : ''}GST {formatCurrency(rec.gst_amount || 0)}
+                          {(rec.images || []).length > 0 && (
+                            <button onClick={() => setLightbox({ images: rec.images, idx: 0 })} className="ml-1 text-blue-600 underline">
+                              {rec.images.length} img
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="p-3 text-slate-500 text-xs">
                         <div className="truncate max-w-[140px]">{rec.vendor_company_name || rec.vendor_name || '—'}</div>
@@ -662,7 +723,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
           </div>
 
           {/* Row: date + invoice ref */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Invoice Date <span className="text-red-500">*</span></label>
               <input type="date" className="w-full rounded-lg border border-slate-300 p-2 text-sm bg-white text-slate-800"
@@ -933,7 +994,7 @@ const PurchaseInvoices = ({ db, appId, logAction, inventory = [], clients = [], 
             </div>
 
             {(form.images || []).length > 0 ? (
-              <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
                 {form.images.map((img, idx) => (
                   <div key={idx} className="relative group rounded-lg overflow-hidden border border-slate-200 bg-slate-50 aspect-square flex items-center justify-center">
                     {img.name?.toLowerCase().endsWith('.pdf') ? (
