@@ -57,7 +57,7 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await setDoc(doc(db, path('payouts', 'po_u1')), { employee_id: 'u1', amount: 500 });
       await setDoc(doc(db, path('payouts', 'po_mgrA')), { employee_id: 'mgrA', amount: 700 });
       await setDoc(doc(db, path('advances', 'adv_u1')), { employee_id: 'u1', amount: 200 });
-      await setDoc(doc(db, path('tax_invoices', 'ti1')), { client_id: 'cA', final_amount: 5000 });
+      await setDoc(doc(db, path('tax_invoices', 'ti1')), { client_id: 'cA', final_amount: 5000, invoice_no: 'TI-1' });
       await setDoc(doc(db, path('vendor_payments', 'vp1')), { vendor_id: 'vX', amount: 300 });
       await setDoc(doc(db, path('purchase_invoices', 'pi1')), { vendor_id: 'vX', amount: 400 });
       await setDoc(doc(db, path('leads', 'ld_mgrA')), { name: 'Lead A', created_by: 'mgrA', est_value: 90000 });
@@ -842,6 +842,302 @@ describe.skipIf(!HAS_EMULATOR)('firestore.rules — role isolation', () => {
       await assertFails(setDoc(doc(asUser('admin1'), path('settings', 'credit_labels')), { labels: { cA: { band: 'green' } } }, { merge: true }));
       await assertFails(setDoc(doc(asUser('acct1'), path('settings', 'credit_labels')), { labels: {} }, { merge: true }));
       await assertFails(deleteDoc(doc(asUser('admin1'), path('settings', 'credit_labels'))));
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PARTNERSHIP MODULE — partner role visibility, spend threshold, no-self-
+  // approval, dual sign-off, consent register, governance lock.
+  // Gating: settings/organization.firm_type == 'partnership' AND
+  // settings/partnership {enabled, min_partners_met}. Every control below must
+  // be INERT for a proprietorship (verified at the end).
+  // ═══════════════════════════════════════════════════════════════════════════
+  describe('partnership module', () => {
+    const seedPartnership = async (overrides = {}) => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const db = ctx.firestore();
+        await setDoc(doc(db, path('employees', 'partner1')), { role: 'partner', name: 'Partner One' });
+        await setDoc(doc(db, path('employees', 'partner2')), { role: 'partner', name: 'Partner Two' });
+        await setDoc(doc(db, path('settings', 'organization')), { name: 'Firm', firm_type: 'partnership' });
+        await setDoc(doc(db, path('settings', 'partnership')), {
+          enabled: true, min_partners_met: true, approval_threshold: 50000,
+          partners: {
+            admin1:   { name: 'Admin',       active: true },
+            partner1: { name: 'Partner One', active: true },
+            partner2: { name: 'Partner Two', active: true },
+          },
+          ...overrides,
+        });
+      });
+    };
+
+    describe('partner role — books read (s.12(d)), no writes', () => {
+      test('partner reads journal entries, chart, payroll, purchase invoices', async () => {
+        await seedPartnership();
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('journal_entries', 'je1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('chart_of_accounts', 'coa1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('payroll', 'pr1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('purchase_invoices', 'pi1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('payouts', 'po_mgrA'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('tax_invoices', 'ti1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('payments', 'pay1'))));
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('expenses', 'exp_tech'))));
+      });
+      test('partner reads the audit trail', async () => {
+        await seedPartnership();
+        await assertSucceeds(getDoc(doc(asUser('partner1'), path('audit_logs', 'log1'))));
+      });
+      test('partner CANNOT write the ledger or delete an invoice', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('partner1'), path('journal_entries', 'je_new')), { debit_amount: 1 }));
+        await assertFails(deleteDoc(doc(asUser('partner1'), path('tax_invoices', 'ti1'))));
+        await assertFails(setDoc(doc(asUser('partner1'), path('payments', 'p_new')), { amount: 1 }));
+      });
+    });
+
+    describe('vendor payments — spend threshold + no self-approval', () => {
+      test('above-threshold payment must be born pending', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_big')),
+          { vendor_id: 'vX', amount: 60000, created_by_emp: 'admin1' }));
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_big')),
+          { vendor_id: 'vX', amount: 60000, created_by_emp: 'admin1',
+            partner_approval_status: 'pending', partner_approved_by: null, partner_approved_at: null }));
+      });
+      test('below-threshold payment needs nothing extra', async () => {
+        await seedPartnership();
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_small')),
+          { vendor_id: 'vX', amount: 40000, created_by_emp: 'admin1' }));
+      });
+      test('a DIFFERENT named partner approves; the creator cannot', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('vendor_payments', 'vp_p')),
+            { vendor_id: 'vX', amount: 60000, created_by_emp: 'admin1',
+              partner_approval_status: 'pending', partner_approved_by: null, partner_approved_at: null });
+        });
+        await assertFails(updateDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_p')),
+          { partner_approval_status: 'approved', partner_approved_by: 'admin1', partner_approved_at: 'now' }));
+        await assertFails(updateDoc(doc(asUser('mgrA'), path('vendor_payments', 'vp_p')),
+          { partner_approval_status: 'approved', partner_approved_by: 'mgrA', partner_approved_at: 'now' }));
+        await assertFails(updateDoc(doc(asUser('partner1'), path('vendor_payments', 'vp_p')),
+          { partner_approval_status: 'approved', partner_approved_by: 'partner2', partner_approved_at: 'now' }));
+        await assertSucceeds(updateDoc(doc(asUser('partner1'), path('vendor_payments', 'vp_p')),
+          { partner_approval_status: 'approved', partner_approved_by: 'partner1', partner_approved_at: 'now' }));
+      });
+      test('pure-partner role may ONLY touch the approval fields', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('vendor_payments', 'vp_q')),
+            { vendor_id: 'vX', amount: 60000, created_by_emp: 'admin1',
+              partner_approval_status: 'pending', partner_approved_by: null, partner_approved_at: null });
+        });
+        await assertFails(updateDoc(doc(asUser('partner1'), path('vendor_payments', 'vp_q')),
+          { partner_approval_status: 'approved', partner_approved_by: 'partner1', partner_approved_at: 'now', amount: 99999 }));
+      });
+      test('raising the amount past the threshold sends it back to pending', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('vendor_payments', 'vp_r')),
+            { vendor_id: 'vX', amount: 40000, created_by_emp: 'acct1' });
+        });
+        await assertFails(updateDoc(doc(asUser('acct1'), path('vendor_payments', 'vp_r')), { amount: 90000 }));
+        await assertSucceeds(updateDoc(doc(asUser('acct1'), path('vendor_payments', 'vp_r')),
+          { amount: 90000, partner_approval_status: 'pending' }));
+      });
+    });
+
+    describe('journal drafts — no self-approval binds even the Owner', () => {
+      const seedDraft = async (createdBy) => {
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('journal_drafts', 'jd1')),
+            { narration: 'test', created_by: createdBy, requires_approval: true,
+              approval_status: 'pending', approved_by: null, approved_at: null });
+        });
+      };
+      test('creator-admin CANNOT approve their own draft', async () => {
+        await seedPartnership(); await seedDraft('admin1');
+        await assertFails(updateDoc(doc(asUser('admin1'), path('journal_drafts', 'jd1')),
+          { approval_status: 'approved', approved_by: 'admin1', approved_at: 'now' }));
+      });
+      test('a named partner approves it with their own stamp', async () => {
+        await seedPartnership(); await seedDraft('admin1');
+        await assertFails(updateDoc(doc(asUser('partner1'), path('journal_drafts', 'jd1')),
+          { approval_status: 'approved', approved_by: 'admin1', approved_at: 'now' }));
+        await assertSucceeds(updateDoc(doc(asUser('partner1'), path('journal_drafts', 'jd1')),
+          { approval_status: 'approved', approved_by: 'partner1', approved_at: 'now' }));
+      });
+      test('pure-partner role cannot edit draft CONTENT', async () => {
+        await seedPartnership(); await seedDraft('admin1');
+        await assertFails(updateDoc(doc(asUser('partner1'), path('journal_drafts', 'jd1')), { narration: 'tampered' }));
+      });
+    });
+
+    describe('expenses — threshold + no self-approval', () => {
+      test('above-threshold expense must carry pending partner fields at create', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('tech1'), path('expenses', 'exp_big')),
+          { employee_id: 'tech1', amount: 70000, status: 'Pending' }));
+        await assertSucceeds(setDoc(doc(asUser('tech1'), path('expenses', 'exp_big')),
+          { employee_id: 'tech1', amount: 70000, status: 'Pending',
+            partner_approval_status: 'pending', partner_approved_by: null }));
+      });
+      test('cannot flip to Approved before the partner counter-approval', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('expenses', 'exp_gate')),
+            { employee_id: 'tech1', amount: 70000, status: 'Pending',
+              partner_approval_status: 'pending', partner_approved_by: null });
+        });
+        await assertFails(updateDoc(doc(asUser('admin1'), path('expenses', 'exp_gate')),
+          { status: 'Approved', approved_by: 'admin1' }));
+        await assertSucceeds(updateDoc(doc(asUser('partner1'), path('expenses', 'exp_gate')),
+          { partner_approval_status: 'approved', partner_approved_by: 'partner1', partner_approved_at: 'now' }));
+        await assertSucceeds(updateDoc(doc(asUser('admin1'), path('expenses', 'exp_gate')),
+          { status: 'Approved', approved_by: 'admin1' }));
+      });
+      test('a partner cannot countersign their OWN expense', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('expenses', 'exp_own')),
+            { employee_id: 'partner1', amount: 70000, status: 'Pending',
+              partner_approval_status: 'pending', partner_approved_by: null });
+        });
+        await assertFails(updateDoc(doc(asUser('partner1'), path('expenses', 'exp_own')),
+          { partner_approval_status: 'approved', partner_approved_by: 'partner1', partner_approved_at: 'now' }));
+      });
+      test('approver cannot approve their own spend (below threshold too)', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('expenses', 'exp_self')),
+            { employee_id: 'admin1', amount: 900, status: 'Pending' });
+        });
+        await assertFails(updateDoc(doc(asUser('admin1'), path('expenses', 'exp_self')),
+          { status: 'Approved', approved_by: 'admin1' }));
+        await assertSucceeds(updateDoc(doc(asUser('acct1'), path('expenses', 'exp_self')),
+          { status: 'Approved', approved_by: 'acct1' }));
+      });
+    });
+
+    describe('pending_actions — two different named partners', () => {
+      test('create: initiator may pre-sign slot 1 with OWN id only', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('partner1'), path('pending_actions', 'fy_close_2025-26')),
+          { type: 'fy_close', initiated_by: 'partner1', sig1: { emp: 'partner2', at: 'now' }, sig2: null }));
+        await assertSucceeds(setDoc(doc(asUser('partner1'), path('pending_actions', 'fy_close_2025-26')),
+          { type: 'fy_close', initiated_by: 'partner1', sig1: { emp: 'partner1', at: 'now' }, sig2: null }));
+      });
+      test('slot 2: different partner only; duplicates and outsiders denied', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('pending_actions', 'act1')),
+            { type: 'fy_close', initiated_by: 'partner1', sig1: { emp: 'partner1', at: 'now' }, sig2: null });
+        });
+        await assertFails(updateDoc(doc(asUser('partner1'), path('pending_actions', 'act1')),
+          { sig2: { emp: 'partner1', at: 'now' } }));
+        await assertFails(updateDoc(doc(asUser('mgrA'), path('pending_actions', 'act1')),
+          { sig2: { emp: 'mgrA', at: 'now' } }));
+        await assertFails(updateDoc(doc(asUser('partner2'), path('pending_actions', 'act1')),
+          { sig2: { emp: 'partner2', at: 'now' }, type: 'tampered' }));
+        await assertSucceeds(updateDoc(doc(asUser('partner2'), path('pending_actions', 'act1')),
+          { sig2: { emp: 'partner2', at: 'now' } }));
+      });
+    });
+
+    describe('dual-signed events', () => {
+      const seedSigned = async (id) => {
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('pending_actions', id)),
+            { type: 't', initiated_by: 'partner1',
+              sig1: { emp: 'partner1', at: 'now' }, sig2: { emp: 'partner2', at: 'now' } });
+        });
+      };
+      test('FY close blocked until fy_close_{fy} is dual-signed', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('admin1'), path('fiscal_year_closings', '2025-26')),
+          { fy: '2025-26', status: 'closed', closed_by: 'admin1' }));
+        await seedSigned('fy_close_2025-26');
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('fiscal_year_closings', '2025-26')),
+          { fy: '2025-26', status: 'closed', closed_by: 'admin1' }));
+      });
+      test('invoice cancellation blocked until invoice_cancel_{id} is dual-signed', async () => {
+        await seedPartnership();
+        await assertFails(updateDoc(doc(asUser('admin1'), path('tax_invoices', 'ti1')), { status: 'Cancelled' }));
+        await seedSigned('invoice_cancel_ti1');
+        await assertSucceeds(updateDoc(doc(asUser('admin1'), path('tax_invoices', 'ti1')), { status: 'Cancelled' }));
+      });
+      test('governance: settings/partnership locked behind partnership_settings sign-off', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('admin1'), path('settings', 'partnership')),
+          { enabled: false }, { merge: true }));
+        await seedSigned('partnership_settings');
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'partnership')),
+          { approval_threshold: 100000 }, { merge: true }));
+      });
+    });
+
+    describe('partner_consents — s.12(c) vote isolation', () => {
+      test('only a named partner proposes; proposer stamp enforced', async () => {
+        await seedPartnership();
+        await assertFails(setDoc(doc(asUser('mgrA'), path('partner_consents', 'c1')),
+          { title: 'x', proposed_by: 'mgrA', status: 'open', category: 'ordinary' }));
+        await assertFails(setDoc(doc(asUser('partner1'), path('partner_consents', 'c1')),
+          { title: 'x', proposed_by: 'partner2', status: 'open', category: 'ordinary' }));
+        await assertSucceeds(setDoc(doc(asUser('partner1'), path('partner_consents', 'c1')),
+          { title: 'x', proposed_by: 'partner1', status: 'open', category: 'ordinary' }));
+      });
+      test('each partner writes ONLY their own vote field', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('partner_consents', 'c2')),
+            { title: 'x', proposed_by: 'partner1', status: 'open', category: 'ordinary' });
+        });
+        await assertFails(updateDoc(doc(asUser('partner2'), path('partner_consents', 'c2')),
+          { vote_partner1: { vote: 'yes', at: 'now' } }));
+        await assertFails(updateDoc(doc(asUser('mgrA'), path('partner_consents', 'c2')),
+          { vote_mgrA: { vote: 'yes', at: 'now' } }));
+        await assertSucceeds(updateDoc(doc(asUser('partner2'), path('partner_consents', 'c2')),
+          { vote_partner2: { vote: 'yes', at: 'now' } }));
+      });
+      test('withdraw is proposer-only; a closed resolution is immutable', async () => {
+        await seedPartnership();
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('partner_consents', 'c3')),
+            { title: 'x', proposed_by: 'partner1', status: 'open', category: 'fundamental' });
+        });
+        await assertFails(updateDoc(doc(asUser('partner2'), path('partner_consents', 'c3')),
+          { status: 'withdrawn', closed_at: 'now', closed_by: 'partner2' }));
+        await assertSucceeds(updateDoc(doc(asUser('partner2'), path('partner_consents', 'c3')),
+          { status: 'rejected', closed_at: 'now', closed_by: 'partner2' }));
+        await assertFails(updateDoc(doc(asUser('partner1'), path('partner_consents', 'c3')),
+          { vote_partner1: { vote: 'yes', at: 'now' } }));
+        await assertFails(deleteDoc(doc(asUser('admin1'), path('partner_consents', 'c3'))));
+      });
+    });
+
+    describe('proprietorship stays EXACTLY as before (controls inert)', () => {
+      test('no firm_type: big vendor payment, self-approval, FY close all work as today', async () => {
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_plain')),
+          { vendor_id: 'vX', amount: 500000 }));
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('journal_drafts', 'jd_p')),
+            { narration: 'x', created_by: 'admin1', approval_status: 'pending', approved_by: null });
+        });
+        await assertSucceeds(updateDoc(doc(asUser('admin1'), path('journal_drafts', 'jd_p')),
+          { approval_status: 'approved', approved_by: 'admin1', approved_at: 'now' }));
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('fiscal_year_closings', '2025-26')),
+          { fy: '2025-26', status: 'closed', closed_by: 'admin1' }));
+        await assertSucceeds(updateDoc(doc(asUser('admin1'), path('tax_invoices', 'ti1')), { status: 'Cancelled' }));
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('settings', 'partnership')),
+          { enabled: true, partners: {} }));
+      });
+      test('declared proprietorship: same freedom', async () => {
+        await testEnv.withSecurityRulesDisabled(async (ctx) => {
+          await setDoc(doc(ctx.firestore(), path('settings', 'organization')), { name: 'Solo', firm_type: 'proprietorship' });
+        });
+        await assertSucceeds(setDoc(doc(asUser('admin1'), path('vendor_payments', 'vp_solo')),
+          { vendor_id: 'vX', amount: 500000 }));
+      });
     });
   });
 });

@@ -8,10 +8,11 @@ import * as XLSX from '@e965/xlsx';
 import { ConfirmDeleteModal } from '../components/Shared';
 import { formatCurrency, getEffectivePOCost, getFYFromDate, fmtDate } from '../utils/helpers';
 import { can } from '../utils/permissions';
+import { needsPartnerApproval } from '../utils/partnership';
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Finance = ({ clients, employees, projects, payments, payouts, vendorPayments = [], expenses, advances, role, db, appId, user, logAction, lockedFYs = [] }) => {
+const Finance = ({ clients, employees, projects, payments, payouts, vendorPayments = [], expenses, advances, role, db, appId, user, logAction, lockedFYs = [], orgSettings = null, partnership = null, currentEmpId = null }) => {
   const [activeTab, setActiveTab] = useState('client_in'); // 'client_in' or 'emp_out'
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
@@ -144,6 +145,7 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
       remarks: form.remarks,
       status: role === 'manager' ? 'Pending Review' : 'Approved',
       recorded_by_role: role,
+      recorded_by: currentEmpId || user?.uid || '',
       updated_at: new Date().toISOString()
     };
 
@@ -228,19 +230,35 @@ const Finance = ({ clients, employees, projects, payments, payouts, vendorPaymen
       updated_at: new Date().toISOString()
     };
 
+    // Partnership spend control: a vendor payment above the partner-approval
+    // threshold is born PENDING — a second partner must counter-sign it on the
+    // Partnership page before it counts (also enforced in firestore.rules).
+    const needsPartner = needsPartnerApproval(data.amount, orgSettings, partnership);
+    if (needsPartner && !editingId) {
+      data.partner_approval_status = 'pending';
+      data.partner_approved_by = null;
+      data.partner_approved_at = null;
+    }
     if (editingId) {
+        // Raising the amount past the threshold sends it back for counter-approval.
+        if (needsPartner) {
+          data.partner_approval_status = 'pending';
+          data.partner_approved_by = null;
+          data.partner_approved_at = null;
+        }
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'vendor_payments', editingId), data);
         logAction('vendor_payments', 'update', editingId, data, `Updated Payment to ${vendor.name}`);
-        notify("Vendor Payment Updated", 'success');
+        notify(needsPartner ? 'Updated — needs a partner\'s approval (amount above threshold).' : 'Vendor Payment Updated', needsPartner ? 'info' : 'success');
         cancelEdit();
     } else {
         const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'vendor_payments'), {
             ...data,
             created_at: new Date().toISOString(),
-            created_by: user.uid
+            created_by: user.uid,
+            created_by_emp: currentEmpId || user.uid
         });
         logAction('vendor_payments', 'pay_vendor', docRef.id, data, `Payment to ${vendor.name}`);
-        notify("Vendor Payment Recorded", 'success');
+        notify(needsPartner ? 'Recorded as PENDING — another partner must approve it on the Partnership page.' : 'Vendor Payment Recorded', needsPartner ? 'info' : 'success');
         setForm({ ...form, amount: '', reference: '', remarks: '' });
     }
   };

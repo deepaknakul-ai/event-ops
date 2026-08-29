@@ -14,6 +14,7 @@ import { formatCurrency, generateSecureToken } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { STATUS_COLORS, EXPENSE_CATS } from '../utils/constants';
 import { can } from '../utils/permissions';
+import { needsPartnerApproval } from '../utils/partnership';
 import { buildExpenseMaster } from '../utils/expenseMaster';
 
 // Small reusable component to show proof badge/link
@@ -29,7 +30,7 @@ const ProofBadge = ({ proof_url }) => {
 
 const isExpenseExcludedStatus = (status) => status === 'Rejected' || status === 'Disapproved';
 
-const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], payouts = [], currentEmpId, employees = [], logAction, expenseCats: expenseCatsProp, lockedFYs = [] }) => {
+const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], payouts = [], currentEmpId, employees = [], logAction, expenseCats: expenseCatsProp, lockedFYs = [], orgSettings = null, partnership = null }) => {
   const expenseCats = expenseCatsProp || EXPENSE_CATS;
   const [viewMode, setViewMode] = useState('submit');
   const [batchList, setBatchList] = useState([]);
@@ -192,6 +193,12 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
         ...restFields,
         employee_id: effectiveUserId,
         status: 'Pending',
+        // Partnership spend control: an expense above the partner-approval
+        // threshold additionally needs a second partner's counter-approval on
+        // the Partnership page before it can be Approved (rules-enforced).
+        ...(needsPartnerApproval(restFields.amount, orgSettings, partnership)
+          ? { partner_approval_status: 'pending', partner_approved_by: null }
+          : {}),
         created_at: new Date().toISOString(),
         proof_url: proof_url || '',
         proof_path: proof_path || '',
@@ -240,8 +247,10 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     // FY is already locked.
     const exp = expenses.find(e => e.id === id);
     if (exp && !assertFYNotLocked(exp.date, lockedFYs)) return;
+    if (exp?.partner_approval_status === 'pending') return notify('This expense is above the partner-approval threshold — a partner must counter-approve it on the Partnership page first.', 'error');
+    if (exp && exp.employee_id === currentEmpId && orgSettings?.firm_type === 'partnership') return notify('You cannot approve your own expense — another approver must.', 'error');
     if (!await confirmDialog("Approve this expense?")) return;
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' });
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved', approved_by: currentEmpId || user?.uid || '', approved_at: new Date().toISOString() });
     logAction('expenses', 'approve', id, {}, 'Expense Approved');
   };
 
@@ -285,7 +294,7 @@ const Expenses = ({ expenses, projects, user, role, db, appId, advances = [], pa
     if (!can(role, 'expenses', 'approve')) return notify('Access denied: insufficient permissions.', 'error');
     if (selectedApprovalIds.length === 0) return notify('Select at least one expense.', 'error');
     if (!await confirmDialog(`Approve ${selectedApprovalIds.length} expense(s)?`)) return;
-    await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved' })));
+    await Promise.all(selectedApprovalIds.map(id => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id), { status: 'Approved', approved_by: currentEmpId || user?.uid || '', approved_at: new Date().toISOString() })));
     selectedApprovalIds.forEach(id => logAction('expenses', 'approve', id, {}, 'Expense Approved'));
     setSelectedApprovalIds([]);
   };

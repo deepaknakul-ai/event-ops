@@ -75,7 +75,7 @@ service cloud.firestore {
     // isRoleUser: authenticated AND holds any recognised role.
     // Prevents anonymous sessions from writing (closes the broad isAuthed() gap).
     function isRoleUser(appId) {
-      return hasAnyRole(appId, ['admin', 'accountant', 'manager', 'tech', 'user']);
+      return hasAnyRole(appId, ['admin', 'accountant', 'manager', 'tech', 'user', 'partner']);
     }
 
     // Finance writers: Owner + Accountant (the finance operators) + Manager (needed
@@ -95,6 +95,64 @@ service cloud.firestore {
     }
     function seesAllParties(appId) {
       return isAdmin(appId) || isAccountant(appId);
+    }
+
+    // ── Partnership (s.12(d) Partnership Act: a partner may access, inspect
+    //    and copy the books of the firm) ─────────────────────────────────────
+    // canViewBooks = the READ-side superset of seesAllParties: partners see the
+    // full books but keep NO delete/edit powers (those stay on seesAllParties).
+    function isPartnerRole(appId) {
+      return hasRole(appId, 'partner');
+    }
+    // Single hasAnyRole call, NOT seesAllParties()||isPartnerRole(): this runs
+    // five times inside the deep wildcard read expression, and the expanded
+    // 3-lookup form pushed non-admin reads past the rules engine's
+    // 1000-expression evaluation cap (observed under the emulator).
+    function canViewBooks(appId) {
+      return hasAnyRole(appId, ['admin', 'accountant', 'partner']);
+    }
+    // Registry doc: settings/partnership. partners is a MAP keyed by empId so
+    // rules can test membership. Approval POWER comes from being NAMED here —
+    // not from the role — so an admin who is also a partner can approve.
+    function partnershipDoc(appId) {
+      return get(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/partnership).data;
+    }
+    function partnershipExists(appId) {
+      return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/partnership);
+    }
+    function isNamedPartner(appId) {
+      return partnershipExists(appId)
+        && (userEmpId() in partnershipDoc(appId).get('partners', {}))
+        && partnershipDoc(appId).get('partners', {})[userEmpId()].get('active', true) == true;
+    }
+    // The machinery is live only when the firm declared itself a partnership
+    // (first-run wizard) AND the registry is enabled. The >=2-active-partners
+    // half of partnershipActive lives client-side (rules cannot count map
+    // keys); the min_partners_met flag is maintained by the admin registry
+    // save and double-checked client-side before any gate engages.
+    function partnershipActive(appId) {
+      return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/organization)
+        && get(/databases/$(database)/documents/artifacts/$(appId)/public/data/settings/organization).data.get('firm_type', '') == 'partnership'
+        && partnershipExists(appId)
+        && partnershipDoc(appId).get('enabled', false) == true
+        && partnershipDoc(appId).get('min_partners_met', false) == true;
+    }
+    // Spend threshold for partner counter-approval (0/absent = disabled).
+    function partnerApprovalThreshold(appId) {
+      return partnershipDoc(appId).get('approval_threshold', 0);
+    }
+    // Two-partner sign-off: a pending_actions/{id} doc must carry two signature
+    // slots filled by two DIFFERENT people (each slot only ever writable with
+    // the signer's own empId — see the pending_actions stanza). Gated events
+    // (FY close, invoice cancellation) get() this doc by a deterministic id.
+    function pendingAction(appId, id) {
+      return get(/databases/$(database)/documents/artifacts/$(appId)/public/data/pending_actions/$(id)).data;
+    }
+    function dualSigned(appId, id) {
+      return exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/pending_actions/$(id))
+        && pendingAction(appId, id).get('sig1', {}).get('emp', '') != ''
+        && pendingAction(appId, id).get('sig2', {}).get('emp', '') != ''
+        && pendingAction(appId, id).get('sig1', {}).get('emp', '') != pendingAction(appId, id).get('sig2', {}).get('emp', '');
     }
 
     // ── FY lock (grey-area B7) ───────────────────────────────────────────────
@@ -218,7 +276,10 @@ service cloud.firestore {
                   // hourlyRateHistory/ctc/salary moved off the base employee doc (which
                   // every role reads for name/role/assignment). Pay = admin/accountant
                   // (view_pay) only — never manager/tech/user.
-                  && (seesAllParties(appId) || !(collection in [
+                  // canViewBooks (= admin/accountant/partner): a partner has the
+                  // statutory right to inspect the books (s.12(d) Partnership Act)
+                  // — read-only; every write/delete gate below stays partner-free.
+                  && (canViewBooks(appId) || !(collection in [
                        'journal_entries', 'journal_drafts', 'journal_templates',
                        'chart_of_accounts', 'opening_balances', 'fiscal_year_closings',
                        'recurring_rules', 'reconcile_matches', 'reconcile_sessions',
@@ -227,7 +288,7 @@ service cloud.firestore {
                   // Payroll (payouts) + advances carry employee_id: Owner/Accountant
                   // read all; everyone else reads ONLY their own record. Enforced for
                   // GET (resource.data) and for the self-scoped list query the app runs.
-                  && (seesAllParties(appId) || !(collection in ['payouts', 'advances'])
+                  && (canViewBooks(appId) || !(collection in ['payouts', 'advances'])
                       || resource.data.get('employee_id', '') == userEmpId())
                   // Tax invoices + vendor payments + HR penalties + inventory_financials:
                   // Owner/Accountant/Manager only. Tech and Coordinator have no stake and
@@ -235,21 +296,24 @@ service cloud.firestore {
                   // is the sibling holding inventory rates/costs moved off the base
                   // inventory doc — managers keep read (they seed project allocations from
                   // rates); tech/user (operational stock/scan only) are denied.
-                  && (seesAllParties(appId) || hasRole(appId, 'manager')
+                  && (canViewBooks(appId) || hasRole(appId, 'manager')
                       || !(collection in ['tax_invoices', 'vendor_payments', 'penalties', 'inventory_financials']))
                   // Leads / CRM pipeline: Owner/Accountant see all; a Manager sees ONLY
                   // leads they created (manager-vs-manager pipeline isolation); tech/user
                   // denied entirely.
-                  && (seesAllParties(appId) || collection != 'leads'
+                  && (canViewBooks(appId) || collection != 'leads'
                       || (hasRole(appId, 'manager') && resource.data.get('created_by', '') == userEmpId()))
                   // Payments: Owner/Accountant/Manager read all; a Coordinator (user)
                   // reads ONLY payments of clients they referred (denormalised
                   // client_owner_id == uid, for their commission); tech denied. The
                   // client_owner_id is stamped server-side by onPaymentWritten +
                   // backfillPaymentOwners.
-                  && (seesAllParties(appId) || hasRole(appId, 'manager')
+                  && (canViewBooks(appId) || hasRole(appId, 'manager')
                       || collection != 'payments'
-                      || resource.data.get('client_owner_id', '') == userEmpId());
+                      || resource.data.get('client_owner_id', '') == userEmpId())
+                  // Partnership governance docs get dedicated stanzas below —
+                  // excluded here so their stricter reads are authoritative.
+                  && !(collection in ['partner_consents']);
 
       // Writes: require a recognised role (not anonymous).
       // Finance collections: admin/manager only, with extra journal_drafts guard.
@@ -266,7 +330,7 @@ service cloud.firestore {
         // dedicated admin-only settings stanza. Every settings writer in the app
         // expects admin-only enforcement (Chat.jsx catch: "Only an admin can
         // change this."). Excluded here so the settings stanza is authoritative.
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations', 'pending_actions', 'partner_consents']
       ) ? false
         // Inventory carries rate_per_day / purchase_cost, and penalties are salary
         // deductions — only admin/manager may create/edit them (tech/user must not
@@ -320,9 +384,27 @@ service cloud.firestore {
           // does a getDoc first that a manager cannot pass, so managers never wrote it
           // in practice — this closes the unbounded cross-party tamper hole.
           (((collection in ['payments', 'tax_invoices', 'vendor_payments'])
-                 ? isFinanceWriter(appId) : seesAllParties(appId)) && (
+                 ? (isFinanceWriter(appId)
+                    // A pure-partner role may reach vendor_payments ONLY to write
+                    // its partner-approval decision (the clause below pins the
+                    // diff to the approval fields for them).
+                    || (collection == 'vendor_payments' && isPartnerRole(appId) && partnershipActive(appId)))
+                 : (seesAllParties(appId)
+                    // …and journal_drafts ONLY for the approval-decision branch.
+                    || (collection == 'journal_drafts' && isPartnerRole(appId) && partnershipActive(appId)))) && (
             collection != 'journal_drafts'
-            || isAdmin(appId)
+            // Proprietorship: admin keeps today's full control. Partnership: even
+            // the admin is bound by no-self-approval — approval-field writes must
+            // stamp approved_by = the CALLER, and the caller must not be the
+            // draft's creator ("no self-approval anywhere", s.12 fiduciary duty).
+            || (isAdmin(appId) && !partnershipActive(appId))
+            || ((isAdmin(appId) || isNamedPartner(appId))
+                && partnershipActive(appId)
+                && resource != null
+                && request.resource.data.diff(resource.data).affectedKeys()
+                     .hasAny(['approval_status', 'approved_by', 'approved_at', 'rejection_reason'])
+                && request.resource.data.get('approved_by', '') == userEmpId()
+                && resource.data.get('created_by', '') != userEmpId())
             // CREATE: managers may set approval_status to 'pending' only; no approver stamps.
             || (resource == null
                 && (!('approval_status' in request.resource.data) ||
@@ -334,12 +416,59 @@ service cloud.firestore {
                     request.resource.data.approved_at == null)
                 && (!('rejection_reason' in request.resource.data) ||
                     request.resource.data.rejection_reason == null))
-            // UPDATE: approval fields must not be in the diff.
+            // UPDATE: approval fields must not be in the diff. (Content edits —
+            // not for the pure-partner role, which only decides approvals.)
             || (resource != null
+                && !isPartnerRole(appId)
                 && !request.resource.data.diff(resource.data).affectedKeys()
                     .hasAny(['approval_status', 'approved_by',
                              'approved_at', 'rejection_reason']))
           )
+          // ── Partnership spend threshold: vendor payments (money OUT) ───────
+          // When the firm is a partnership with a threshold set, a vendor
+          // payment ABOVE it must be born 'pending' with no approver stamps;
+          // the partner-approval fields are writable only by a NAMED partner
+          // who is not the creator (no self-approval); and raising the amount
+          // past the threshold on an existing doc sends it back to pending.
+          && (collection != 'vendor_payments' || !partnershipActive(appId) || (
+            (resource == null
+              ? (partnerApprovalThreshold(appId) <= 0
+                 || request.resource.data.get('amount', 0) <= partnerApprovalThreshold(appId)
+                 || (request.resource.data.get('partner_approval_status', '') == 'pending'
+                     && request.resource.data.get('partner_approved_by', null) == null
+                     && request.resource.data.get('partner_approved_at', null) == null
+                     && request.resource.data.get('created_by_emp', '') == userEmpId()))
+              : (
+                  // approval-field writes: either a RESET to pending (stamps
+                  // cleared — e.g. the amount was raised and the doc must go
+                  // back for counter-approval), or a DECISION by a named
+                  // partner with their own stamp who is not the creator.
+                  (!request.resource.data.diff(resource.data).affectedKeys()
+                      .hasAny(['partner_approval_status', 'partner_approved_by', 'partner_approved_at', 'partner_rejection_reason'])
+                   || (request.resource.data.get('partner_approval_status', '') == 'pending'
+                       && request.resource.data.get('partner_approved_by', null) == null)
+                   || (isNamedPartner(appId)
+                       && request.resource.data.get('partner_approved_by', '') == userEmpId()
+                       && resource.data.get('created_by_emp', '') != userEmpId()))
+                  // a pure-partner role may ONLY write the approval fields
+                  && (!isPartnerRole(appId)
+                      || request.resource.data.diff(resource.data).affectedKeys()
+                          .hasOnly(['partner_approval_status', 'partner_approved_by', 'partner_approved_at', 'partner_rejection_reason']))
+                  // amount raised past the threshold → must return to pending
+                  && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['amount'])
+                      || partnerApprovalThreshold(appId) <= 0
+                      || request.resource.data.get('amount', 0) <= partnerApprovalThreshold(appId)
+                      || request.resource.data.get('partner_approval_status', '') == 'pending')
+                ))
+          ))
+          // ── Partnership dual sign-off: FY close ────────────────────────────
+          // Closing a fiscal year is a firm-level event (s.19(2) spirit): when
+          // the partnership is active, the fiscal_year_closings doc may be
+          // created only after TWO different named partners signed the
+          // pending_actions/fy_close_{fy} request. Doc id == the FY label.
+          && (collection != 'fiscal_year_closings' || resource != null
+              || !partnershipActive(appId)
+              || dualSigned(appId, 'fy_close_' + docId))
           // ── tax_invoices immutability guards ───────────────────────────────
           // These fields are locked once the invoice is created (resource != null = UPDATE).
           // invoice_no: immutable — changing a number post-issue breaks GSTR-1 continuity.
@@ -356,10 +485,15 @@ service cloud.firestore {
             && request.resource.data.get('igst_amount', 0) == resource.data.get('igst_amount', 0)
             && (request.resource.data.get('invoice_date', '') == resource.data.get('invoice_date', '')
                 || isAdmin(appId))
-            // status → 'Cancelled' is admin-only (Section 34 CGST Act workflow)
+            // status → 'Cancelled' is admin-only (Section 34 CGST Act workflow).
+            // Partnership: cancellation additionally needs TWO partner
+            // signatures on pending_actions/invoice_cancel_{docId} — an issued
+            // GST invoice is firm-level history, not one person's call.
             && (request.resource.data.get('status', '') != 'Cancelled'
                 || resource.data.get('status', '') == 'Cancelled'
-                || isAdmin(appId))
+                || (isAdmin(appId)
+                    && (!partnershipActive(appId)
+                        || dualSigned(appId, 'invoice_cancel_' + docId))))
           ))
           // ── payments segregation-of-duties guard (round-13 fix) ────────────
           // Owner/Accountant record AND approve payments. A manager may only CREATE
@@ -368,6 +502,13 @@ service cloud.firestore {
           // nor update/approve an existing payment (that is Owner/Accountant's job).
           // The UI already forces manager receipts to 'Pending Review'
           // (Clients.jsx / Finance.jsx); this enforces it at the SDK layer.
+          // Partnership no-self-approval: even an Owner/Accountant approving a
+          // payment must stamp themselves and must not be its recorder.
+          && (collection != 'payments' || !partnershipActive(appId) || resource == null
+              || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
+              || request.resource.data.get('status', '') != 'Approved'
+              || (request.resource.data.get('approved_by', '') == userEmpId()
+                  && resource.data.get('recorded_by', '') != userEmpId()))
           && (collection != 'payments' || seesAllParties(appId) || (
             resource == null
             && request.resource.data.get('status', '') == 'Pending Review'
@@ -406,7 +547,7 @@ service cloud.firestore {
         // ai_usage: deletes would reset the AI budget meter — Cloud Function only.
         // settings: same wildcard-vs-stanza fix as create/update above — deletes
         // of settings docs must go through the admin-only settings stanza.
-        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations']
+        collection in ['audit_logs', 'inventory_movements', 'chat_channels', 'chat_reads', 'chat_presence', 'chat_push_tokens', 'employee_locations', 'location_history', 'clients', 'users', 'expenses', 'project_financials', 'ai_usage', 'settings', 'wa_conversations', 'pending_actions', 'partner_consents']
       ) ? false
         // journal_entries: admin-only AND never inside a locked FY (B7) — a
         // hard delete in a locked year would silently rewrite closed books.
@@ -446,7 +587,9 @@ service cloud.firestore {
     // Append-only: any role-bearing user may create; nobody may edit or delete.
     // Read restricted to admin and accountant (matches the permissions model).
     match /artifacts/{appId}/public/data/audit_logs/{docId} {
-      allow read: if hasRole(appId, 'admin');   // security/impersonation trail + raw payloads — Owner only
+      // Owner + partners (s.12(d): a partner may inspect the books, and the
+      // audit trail is part of the record of the firm).
+      allow read: if hasRole(appId, 'admin') || isPartnerRole(appId);
       allow create: if isRoleUser(appId);
       allow update, delete: if false;
     }
@@ -486,23 +629,58 @@ service cloud.firestore {
     // the record for minor self-corrections.
     // Delete restricted to admin and accountant only.
     match /artifacts/{appId}/public/data/expenses/{docId} {
-      // Read: admin/accountant/manager see all; everyone else (tech/user) reads
-      // ONLY their own expenses (amounts are financial — no company-wide read).
+      // Read: admin/accountant/manager/partner see all; everyone else (tech/user)
+      // reads ONLY their own expenses (amounts are financial — no company-wide read).
       allow read: if isAuthed()
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
-                  && (hasAnyRole(appId, ['admin', 'accountant', 'manager'])
+                  && (hasAnyRole(appId, ['admin', 'accountant', 'manager', 'partner'])
                       || resource.data.get('employee_id', '') == userEmpId());
-      allow create: if isRoleUser(appId);
-      allow update: if hasAnyRole(appId, ['admin', 'accountant', 'manager'])
-                    || (isRoleUser(appId)
-                        && resource.data.employee_id == userEmpId()
-                        && resource.data.status == 'Pending'
-                        // Owner self-corrections MUST keep the record Pending — a
-                        // submitter can fix their own amount/description but can NEVER
-                        // self-approve (approve = admin/accountant/manager per
-                        // permissions.js) nor reassign it to another employee.
-                        && request.resource.data.status == 'Pending'
-                        && request.resource.data.employee_id == userEmpId());
+      // Partnership spend threshold: an expense ABOVE the configured threshold
+      // must be born WITHOUT an Approved status (it goes through the normal
+      // Pending flow AND partner counter-approval fields, journal-drafts style).
+      allow create: if isRoleUser(appId)
+                    && (!partnershipActive(appId)
+                        || partnerApprovalThreshold(appId) <= 0
+                        || request.resource.data.get('amount', 0) <= partnerApprovalThreshold(appId)
+                        || (request.resource.data.get('status', '') != 'Approved'
+                            && request.resource.data.get('partner_approval_status', '') == 'pending'
+                            && request.resource.data.get('partner_approved_by', null) == null));
+      allow update: if (
+                      (hasAnyRole(appId, ['admin', 'accountant', 'manager'])
+                        // Partnership no-self-approval: whoever flips an expense to
+                        // Approved must stamp approved_by = self and must not be the
+                        // spender. (Proprietorships keep today's behaviour.)
+                        && (!partnershipActive(appId)
+                            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
+                            || request.resource.data.get('status', '') != 'Approved'
+                            || (request.resource.data.get('approved_by', '') == userEmpId()
+                                && resource.data.get('employee_id', '') != userEmpId()))
+                        // …and above-threshold expenses need the partner counter-
+                        // approval BEFORE they can be flipped to Approved.
+                        && (!partnershipActive(appId)
+                            || partnerApprovalThreshold(appId) <= 0
+                            || request.resource.data.get('amount', 0) <= partnerApprovalThreshold(appId)
+                            || request.resource.data.get('status', '') != 'Approved'
+                            || request.resource.data.get('partner_approval_status', '') == 'approved'))
+                      // A NAMED partner (any role) may write the partner-approval
+                      // fields — never on their own expense.
+                      || (partnershipActive(appId) && isNamedPartner(appId)
+                          && request.resource.data.diff(resource.data).affectedKeys()
+                              .hasOnly(['partner_approval_status', 'partner_approved_by', 'partner_approved_at', 'partner_rejection_reason'])
+                          && request.resource.data.get('partner_approved_by', '') == userEmpId()
+                          && resource.data.get('employee_id', '') != userEmpId())
+                      || (isRoleUser(appId)
+                          && resource.data.employee_id == userEmpId()
+                          && resource.data.status == 'Pending'
+                          // Owner self-corrections MUST keep the record Pending — a
+                          // submitter can fix their own amount/description but can NEVER
+                          // self-approve (approve = admin/accountant/manager per
+                          // permissions.js) nor reassign it to another employee, nor
+                          // touch the partner-approval fields.
+                          && request.resource.data.status == 'Pending'
+                          && request.resource.data.employee_id == userEmpId()
+                          && !request.resource.data.diff(resource.data).affectedKeys()
+                              .hasAny(['partner_approval_status', 'partner_approved_by', 'partner_approved_at'])));
       allow delete: if hasAnyRole(appId, ['admin', 'accountant']);
     }
 
@@ -526,7 +704,76 @@ service cloud.firestore {
       // tenant may READ both (to gate its UI / show party colours) but only the
       // platform Admin SDK may write them — otherwise a tenant admin could grant
       // themselves paid features or forge a party's credit colour.
-      allow write: if docId in ['entitlements', 'credit_labels'] ? false : isAdmin(appId);
+      // settings/partnership is firm GOVERNANCE: once the partnership is live,
+      // the admin cannot unilaterally rewrite it (disable the module, drop the
+      // threshold, remove a partner) — that class of change needs two partner
+      // signatures on pending_actions/partnership_settings first (same
+      // binds-the-owner philosophy as the FY lock). Initial setup (doc absent
+      // or machinery not yet active) stays admin-only so onboarding works.
+      allow write: if docId in ['entitlements', 'credit_labels'] ? false
+                   : (docId == 'partnership'
+                      ? (isAdmin(appId)
+                         && (!partnershipActive(appId)
+                             || dualSigned(appId, 'partnership_settings')))
+                      : isAdmin(appId));
+    }
+
+    // ── Partnership: dual-sign pending actions ────────────────────────────────
+    // A request for a two-partner sign-off (FY close, invoice cancellation,
+    // governance change). Each signature slot is only ever writable with the
+    // SIGNER'S OWN empId, by a named partner; sig2 must differ from sig1. The
+    // payload freezes at creation. Deletes: admin (cleanup of consumed/stale
+    // requests) — deleting can only ever REVOKE an authorisation, never grant.
+    match /artifacts/{appId}/public/data/pending_actions/{docId} {
+      allow read: if canViewBooks(appId) || isNamedPartner(appId);
+      allow create: if (isAdmin(appId) || isNamedPartner(appId))
+                    && request.resource.data.get('initiated_by', '') == userEmpId()
+                    && request.resource.data.get('sig2', null) == null
+                    && (request.resource.data.get('sig1', null) == null
+                        || (isNamedPartner(appId)
+                            && request.resource.data.get('sig1', {}).get('emp', '') == userEmpId()));
+      allow update: if isNamedPartner(appId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sig1', 'sig2'])
+                    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['sig1'])
+                        || (resource.data.get('sig1', null) == null
+                            && request.resource.data.get('sig1', {}).get('emp', '') == userEmpId()))
+                    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['sig2'])
+                        || (resource.data.get('sig2', null) == null
+                            && request.resource.data.get('sig2', {}).get('emp', '') == userEmpId()
+                            && request.resource.data.get('sig1', {}).get('emp', '') != userEmpId()));
+      allow delete: if isAdmin(appId);
+    }
+
+    // ── Partnership: consent register (s.12(c) Partnership Act) ───────────────
+    // Recorded resolutions: ordinary matters pass by MAJORITY of active
+    // partners; fundamental changes (nature of business, admitting a partner —
+    // s.31) need ALL. Each partner may write ONLY their own vote_{empId} field
+    // while the resolution is open; closed resolutions are immutable evidence.
+    // The stored outcome is stamped by the closing client and is recomputable
+    // from the recorded votes at any time (the votes are the authority).
+    match /artifacts/{appId}/public/data/partner_consents/{docId} {
+      allow read: if canViewBooks(appId) || isNamedPartner(appId);
+      allow create: if isNamedPartner(appId)
+                    && request.resource.data.get('proposed_by', '') == userEmpId()
+                    && request.resource.data.get('status', '') == 'open'
+                    && request.resource.data.get('category', '') in ['ordinary', 'fundamental'];
+      allow update: if resource.data.get('status', '') == 'open'
+                    && (
+                      // a partner casting/changing their OWN vote
+                      (isNamedPartner(appId)
+                        && request.resource.data.diff(resource.data).affectedKeys()
+                            .hasOnly(['vote_' + userEmpId()]))
+                      // closing: outcome stamp (passed/rejected by any named
+                      // partner or admin; withdrawn only by the proposer)
+                      || ((isNamedPartner(appId) || isAdmin(appId))
+                          && request.resource.data.diff(resource.data).affectedKeys()
+                              .hasOnly(['status', 'closed_at', 'closed_by'])
+                          && request.resource.data.get('status', '') in ['passed', 'rejected', 'withdrawn']
+                          && request.resource.data.get('closed_by', '') == userEmpId()
+                          && (request.resource.data.get('status', '') != 'withdrawn'
+                              || resource.data.get('proposed_by', '') == userEmpId()))
+                    );
+      allow delete: if false; // permanent record
     }
 
     // ── WhatsApp copilot conversations ────────────────────────────────────────

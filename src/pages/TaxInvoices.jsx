@@ -4,7 +4,7 @@ import {
   AlertCircle, Download, Receipt, ChevronDown, Zap, XCircle, Eye, CreditCard, FileCheck
 } from 'lucide-react';
 import {
-  collection, addDoc, updateDoc, doc, deleteDoc,
+  collection, addDoc, updateDoc, doc, deleteDoc, setDoc,
   getDoc, writeBatch
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -22,6 +22,7 @@ import { generateClassicInvoicePDF, generateGSTFormatInvoicePDF } from '../utils
 import { generateBookInvoiceNumber } from '../utils/accounting';
 import { assertFYNotLocked } from '../utils/fyLock';
 import { can } from '../utils/permissions';
+import { partnershipActive, isNamedPartner, pendingActionId, isDualSigned } from '../utils/partnership';
 
 // ─── local helpers ────────────────────────────────────────────────────────────
 const getInvoiceType = (selectedPids, projects) => {
@@ -81,7 +82,8 @@ const STATUS_COLORS = {
 // ─── component ────────────────────────────────────────────────────────────────
 const TaxInvoices = ({
   db, appId, role, currentEmpId = null, user, logAction, addToast,
-  taxInvoices = [], projects = [], clients = [], payments = [], lockedFYs = []
+  taxInvoices = [], projects = [], clients = [], payments = [], lockedFYs = [],
+  orgSettings = null, partnership = null, pendingActions = []
 }) => {
   const [search, setSearch]             = useState('');
   const [filterClient, setFilterClient] = useState('');
@@ -603,6 +605,30 @@ const TaxInvoices = ({
     const invoice = cancelConfirm.invoice;
     if (!invoice) return;
     if (!cancelReason.trim()) return addToast('Please enter a reason for cancellation.', 'error');
+    // Partnership: cancelling an issued GST invoice is a firm-level event and
+    // needs TWO partner signatures (rules-enforced). Offer to raise the request.
+    if (partnershipActive(orgSettings, partnership)) {
+      const actionId = pendingActionId('invoice_cancel', invoice.id);
+      const action = pendingActions.find((a) => a.id === actionId);
+      if (!isDualSigned(action)) {
+        if (!action) {
+          try {
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'pending_actions', actionId), {
+              type: 'invoice_cancel', key: invoice.id, note: invoice.invoice_no || invoice.id,
+              initiated_by: currentEmpId || user?.uid || '',
+              sig1: isNamedPartner(partnership, currentEmpId) ? { emp: currentEmpId, at: new Date().toISOString() } : null,
+              sig2: null,
+              created_at: new Date().toISOString(),
+            });
+            logAction('tax_invoices', 'raise_cancel_signoff', invoice.id, {}, invoice.invoice_no);
+            addToast('Cancellation needs TWO partner signatures — request raised. Partners sign on the Partnership page, then cancel again.', 'info');
+          } catch (e) { addToast('Could not raise the sign-off request: ' + e.message, 'error'); }
+        } else {
+          addToast('The cancellation request is not fully signed yet — a second partner must sign it (Partnership → Approvals).', 'error');
+        }
+        return;
+      }
+    }
     try {
       const batch = writeBatch(db);
       // Mark invoice cancelled — immutable fields (invoice_no, GST amounts) stay intact for audit.

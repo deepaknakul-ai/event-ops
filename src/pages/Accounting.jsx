@@ -36,6 +36,8 @@ import {
 } from 'lucide-react';
 import { formatCurrency, getFYFromDate, getProjectGSTBreakdown, isProjectInvoiced, isActiveTaxInvoice } from '../utils/helpers';
 import { assertFYNotLocked } from '../utils/fyLock';
+import { partnershipActive, isNamedPartner, pendingActionId, isDualSigned } from '../utils/partnership';
+import { computeAppropriation } from '../utils/partnershipAppropriation';
 import { computeFyRolloverRows } from '../utils/fyRollover';
 import { resolvePurchaseGst, resolvePurchaseSupplyType } from '../utils/gstSupply';
 import { inputGSTLines } from '../utils/aiAccountant/knowledge';
@@ -130,8 +132,17 @@ const Accounting = ({
   logAction,
   addToast,
   lockedFYs = [],
+  orgSettings = null,
+  partnership = null,
+  pendingActions = [],
+  currentEmpId = null,
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
+  // Partnership governance: when active, EVERY draft needs a second pair of
+  // eyes (no self-approval — not even the Owner), and FY close needs two
+  // partner signatures. Inert for proprietorships.
+  const pActive = partnershipActive(orgSettings, partnership);
+  const amNamedPartner = isNamedPartner(partnership, currentEmpId);
   const [aiReviewSearch, setAiReviewSearch] = useState('');
   const [aiReviewFilter, setAiReviewFilter] = useState('all'); // all | unreviewed | reviewed | flagged
   const [fyFilter, setFyFilter] = useState(() => getFYFromDate(new Date().toISOString().slice(0, 10)));
@@ -1458,7 +1469,7 @@ const Accounting = ({
   const handleChatParkEntry = async (parsed) => {
     if (!canEditFinance) throw new Error('Access denied.');
     const dateStr = parsed?.date || new Date().toISOString().slice(0, 10);
-    const requiresApproval = role === 'manager';
+    const requiresApproval = role === 'manager' || pActive;
     const payload = {
       date: dateStr,
       narration: parsed.narration || '',
@@ -1531,8 +1542,10 @@ const Accounting = ({
   // Reconstruct a "parsed" shape from a draft and hand it to the main post flow.
   const handlePostDraft = async (draft) => {
     if (!canEditFinance) return;
-    if (draft.requires_approval && draft.approval_status !== 'approved' && role !== 'admin') {
-      addToast('Draft is awaiting admin approval', 'error');
+    // Partnership: the approval gate binds EVERYONE incl. the Owner (no
+    // self-approval); proprietorship keeps the old admin bypass.
+    if (draft.requires_approval && draft.approval_status !== 'approved' && !(role === 'admin' && !pActive)) {
+      addToast(pActive ? 'Draft is awaiting a partner\'s approval' : 'Draft is awaiting admin approval', 'error');
       return;
     }
     const parsed = {
@@ -1593,7 +1606,8 @@ const Accounting = ({
 
   // ── Approval workflow ─────────────────────────────────────────────────────
   const handleApproveDraft = async (draft) => {
-    if (role !== 'admin') { addToast('Admin only', 'error'); return; }
+    if (pActive ? !(role === 'admin' || amNamedPartner) : role !== 'admin') { addToast(pActive ? 'Admin or a named partner only' : 'Admin only', 'error'); return; }
+    if (pActive && draft.created_by === (currentEmpId || user?.uid)) { addToast('You created this draft — another partner must approve it (no self-approval).', 'error'); return; }
     try {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'journal_drafts', draft.id), {
         approval_status: 'approved',
@@ -1608,7 +1622,8 @@ const Accounting = ({
     }
   };
   const handleRejectDraft = async (draft) => {
-    if (role !== 'admin') { addToast('Admin only', 'error'); return; }
+    if (pActive ? !(role === 'admin' || amNamedPartner) : role !== 'admin') { addToast(pActive ? 'Admin or a named partner only' : 'Admin only', 'error'); return; }
+    if (pActive && draft.created_by === (currentEmpId || user?.uid)) { addToast('You created this draft — another partner must decide it.', 'error'); return; }
     const reason = await promptDialog('Reason for rejection (optional)');
     if (reason === null) return;
     try {
@@ -2459,6 +2474,35 @@ const Accounting = ({
     const alreadyClosed = fiscalYearClosings.some((row) => row.fy === fyFilter && row.status === 'closed');
     if (alreadyClosed) return addToast(`${fyFilter} is already closed.`, 'error');
 
+    // Partnership: closing a year is a firm-level event — it needs TWO named
+    // partners' signatures on a pending_actions/fy_close_{fy} request first
+    // (also enforced by firestore.rules; this gate just makes it usable).
+    if (pActive) {
+      const actionId = pendingActionId('fy_close', fyFilter);
+      const action = pendingActions.find((a) => a.id === actionId);
+      if (!isDualSigned(action)) {
+        if (!action) {
+          const raise = await confirmDialog(`Closing FY ${fyFilter} needs TWO partner signatures. Raise the sign-off request now? Partners sign it on the Partnership page → Approvals.`);
+          if (raise) {
+            try {
+              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'pending_actions', actionId), {
+                type: 'fy_close', key: fyFilter, note: `Close FY ${fyFilter}`,
+                initiated_by: currentEmpId || user?.uid || '',
+                sig1: amNamedPartner ? { emp: currentEmpId || user?.uid, at: new Date().toISOString() } : null,
+                sig2: null,
+                created_at: new Date().toISOString(),
+              });
+              logAction('admin', 'raise_dual_sign', actionId, {}, `FY close sign-off requested: ${fyFilter}`);
+              addToast('Sign-off request raised — once two partners have signed (Partnership → Approvals), run the close again.', 'success');
+            } catch (e) { addToast('Could not raise the request: ' + e.message, 'error'); }
+          }
+        } else {
+          addToast('The FY-close request is not fully signed yet — a second partner must sign it on the Partnership page.', 'error');
+        }
+        return;
+      }
+    }
+
     const nextFy = getNextFinancialYear(fyFilter);
     const closingDate = `${parseInt(fyFilter.slice(0, 4), 10) + 1}-03-31`;
     const netProfit = snapshot.profitAndLoss.netProfit;
@@ -2491,6 +2535,51 @@ const Accounting = ({
         });
       }
 
+      // ── Partnership P&L appropriation (s.40(b) waterfall) ─────────────────
+      // After PL-Closing → Retained Earnings, a partnership does NOT leave the
+      // profit in one RE lump: interest on capital (≤12%), working-partner
+      // remuneration (within the 40(b) book-profit limit), then the divisible
+      // profit by ratio — each partner's slice lands in THEIR capital account.
+      const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+      let appropriation = null;
+      const capNameByPid = {};
+      if (pActive && transferAmount > 0.009) {
+        chartOfAccounts
+          .filter((a) => a.partner_id && /capital/i.test(a.name || ''))
+          .forEach((a) => { capNameByPid[a.partner_id] = a.name; });
+        const openingCapital = {};
+        Object.keys(partnership?.partners || {}).forEach((pid) => {
+          const nm = capNameByPid[pid];
+          const ob = (openingBalances || []).find((o) => o.fy === fyFilter && o.account_name === nm);
+          openingCapital[pid] = ob
+            ? (String(ob.side || 'Cr').toUpperCase() === 'CR' ? Number(ob.amount) || 0 : -(Number(ob.amount) || 0))
+            : 0;
+        });
+        appropriation = computeAppropriation({ netProfit, partners: partnership.partners, openingCapital });
+        const legs = Object.entries(appropriation.perPartner)
+          .filter(([, row]) => Math.abs(row.total) > 0.009)
+          .map(([pid, row]) => {
+            const capName = capNameByPid[pid] || `Capital — ${row.name}`;
+            return row.total >= 0
+              ? { debitAccount: 'Retained Earnings', creditAccount: capName, amount: r2(row.total) }
+              : { debitAccount: capName, creditAccount: 'Retained Earnings', amount: r2(Math.abs(row.total)) };
+          });
+        if (legs.length > 0) {
+          const apRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'journal_entries'));
+          batch.set(apRef, {
+            voucher_no: `AP-${fyFilter}`,
+            fy: fyFilter,
+            date: closingDate,
+            narration: `P&L appropriation ${fyFilter} — interest on capital, partner remuneration (s.40(b)), profit share`,
+            source: 'fy_appropriation',
+            status: 'posted',
+            entries: legs,
+            created_by: user?.uid || '',
+            created_at: new Date().toISOString(),
+          });
+        }
+      }
+
       const closeRef = doc(db, 'artifacts', appId, 'public', 'data', 'fiscal_year_closings', fyFilter);
       batch.set(closeRef, {
         fy: fyFilter,
@@ -2500,6 +2589,7 @@ const Accounting = ({
         voucher_no: voucherNo,
         transferEntry,
         net_profit: netProfit,
+        ...(appropriation ? { appropriation: JSON.parse(JSON.stringify(appropriation)) } : {}),
         closed_by: user?.uid || '',
         closed_at: new Date().toISOString(),
       });
@@ -2525,7 +2615,27 @@ const Accounting = ({
         hasTransfer: !!transferEntry,
       });
 
+      // The appropriation voucher is written in THIS batch, so — like the RE
+      // transfer — the ledger snapshot does not yet contain it. Adjust the
+      // rollover: each partner's slice moves OUT of Retained Earnings and INTO
+      // their capital account (balance convention: positive = Dr, so a credit
+      // to capital SUBTRACTS and the matching RE debit ADDS).
+      if (appropriation) {
+        const findRow = (name) => rolloverRows.find((r) => r.account === name);
+        let reRow = findRow('Retained Earnings');
+        if (!reRow) { reRow = { account: 'Retained Earnings', accountId: null, balance: 0 }; rolloverRows.push(reRow); }
+        Object.entries(appropriation.perPartner).forEach(([pid, row]) => {
+          if (Math.abs(row.total) <= 0.009) return;
+          const capName = capNameByPid[pid] || `Capital — ${row.name}`;
+          let capRow = findRow(capName);
+          if (!capRow) { capRow = { account: capName, accountId: null, balance: 0 }; rolloverRows.push(capRow); }
+          capRow.balance = r2(capRow.balance - row.total);
+          reRow.balance = r2(reRow.balance + row.total);
+        });
+      }
+
       rolloverRows.forEach((row) => {
+        if (Math.abs(row.balance) <= 0.004) return; // fully-appropriated RE rolls as nothing
         const side = row.balance >= 0 ? 'Dr' : 'Cr';
         const amount = Math.abs(row.balance);
         // Doc key prefers stable accountId so a party rename next year doesn't

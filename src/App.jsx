@@ -79,6 +79,7 @@ const HRPortal = lazy(() => import('./pages/HRPortal'));
 const HRPayroll = lazy(() => import('./pages/HRPayroll'));
 const DataPortal = lazy(() => import('./pages/DataPortal'));
 const Outsourcing = lazy(() => import('./pages/Outsourcing'));
+const Partnership = lazy(() => import('./pages/Partnership'));
 // SaaS-only tenant-platform console. The inline env check folds to a literal in
 // private builds so Rollup drops the import() entirely — no platform chunk ships
 // to private (enforced by scripts/check-private-bundle.cjs). Do NOT replace this
@@ -1300,6 +1301,12 @@ export default function App() {
   const [recurringRules, setRecurringRules] = useState([]);
   const [partyAccounts, setPartyAccounts] = useState([]);  // M-5: stable party name registry
   const [lockedFYs, setLockedFYs] = useState([]);
+  // Partnership module: firm constitution + registry + governance collections
+  const [orgSettings, setOrgSettings] = useState(null);
+  const [orgSettingsLoaded, setOrgSettingsLoaded] = useState(false);
+  const [partnership, setPartnership] = useState(null);
+  const [pendingActions, setPendingActions] = useState([]);
+  const [partnerConsents, setPartnerConsents] = useState([]);
   const [customInventoryCategories, setCustomInventoryCategories] = useState([]);
   const [customExpenseCategories, setCustomExpenseCategories] = useState([]);
   const [configurations, setConfigurations] = useState([]);
@@ -1506,7 +1513,7 @@ const [payroll, setPayroll] = useState([]);
     // Finance-viewer gate + helpers. Owner/Accountant see all finance data; other
     // roles are scoped (self-scoped for payroll, none for company ledgers) so a
     // restricted read never hits permission-denied once the rules tighten.
-    const financeViewer = role === 'admin' || role === 'accountant';
+    const financeViewer = role === 'admin' || role === 'accountant' || role === 'partner';
     const finCol = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
     // advances + payouts carry employee_id → admin/accountant all; everyone else
     // sees ONLY their own (the scoped query is required once rules restrict reads).
@@ -1545,7 +1552,20 @@ const [payroll, setPayroll] = useState([]);
     const unsubPartyAccounts = financeViewer ? onSnapshot(finCol('party_accounts'), (snap) => setPartyAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
     const unsubOrgSettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'), (snap) => {
       if (snap.exists()) setLockedFYs(snap.data().locked_fys || []);
+      setOrgSettings(snap.exists() ? snap.data() : {});
+      setOrgSettingsLoaded(true);
     });
+    // Partnership governance: dual-sign requests + consent register. Readable
+    // by admin/accountant/partner (rules also admit any NAMED partner; v1 UI
+    // reaches them through those roles).
+    const partnershipViewer = financeViewer; // admin | accountant | partner
+    const unsubPendingActions = partnershipViewer ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'pending_actions'), (snap) => setPendingActions(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    const unsubPartnerConsents = partnershipViewer ? onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'partner_consents'), (snap) => setPartnerConsents(snap.docs.map(d => ({ id: d.id, ...d.data() }))), noop) : noop;
+    // Partnership registry (firm constitution): drives the partner-approval
+    // gates, the /partnership page and the first-run firm-type wizard.
+    const unsubPartnership = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'partnership'), (snap) => {
+      setPartnership(snap.exists() ? snap.data() : null);
+    }, noop);
     const unsubCategorySettings = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'categories'), (snap) => {
       if (snap.exists()) {
         setCustomInventoryCategories(snap.data().inventory_categories || []);
@@ -1577,7 +1597,7 @@ const [payroll, setPayroll] = useState([]);
   //version 1.3.0 finance implementation enabled code
     return () => {
     unsubProjects(); unsubProjFinA(); unsubProjFinB(); unsubClients(); unsubInventory(); unsubInventoryFin(); unsubExpenses(); unsubVendorPayments();
-    unsubEmployees(); unsubEmployeePay(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubCategorySettings();
+    unsubEmployees(); unsubEmployeePay(); unsubAdvances(); unsubPayments(); unsubPayouts(); unsubOrgSettings(); unsubPartnership(); unsubPendingActions(); unsubPartnerConsents(); unsubCategorySettings();
     unsubTimeLogs(); unsubHrLeaves(); unsubShiftRequests(); unsubPenalties(); unsubPayroll(); unsubHqSettings(); unsubPurchaseInvoices(); unsubTaxInvoices();
     unsubChartOfAccounts(); unsubJournalEntries(); unsubOpeningBalances(); unsubFiscalYearClosings(); unsubRecurringRules(); unsubConfigurations(); unsubPartyAccounts();
     };  
@@ -2079,6 +2099,48 @@ const [payroll, setPayroll] = useState([]);
     );
   }
 
+  // First-run firm-type wizard (owner decision): a tenant declares its
+  // constitution ONCE — Proprietorship keeps the app exactly as-is;
+  // Partnership seeds the registry and activates partner governance after
+  // >= 2 active partners are added. Only the admin ever sees this, and only
+  // while settings/organization has no firm_type.
+  const chooseFirmType = async (type) => {
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'organization'),
+        { firm_type: type }, { merge: true });
+      if (type === 'partnership') {
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'partnership'),
+          { enabled: true, min_partners_met: false, approval_threshold: 50000, partners: {} }, { merge: true });
+        addToast('Partnership selected — now add your partners in the Partnership page (menu → Administration).', 'success');
+      } else {
+        addToast('Proprietorship selected.', 'success');
+      }
+      logAction('admin', 'set_firm_type', 'organization', { firm_type: type }, `Firm constitution: ${type}`);
+    } catch (e) {
+      addToast('Could not save the firm type: ' + e.message, 'error');
+    }
+  };
+
+  const renderFirmTypeWizard = () => (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl max-h-[90dvh] overflow-y-auto">
+        <h3 className="text-lg font-bold text-slate-900">How is your business constituted?</h3>
+        <p className="mt-1 text-sm text-slate-500">A one-time choice that shapes approvals and profit handling. You can change it later from the Partnership page.</p>
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button onClick={() => chooseFirmType('proprietorship')} className="rounded-xl border-2 border-slate-200 p-4 text-left hover:border-indigo-400 hover:bg-indigo-50/40 transition">
+            <div className="font-bold text-slate-800">Proprietorship</div>
+            <div className="mt-1 text-xs text-slate-500">Single owner. The app behaves exactly as before — you approve everything yourself.</div>
+          </button>
+          <button onClick={() => chooseFirmType('partnership')} className="rounded-xl border-2 border-indigo-200 bg-indigo-50/30 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50 transition">
+            <div className="font-bold text-indigo-800">Partnership</div>
+            <div className="mt-1 text-xs text-slate-600">Two or more partners share profit. Adds: spend approvals above a threshold, no self-approval, two-partner sign-off for big events, a consent register, and year-end profit appropriation (s.40(b)).</div>
+          </button>
+        </div>
+        <p className="mt-3 text-[11px] text-slate-400">Partnership controls switch on only once at least two active partners are registered — you will not be locked out mid-setup.</p>
+      </div>
+    </div>
+  );
+
   // ONE nav list rendered by BOTH the desktop sidebar and the mobile drawer.
   // These used to be two hand-maintained copies that drifted: the drawer lost
   // Data Portal, the theme toggle, View-as-Employee/Exit-impersonation and the
@@ -2127,6 +2189,7 @@ const [payroll, setPayroll] = useState([]);
       <div className="mb-1 px-3 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Administration</div>
       {can(role,'employees','view') && <NavItem to="/employees" setMobileMenuOpen={setMobileMenuOpen} icon={UserCog} label="Employees" badge={employees.filter(e => e.is_locked).length} />}
       {can(role,'audit_logs','view') && <NavItem to="/audit" setMobileMenuOpen={setMobileMenuOpen} icon={Activity} label="Audit Logs" />}
+      {can(role,'partnership','view') && orgSettings?.firm_type === 'partnership' && <NavItem to="/partnership" setMobileMenuOpen={setMobileMenuOpen} icon={FileCheck} label="Partnership" />}
       {role === 'admin' && <NavItem to="/data-portal" setMobileMenuOpen={setMobileMenuOpen} icon={Download} label="Data Portal" />}
       {can(role,'admin_tools','view') && <NavItem to="/admin" setMobileMenuOpen={setMobileMenuOpen} icon={Settings} label="Admin" />}
     </>
@@ -2226,6 +2289,7 @@ const [payroll, setPayroll] = useState([]);
       </div>
       <DialogHost />
       <InstallPrompt />
+      {role === 'admin' && !impersonating && orgSettingsLoaded && !orgSettings?.firm_type && renderFirmTypeWizard()}
       <LocationTracker db={db} appId={appId} currentEmpId={effectiveEmpId} employees={safeEmployees} timeLogs={timeLogs} />
       <aside className="hidden w-[260px] flex-col bg-white md:flex shadow-[1px_0_0_0_#e2e8f0] z-10">
         <div className="flex h-16 items-center gap-2 px-5 border-b border-slate-100">
@@ -2328,20 +2392,21 @@ const [payroll, setPayroll] = useState([]);
                 <Route path="/commission" element={<ProtectedRoute role={effectiveRole} resource="commission"><Commission clients={clients} projects={projects} expenses={expenses} payments={payments} payouts={payouts} employees={safeEmployees} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/analytics" element={<ProtectedRoute role={effectiveRole} resource="reports"><Analytics projects={projects} clients={clients} expenses={expenses} payments={payments} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/configurations" element={<ProtectedRoute role={effectiveRole} resource="configurations"><ConfigurationBuilder configurations={configurations} inventory={inventory} clients={clients} role={effectiveRole} db={db} appId={appId} logAction={logAction} addToast={addToast} categories={[...CATEGORIES, ...customInventoryCategories.filter(c => !CATEGORIES.includes(c))]} /></ProtectedRoute>} />
-                <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} expenseCats={[...EXPENSE_CATS, ...customExpenseCategories.filter(c => !EXPENSE_CATS.includes(c))]} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/expenses" element={<ProtectedRoute role={effectiveRole} resource="expenses" action="view_own"><Expenses expenses={expenses} projects={projects} user={user} role={effectiveRole} db={db} appId={appId} advances={advances} payouts={payouts} currentEmpId={effectiveEmpId} employees={safeEmployees} logAction={logAction} expenseCats={[...EXPENSE_CATS, ...customExpenseCategories.filter(c => !EXPENSE_CATS.includes(c))]} lockedFYs={lockedFYs} orgSettings={orgSettings} partnership={partnership} /></ProtectedRoute>} />
                 <Route path="/employees" element={<ProtectedRoute role={effectiveRole} resource="employees"><Employees employees={safeEmployees} role={effectiveRole} db={db} appId={appId} advances={advances} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/admin" element={<ProtectedRoute role={effectiveRole} resource="admin_tools"><AdminTools db={db} appId={appId} logAction={logAction} role={effectiveRole} /></ProtectedRoute>} />
-                <Route path="/finance" element={<ProtectedRoute role={effectiveRole} resource="finance"><Finance clients={clients} employees={safeEmployees} projects={projects} payments={payments} payouts={payouts} vendorPayments={vendorPayments} expenses={expenses} advances={advances} role={effectiveRole} db={db} appId={appId} user={user} logAction={logAction} lockedFYs={lockedFYs} /></ProtectedRoute>} />
-                <Route path="/accounting" element={<ProtectedRoute role={effectiveRole} resource="finance"><Accounting clients={clients} projects={projects} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} payments={payments} vendorPayments={vendorPayments} payouts={payouts} expenses={expenses} advances={advances} employees={safeEmployees} chartOfAccounts={chartOfAccounts} manualJournalEntries={journalEntries} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} recurringRules={recurringRules} partyAccounts={partyAccounts} db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/finance" element={<ProtectedRoute role={effectiveRole} resource="finance"><Finance clients={clients} employees={safeEmployees} projects={projects} payments={payments} payouts={payouts} vendorPayments={vendorPayments} expenses={expenses} advances={advances} role={effectiveRole} db={db} appId={appId} user={user} logAction={logAction} lockedFYs={lockedFYs} orgSettings={orgSettings} partnership={partnership} currentEmpId={effectiveEmpId} /></ProtectedRoute>} />
+                <Route path="/accounting" element={<ProtectedRoute role={effectiveRole} resource="finance"><Accounting clients={clients} projects={projects} taxInvoices={taxInvoicesList} purchaseInvoices={purchaseInvoicesList} payments={payments} vendorPayments={vendorPayments} payouts={payouts} expenses={expenses} advances={advances} employees={safeEmployees} chartOfAccounts={chartOfAccounts} manualJournalEntries={journalEntries} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} recurringRules={recurringRules} partyAccounts={partyAccounts} db={db} appId={appId} role={effectiveRole} user={user} logAction={logAction} addToast={addToast} lockedFYs={lockedFYs} orgSettings={orgSettings} partnership={partnership} pendingActions={pendingActions} currentEmpId={effectiveEmpId} /></ProtectedRoute>} />
                 <Route path="/reports" element={<ProtectedRoute role={effectiveRole} resource="reports"><Reports projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} advances={advances} role={effectiveRole} timeLogs={timeLogs} purchaseInvoices={purchaseInvoicesList} taxInvoices={taxInvoicesList} chartOfAccounts={chartOfAccounts} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} journalEntries={journalEntries} partyAccounts={partyAccounts} /></ProtectedRoute>} />
                 <Route path="/daily-report" element={<ProtectedRoute role={effectiveRole} resource="daily_reports"><DailyReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} timeLogs={timeLogs} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/business-report" element={<ProtectedRoute role={effectiveRole} resource="reports"><BusinessReport projects={projects} clients={clients} employees={safeEmployees} expenses={expenses} inventory={inventory} payments={payments} vendorPayments={vendorPayments} payouts={payouts} role={effectiveRole} /></ProtectedRoute>} />
                 <Route path="/challans" element={<ProtectedRoute role={effectiveRole} resource="challans"><ChallanManager projects={projects} clients={clients} inventory={inventory} db={db} appId={appId} logAction={logAction} user={user} role={effectiveRole} currentEmpId={effectiveEmpId} /></ProtectedRoute>} />
                 <Route path="/documents" element={<ProtectedRoute role={effectiveRole} resource="documents"><DocumentsHub projects={projects} clients={clients} role={effectiveRole} currentEmpId={effectiveEmpId} db={db} appId={appId} logAction={logAction} /></ProtectedRoute>} />
                 <Route path="/purchase-invoices" element={<ProtectedRoute role={effectiveRole} resource="purchase_invoices"><PurchaseInvoices db={db} appId={appId} logAction={logAction} inventory={inventory} clients={clients} projects={projects} role={effectiveRole} purchaseInvoicesExternal={purchaseInvoicesList} setPurchaseInvoicesExternal={setPurchaseInvoicesList} lockedFYs={lockedFYs} /></ProtectedRoute>} />
-                <Route path="/tax-invoices" element={<ProtectedRoute role={effectiveRole} resource="tax_invoices"><TaxInvoices db={db} appId={appId} role={effectiveRole} currentEmpId={effectiveEmpId} user={user} logAction={logAction} addToast={addToast} taxInvoices={taxInvoicesList} projects={projects} clients={clients} payments={payments} lockedFYs={lockedFYs} /></ProtectedRoute>} />
+                <Route path="/tax-invoices" element={<ProtectedRoute role={effectiveRole} resource="tax_invoices"><TaxInvoices db={db} appId={appId} role={effectiveRole} currentEmpId={effectiveEmpId} user={user} logAction={logAction} addToast={addToast} taxInvoices={taxInvoicesList} projects={projects} clients={clients} payments={payments} lockedFYs={lockedFYs} orgSettings={orgSettings} partnership={partnership} pendingActions={pendingActions} currentEmpId={effectiveEmpId} /></ProtectedRoute>} />
                 <Route path="/audit" element={<ProtectedRoute role={effectiveRole} resource="audit_logs"><AuditLogs db={db} appId={appId} role={effectiveRole} /></ProtectedRoute>} />
                               <Route path="/data-portal" element={<ProtectedRoute role={effectiveRole} resource="admin_tools"><DataPortal db={db} appId={appId} role={effectiveRole} logAction={logAction} addToast={addToast} /></ProtectedRoute>} />
+                <Route path="/partnership" element={<ProtectedRoute role={effectiveRole} resource="partnership"><Partnership db={db} appId={appId} role={effectiveRole} currentEmpId={effectiveEmpId} user={user} logAction={logAction} addToast={addToast} orgSettings={orgSettings} partnership={partnership} pendingActions={pendingActions} partnerConsents={partnerConsents} employees={safeEmployees} chartOfAccounts={chartOfAccounts} journalEntries={journalEntries} openingBalances={openingBalances} fiscalYearClosings={fiscalYearClosings} vendorPayments={vendorPayments} expenses={expenses} payments={payments} lockedFYs={lockedFYs} /></ProtectedRoute>} />
                 <Route path="/profile" element={<ProfileSettings employee={currentEmployee} db={db} appId={appId} logAction={logAction} />} />
                 {/* HR Module Routes */}
                 <Route path="/hr/dashboard" element={<ProtectedRoute role={effectiveRole} resource="hr_dashboard"><HRDashboard employees={safeEmployees} timeLogs={timeLogs} hrLeaves={hrLeaves} shiftRequests={shiftRequests} penalties={penalties} /></ProtectedRoute>} />

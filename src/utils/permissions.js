@@ -7,6 +7,9 @@
  *   manager     → Project Manager (projects, clients, inventory, outsourcing, challans)
  *   tech        → Field Tech      (challans, own expenses, view projects/inventory)
  *   user        → General User    (view-only on projects, clients, inventory)
+ *   partner     → Partner         (principal of a partnership firm: full READ of
+ *                                   the books — s.12(d) Partnership Act — plus
+ *                                   approval powers; NOT a data-entry role)
  */
 
 // ── Role labels shown in UI ───────────────────────────────────────────────────
@@ -16,6 +19,7 @@ export const ROLE_LABELS = {
   manager:    'Project Manager',
   tech:       'Field Tech',
   user:       'Coordinator',
+  partner:    'Partner',
 };
 
 // ── All selectable roles (for employee form dropdown) ─────────────────────────
@@ -25,6 +29,7 @@ export const ROLE_OPTIONS = [
   { value: 'manager',    label: 'Project Manager' },
   { value: 'tech',       label: 'Field Tech' },
   { value: 'user',       label: 'Coordinator' },
+  { value: 'partner',    label: 'Partner' },
 ];
 
 // ── Role avatar color ─────────────────────────────────────────────────────────
@@ -34,6 +39,7 @@ export const ROLE_COLOR = {
   manager:    'bg-blue-500',
   tech:       'bg-orange-500',
   user:       'bg-slate-400',
+  partner:    'bg-purple-600',
 };
 
 // ── Central permission definitions ───────────────────────────────────────────
@@ -49,7 +55,7 @@ export const ROLE_COLOR = {
 
 export const PERMISSIONS = {
   clients: {
-    view:   ['admin', 'accountant', 'manager'],   // financial dashboard — Coordinators use `contacts` instead
+    view:   ['admin', 'accountant', 'manager', 'partner'],   // financial dashboard — Coordinators use `contacts` instead
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
@@ -57,7 +63,7 @@ export const PERMISSIONS = {
   // Stripped contact directory (name / phone / address only — NO financials) for
   // roles that must not see the client financial dashboard.
   contacts: {
-    view: ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view: ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
   },
   leads: {
     view:   ['admin', 'manager', 'accountant'],
@@ -66,21 +72,21 @@ export const PERMISSIONS = {
     delete: ['admin'],
   },
   chat: {
-    view:     ['admin', 'accountant', 'manager', 'tech', 'user'],
-    create:   ['admin', 'accountant', 'manager', 'tech', 'user'],  // post messages
+    view:     ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
+    create:   ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],  // post messages
     announce: ['admin', 'manager'],                                // post to Announcements
     moderate: ['admin', 'manager'],                                // delete others' messages
   },
   tracking: {
-    view: ['admin', 'manager'],   // live employee map (management only)
+    view: ['admin', 'manager', 'partner'],   // live employee map (management + partners)
   },
   commission: {
-    view: ['admin', 'accountant', 'manager', 'user'],  // admin/accountant see all; others see own
+    view: ['admin', 'accountant', 'manager', 'user', 'partner'],  // admin/accountant/partner see all; others see own
     pay:  ['admin', 'accountant'],                      // record a commission payout
   },
   projects: {
-    view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
-    view_rates:   ['admin', 'accountant', 'manager'],          // hides rate/amount cols from tech/user
+    view:         ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
+    view_rates:   ['admin', 'accountant', 'manager', 'partner'],          // hides rate/amount cols from tech/user
     create:       ['admin', 'manager'],
     create_draft: ['admin', 'manager', 'user'],
     edit:         ['admin', 'manager'],
@@ -91,71 +97,71 @@ export const PERMISSIONS = {
     allocation:   ['admin', 'manager'],
   },
   inventory: {
-    view:          ['admin', 'accountant', 'manager', 'tech', 'user'],
-    view_rates:    ['admin', 'accountant'],                     // rental/purchase rates — finance only
+    view:          ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
+    view_rates:    ['admin', 'accountant', 'partner'],                     // rental/purchase rates — finance only
     create:        ['admin', 'manager'],
     edit:          ['admin', 'manager'],
     delete:        ['admin'],
     scan_movement: ['admin', 'manager', 'tech'],                // warehouse dispatch scan (functional, not financial)
   },
   finance: {
-    view:               ['admin', 'accountant'],
+    view:               ['admin', 'accountant', 'partner'],
     create:             ['admin', 'accountant'],
     create_own_receipt: ['admin', 'accountant', 'manager'],     // manager: scoped on-site receipt from OWN clients only
     edit:               ['admin', 'accountant'],
     delete:             ['admin', 'accountant'],
   },
   reports: {
-    view: ['admin', 'accountant'],   // company-wide P&L / receivables / margins / analytics — no manager
+    view: ['admin', 'accountant', 'partner'],   // company-wide P&L / receivables / margins / analytics — no manager
   },
   daily_reports: {
-    view: ['admin', 'accountant'],
+    view: ['admin', 'accountant', 'partner'],
   },
   employees: {
-    view:         ['admin', 'accountant', 'manager'],   // full staff records (Coordinators/Techs use `contacts`)
-    view_pay:     ['admin', 'accountant'],              // salary / hourly rate / advances / ledger — finance only
+    view:         ['admin', 'accountant', 'manager', 'partner'],   // full staff records (Coordinators/Techs use `contacts`)
+    view_pay:     ['admin', 'accountant', 'partner'],              // salary / hourly rate / advances / ledger — finance + partners
     create:       ['admin', 'manager'],
     edit:         ['admin', 'manager'],
     delete:       ['admin'],
     manage_roles: ['admin'],              // only admin can change a user's role
   },
   outsourcing: {
-    view:        ['admin', 'accountant', 'manager'],   // manager scoped to OWN projects in the page UI
-    view_amounts:['admin', 'accountant', 'manager'],
+    view:        ['admin', 'accountant', 'manager', 'partner'],   // manager scoped to OWN projects in the page UI
+    view_amounts:['admin', 'accountant', 'manager', 'partner'],
     create:      ['admin', 'manager'],
     edit:         ['admin', 'manager'],
     delete:      ['admin'],
   },
   challans: {
-    view:         ['admin', 'accountant', 'manager', 'tech', 'user'],
-    view_amounts: ['admin', 'accountant', 'manager'],  // pricing on challan docs/PDF — hidden from tech/user
+    view:         ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
+    view_amounts: ['admin', 'accountant', 'manager', 'partner'],  // pricing on challan docs/PDF — hidden from tech/user
     create:       ['admin', 'manager', 'tech'],
     edit:         ['admin', 'manager', 'tech'],
     delete:       ['admin'],
   },
   expenses: {
-    view_all:      ['admin', 'accountant', 'manager'],   // see everyone's expenses (manager scoped to team in UI)
-    view_own:      ['admin', 'accountant', 'manager', 'tech', 'user'],
-    view_payments: ['admin', 'accountant'],              // payout/salary statements — finance only
+    view_all:      ['admin', 'accountant', 'manager', 'partner'],   // see everyone's expenses (manager scoped to team in UI)
+    view_own:      ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
+    view_payments: ['admin', 'accountant', 'partner'],              // payout/salary statements — finance only
     create:        ['admin', 'accountant', 'manager', 'tech', 'user'],
     edit:          ['admin', 'accountant', 'manager'],
     delete:        ['admin', 'accountant'],
     approve:       ['admin', 'accountant', 'manager'],
   },
   purchase_invoices: {
-    view:   ['admin', 'accountant'],
+    view:   ['admin', 'accountant', 'partner'],
     create: ['admin', 'accountant'],
     edit:   ['admin', 'accountant'],
     delete: ['admin', 'accountant'],
   },
   tax_invoices: {
-    view:   ['admin', 'accountant', 'manager'],
+    view:   ['admin', 'accountant', 'manager', 'partner'],
     create: ['admin', 'accountant', 'manager'],
     edit:   ['admin', 'accountant', 'manager'],
     delete: ['admin', 'accountant'],
   },
   documents: {
-    view:   ['admin', 'accountant', 'manager'],   // PO amounts / cost breakdown / PI totals — no tech
+    view:   ['admin', 'accountant', 'manager', 'partner'],   // PO amounts / cost breakdown / PI totals — no tech
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
@@ -165,11 +171,11 @@ export const PERMISSIONS = {
     edit:   ['admin'],
   },
   audit_logs: {
-    view: ['admin'],   // security/impersonation trail + raw mutation payloads — Owner only
+    view: ['admin', 'partner'],   // security trail — Owner + partners (s.12(d) books inspection)
   },
   // ── HR Module Resources ──────────────────────────────────────────────────────
   hr_dashboard: {
-    view: ['admin', 'accountant', 'manager'],
+    view: ['admin', 'accountant', 'manager', 'partner'],
   },
   hr_attendance: {
     view:        ['admin', 'accountant', 'manager'],
@@ -199,11 +205,11 @@ export const PERMISSIONS = {
     bulk_apply: ['admin'],
   },
   hr_payroll: {
-    view:     ['admin', 'accountant'],
+    view:     ['admin', 'accountant', 'partner'],
     generate: ['admin', 'accountant'],
   },
   hr_reports: {
-    view:   ['admin', 'accountant'],   // includes payroll summary + employee financial performance — finance only
+    view:   ['admin', 'accountant', 'partner'],   // includes payroll summary + employee financial performance — finance + partners
     export: ['admin', 'accountant'],
   },
   hr_settings: {
@@ -211,13 +217,21 @@ export const PERMISSIONS = {
     edit: ['admin'],
   },
   hr_portal: {
-    view: ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view: ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
   },
   configurations: {
-    view:   ['admin', 'accountant', 'manager', 'tech', 'user'],
+    view:   ['admin', 'accountant', 'manager', 'tech', 'user', 'partner'],
     create: ['admin', 'manager'],
     edit:   ['admin', 'manager'],
     delete: ['admin'],
+  },
+  // ── Partnership module: firm constitution, partner registry, spend approvals,
+  //    consent register, share report. Approval POWER additionally requires being
+  //    listed in settings/partnership.partners — enforced in firestore.rules.
+  partnership: {
+    view:    ['admin', 'accountant', 'partner'],
+    approve: ['admin', 'partner'],
+    manage:  ['admin'],
   },
 };
 
@@ -254,6 +268,7 @@ export const RESOURCE_DEFS = {
   hr_settings:       { label: 'HR Settings',         actions: ['view', 'edit'] },
   hr_portal:         { label: 'HR Portal',           actions: ['view'] },
   configurations:    { label: 'Configurations',       actions: ['view', 'create', 'edit', 'delete'] },
+  partnership:       { label: 'Partnership',          actions: ['view', 'approve', 'manage'] },
 };
 
 // ── Human-readable action labels ──────────────────────────────────────────────
@@ -352,6 +367,7 @@ export const LOCKED_PERMISSIONS = {
   hr_settings:       ['view', 'edit'],                      // admin-only HR/payroll config
   audit_logs:        ['view'],
   admin_tools:       ['view', 'edit'],
+  partnership:       ['view', 'approve', 'manage'],         // partner money controls — never runtime-tunable
 };
 const isLockedPermission = (resource, action) => {
   const actions = LOCKED_PERMISSIONS[resource];
