@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { doc, setDoc, updateDoc, addDoc, collection } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, deleteDoc, addDoc, collection } from 'firebase/firestore';
 import {
   Users, ShieldCheck, Vote, PieChart, Plus, CheckCircle2, XCircle,
   PenLine, AlertTriangle, FileSignature, Wallet,
@@ -46,21 +46,68 @@ const Partnership = ({
   const sPath = (...segs) => ['artifacts', appId, 'public', 'data', ...segs];
 
   // ── Governance write helper: settings/partnership is dual-sign-locked once
-  //    the partnership is ACTIVE. Surface that instead of a raw error. ────────
-  const governanceSigned = isDualSigned(pendingActions.find(a => a.id === 'partnership_settings'));
+  //    the partnership is ACTIVE (s.31: a new partner needs ALL partners'
+  //    consent; same for threshold/registry edits). Instead of failing, a
+  //    blocked save AUTO-RAISES the sign-off request with the change STAGED on
+  //    it; when the counter-signature lands the change is applied — instantly
+  //    if the second signer is an admin, else via the Apply button. The staged
+  //    payload is frozen by rules (updates may touch only sig1/sig2), so
+  //    partners sign exactly what will be written. A used authorisation is
+  //    consumed (request deleted) right after the write.
+  const governanceRequest = pendingActions.find(a => a.id === 'partnership_settings');
+  const governanceSigned = isDualSigned(governanceRequest);
+  const stageGovernance = async (next, label) => {
+    const ref = doc(db, ...sPath('pending_actions', 'partnership_settings'));
+    // A stale half-signed request would reject the create (updates are sig-only)
+    // — replace it so the staged payload always matches the latest intent.
+    if (governanceRequest) { try { await deleteDoc(ref); } catch { /* non-admin: create will fail loudly */ } }
+    await setDoc(ref, {
+      type: 'partnership_settings', key: 'current', note: label || 'Governance change',
+      staged: { next }, // the exact merge that will be applied once dual-signed
+      initiated_by: currentEmpId,
+      sig1: amPartner ? { emp: currentEmpId, at: new Date().toISOString() } : null,
+      sig2: null,
+      created_at: new Date().toISOString(),
+    });
+    logAction('admin', 'raise_dual_sign', 'partnership_settings', { label }, `Sign-off auto-raised: ${label}`);
+  };
   const savePartnershipDoc = async (next, label) => {
+    if (active && !governanceSigned) {
+      // Blocked by governance → stage + raise the approval automatically.
+      try {
+        await stageGovernance(next, label);
+        addToast(`Approval raised for "${label}"${amPartner ? ' — your signature is recorded; ' : ' — '}another partner must sign it in Approvals, then it applies.`, 'success');
+        return 'staged';
+      } catch (e) {
+        addToast('Could not raise the approval: ' + e.message, 'error');
+        return false;
+      }
+    }
     try {
       await setDoc(doc(db, ...sPath('settings', 'partnership')), next, { merge: true });
       logAction('admin', 'partnership_update', 'partnership', { label }, label);
+      // Consume the authorisation so the next governance change needs a fresh
+      // two-signature consent.
+      if (active && governanceRequest) {
+        try { await deleteDoc(doc(db, ...sPath('pending_actions', 'partnership_settings'))); } catch { /* cleanup only */ }
+      }
       return true;
     } catch (e) {
-      if (active && !governanceSigned) {
-        addToast('Governance change blocked: once the partnership is active, changing the registry needs TWO partner signatures. Raise a "Governance change" sign-off request in Approvals first.', 'error');
-      } else {
-        addToast('Could not save: ' + e.message, 'error');
-      }
+      addToast('Could not save: ' + e.message, 'error');
       return false;
     }
+  };
+  // Apply a fully-signed staged governance change (admin session required —
+  // firestore.rules allow the settings/partnership write only for admin).
+  const applyStaged = async (a) => {
+    if (!isManager) return addToast('An admin must apply the change (rules restrict the registry write to admin).', 'error');
+    if (!isDualSigned(a) || !a?.staged?.next) return;
+    try {
+      await setDoc(doc(db, ...sPath('settings', 'partnership')), a.staged.next, { merge: true });
+      logAction('admin', 'partnership_update', 'partnership', { label: a.note }, `${a.note} (dual-signed)`);
+      try { await deleteDoc(doc(db, ...sPath('pending_actions', a.id))); } catch { /* cleanup only */ }
+      addToast(`Applied: ${a.note}`, 'success');
+    } catch (e) { addToast('Apply failed: ' + e.message, 'error'); }
   };
 
   // ── Partner registry save (admin) ─────────────────────────────────────────
@@ -116,8 +163,11 @@ const Partnership = ({
       const activeCount = Object.values(nextPartners).filter(p => p.active !== false).length;
       const ok = await savePartnershipDoc(
         { partners: nextPartners, min_partners_met: activeCount >= 2 },
-        `Partner saved: ${emp.name}`);
-      if (ok) {
+        `Add/update partner: ${emp.name}`);
+      if (ok === 'staged') {
+        // Auto-raised approval — the change applies once another partner signs.
+        setPartnerModal(null);
+      } else if (ok) {
         addToast(`Partner ${emp.name} saved.${activeCount >= 2 ? '' : ' Add a second active partner to switch the controls on.'}`, 'success');
         setPartnerModal(null);
       }
@@ -215,7 +265,16 @@ const Partnership = ({
     try {
       await updateDoc(doc(db, ...sPath('pending_actions', a.id)), patch);
       logAction('admin', 'sign_dual_sign', a.id, {}, `Signed: ${a.type}`);
-      addToast('Signed.', 'success');
+      // Staged governance change + this signature completes the pair → apply
+      // immediately when this signer is an admin; otherwise the admin's
+      // "Apply" button (or their next save) finishes it.
+      const nowSigned = isDualSigned({ ...a, ...patch });
+      if (nowSigned && a.id === 'partnership_settings' && a.staged?.next) {
+        if (isManager) await applyStaged({ ...a, ...patch });
+        else addToast('Fully signed. The admin can now apply the change from Approvals.', 'success');
+      } else {
+        addToast('Signed.', 'success');
+      }
     } catch (e) { addToast('Error: ' + e.message, 'error'); }
   };
 
@@ -461,7 +520,7 @@ const Partnership = ({
                     <div key={a.id} className="py-3 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-slate-800 flex items-center gap-2">
-                          {a.type === 'fy_close' ? `Close FY ${a.key}` : a.type === 'invoice_cancel' ? `Cancel invoice ${a.note || a.key}` : 'Governance change'}
+                          {a.type === 'fy_close' ? `Close FY ${a.key}` : a.type === 'invoice_cancel' ? `Cancel invoice ${a.note || a.key}` : (a.note || 'Governance change')}
                           {done && <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">FULLY SIGNED</span>}
                         </div>
                         <div className="text-xs text-slate-400">
@@ -473,6 +532,12 @@ const Partnership = ({
                           title={a.sig1?.emp === currentEmpId ? 'A DIFFERENT partner must counter-sign' : ''}
                           className="flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-40">
                           <PenLine size={13} /> Sign
+                        </button>
+                      )}
+                      {done && a.staged?.next && isManager && (
+                        <button onClick={() => applyStaged(a)}
+                          className="flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700">
+                          <FileSignature size={13} /> Apply change
                         </button>
                       )}
                     </div>
@@ -560,7 +625,7 @@ const Partnership = ({
                   if (v == null) return;
                   const n = Math.max(0, parseFloat(v) || 0);
                   const ok = await savePartnershipDoc({ approval_threshold: n }, `Threshold → ${n}`);
-                  if (ok) addToast('Threshold saved.', 'success');
+                  if (ok === true) addToast('Threshold saved.', 'success'); // 'staged' already toasted its own message
                 }} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Set threshold</button>
                 <button onClick={() => { setPForm(blankPartner); setPartnerModal({}); }} className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"><Plus size={15} /> Add Partner</button>
               </div>
