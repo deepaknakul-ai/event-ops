@@ -617,7 +617,8 @@ service cloud.firestore {
     match /artifacts/{appId}/public/data/project_financials/{pid} {
       allow read: if isAuthed()
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
-                  && (seesAllParties(appId)
+                  // canViewBooks: partners see all project money (s.12(d)).
+                  && (canViewBooks(appId)
                       || resource.data.get('client_owner_id', '') == userEmpId()
                       || resource.data.get('created_by', '') == userEmpId());
       allow write: if false; // Admin SDK trigger only
@@ -953,7 +954,9 @@ service cloud.firestore {
       // stripped getContacts function instead.
       allow read: if isAuthed()
                   && request.auth.token.firebase.sign_in_provider != 'anonymous'
-                  && (seesAllParties(appId) || resource.data.get('owner_id', '') == userEmpId());
+                  // canViewBooks: a partner reads the full client book (s.12(d));
+                  // writes below stay admin/manager as before.
+                  && (canViewBooks(appId) || resource.data.get('owner_id', '') == userEmpId());
       allow create: if isAdmin(appId)
                     || (hasRole(appId, 'manager') && request.resource.data.get('owner_id', '') == userEmpId());
       allow update: if isAdmin(appId)
